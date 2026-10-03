@@ -1,0 +1,89 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Actors In World</title>
+<script type="importmap">{"imports":{"three":"../vendor/three/three.module.js","three/addons/":"../vendor/three/addons/"}}</script>
+<style>
+  html, body { margin: 0; height: 100%; background: #050608; overflow: hidden; }
+  canvas { display: block; width: 100vw; height: 100vh; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<script type="module">
+// Integration shot: real renderer + environment (teammates) with the actor modules:
+// first-person rig, ball, ball machine, coach humanoid, fp camera.  ?quality=  ?view=fp|swing|coach
+import * as THREE from 'three';
+import { createRenderer } from '../src/render/scene.js';
+import { buildEnvironment } from '../src/render/environment.js';
+import { createFirstPersonRig } from '../src/render/fpRig.js';
+import { createBallView } from '../src/render/ballView.js';
+import { buildBallMachine } from '../src/render/machineView.js';
+import { createHumanoid } from '../src/render/humanoid.js';
+import { createFirstPersonCamera } from '../src/render/fpCamera.js';
+import { readyBody } from './actors-bodies.js';
+import { v3 } from '../src/util/vec3.js';
+
+const qs = new URLSearchParams(location.search);
+const quality = qs.get('quality') || 'high';
+const view = qs.get('view') || 'fp';
+const app = createRenderer(document.getElementById('c'), { quality, dynamicResolution: false });
+app.resize(innerWidth, innerHeight);
+const env = buildEnvironment(app.scene, app.renderer, { quality });
+env.setOpponentsVisible?.(false);
+
+const rig = createFirstPersonRig({ handed: 'right' });
+app.scene.add(rig.root);
+const player = readyBody(2.1, 7.7, view === 'swing'
+  ? { racketAxis: [0.95, 0.25, -0.2], faceNormal: [0.05, 0.1, -1], wristR: [0.45, 1.05, -0.38], wristL: [-0.35, 1.15, -0.25] }
+  : { wristL: [0.03, 1.28, -0.47] });
+
+const machine = buildBallMachine();
+machine.position.set(-0.6, 0, -9.2);
+app.scene.add(machine);
+const coach = createHumanoid({ shirt: '#e8572a', shorts: '#1b2a44', skin: '#9a6648', cap: '#1d2b4a' });
+app.scene.add(coach.root);
+const coachState = { pos: v3(1.6, 0, -7.4), vel: v3(), facing: 0.15, holding: 'swing', stroke: 'forehand', swingPhase: 0.3, handed: 'right' };
+
+// Ball fed by the machine, mid-flight toward the player.
+const ballView = createBallView(app.scene, { halo: qs.get('halo') === '1' });
+const ball = { pos: v3(1.2, 1.25, 1.2), vel: v3(0.5, -1.5, 15), spin: v3(-120, 0, 0), t: 0, atRest: false, id: 7 };
+const fpcam = createFirstPersonCamera(app.camera, { gazeFollow: qs.get('gaze') === '1', fov: 70 });
+
+const dt = 1 / 60;
+for (let i = 0; i < 40; i++) {
+  machine.update(dt, { headYaw: 0.12, headPitch: 0.12 });
+  coach.update(coachState, dt);
+  rig.update(player, dt, { extrapolate: 0 });
+}
+for (let i = 0; i < 8; i++) {
+  ball.pos.x += ball.vel.x * dt; ball.pos.y += ball.vel.y * dt; ball.pos.z += ball.vel.z * dt;
+  ball.vel.y -= 9.81 * dt;
+  ballView.update(ball, dt, 1);
+}
+await rig.ready;
+rig.update(player, dt, {});
+if (view === 'coach') {
+  app.camera.position.set(3.2, 1.5, -3.2);
+  app.camera.lookAt(1.2, 1.0, -7.8);
+  app.camera.fov = 40;
+  app.camera.updateProjectionMatrix();
+} else {
+  fpcam.update({ player, ball }, dt);
+  if (qs.get('pitch')) {
+    app.camera.rotation.set(Number(qs.get('pitch')) * Math.PI / 180, 0, 0, 'YXZ');
+  }
+}
+let n = 0;
+function frame() {
+  env.update?.(dt);
+  app.render(dt);
+  if (++n < 3) requestAnimationFrame(frame);
+  else console.log('WORLD calls', app.renderer.info.render.calls, 'tris', app.renderer.info.render.triangles);
+}
+frame();
+</script>
+</body>
+</html>

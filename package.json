@@ -1,0 +1,14 @@
+{
+  "name": "vibora-padel",
+  "version": "0.1.0",
+  "description": "First-person, camera-tracked padel training simulator for a Mac + TV.",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node tools/serve.mjs 5173",
+    "test": "node --test tests/*.test.mjs",
+    "smoke": "node tools/smoke.mjs",
+    "shot": "node tools/shot.mjs"
+  },
+  "license": "MIT"
+}

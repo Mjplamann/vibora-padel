@@ -1,0 +1,185 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark">
+<title>Víbora UI Harness</title>
+<script type="importmap">{"imports":{"three":"../vendor/three/three.module.js","three/addons/":"../vendor/three/addons/"}}</script>
+<link rel="stylesheet" href="../styles/app.css">
+<style>
+  /* Harness backdrop stands in for the live 3D court (#scene). */
+  #backdrop { position: fixed; inset: 0; width: 100vw; height: 100vh; display: block; object-fit: cover; }
+  img#backdrop { filter: saturate(1.05); }
+</style>
+</head>
+<body>
+<canvas id="backdrop-canvas" hidden></canvas>
+<div id="ui"></div>
+<script type="module">
+// dev/ui.html?screen=<name>[&bg=photo|gradient][&step=body|spot|profile|latency|area][&cal=ok|warn]
+//   [&variant=match|rally|banner|behind][&cursor=1][&focus=<n>][&run=1]
+import { createUI } from '../src/ui/ui.js';
+import { createHandCursor } from '../src/ui/cursor.js';
+import { DRILLS, BESTS, CAMERAS, SHOT, HUD, HUD_RALLY, HUD_MATCH, SUMMARY, poseFrame, poseLandmarks, fakeCameraCanvas, paintCourtBackdrop } from './ui-sample.js';
+
+const qs = new URLSearchParams(location.search);
+const screen = qs.get('screen') || 'hub';
+const variant = qs.get('variant') || '';
+const bg = qs.get('bg') || 'photo';
+const t0 = performance.now();
+const since = () => (performance.now() - t0) / 1000;
+
+// ---- Backdrop
+const playLike = ['play', 'pause'].includes(screen);
+if (bg === 'photo') {
+  const img = document.createElement('img');
+  img.id = 'backdrop';
+  img.alt = '';
+  img.src = playLike ? './ui-assets/bg-play.png' : './ui-assets/bg-menu.png';
+  document.body.prepend(img);
+} else {
+  const c = document.getElementById('backdrop-canvas');
+  c.hidden = false;
+  c.id = 'backdrop';
+  paintCourtBackdrop(c);
+}
+
+const settings = { assist: 'club', latency: 0.11, height: 1.78, handed: 'right', gainLateral: 2.6, gainDepth: 2.2, fov: 72, gazeFollow: true, landingMarker: true, contactGhost: false, halo: false, quality: 'high', voice: 'en', volumes: { master: 0.9, sfx: 1, ambience: 0.45 }, skinTone: '#c58c6a', racketColor: '#e8572a', pip: true, skeleton: true };
+
+const hubData = { drills: DRILLS, bests: BESTS };
+let ui;
+const hudFor = (mode) => (mode === 'match' ? HUD_MATCH : mode === 'rally' ? HUD_RALLY : HUD);
+const handlers = {
+  onStartDrill: () => ui.show('play', { mode: 'drill', hud: HUD }),
+  onStartRally: () => ui.show('play', { mode: 'rally', hud: HUD_RALLY }),
+  onStartMatch: () => ui.show('play', { mode: 'match', hud: HUD_MATCH }),
+  onCalibrate: () => ui.toast('Neutral position saved'),
+  onCameraSelect: () => {},
+  onSettings: (patch) => Object.assign(settings, patch),
+  onPause: () => ui.show('pause'),
+  onResume: () => ui.show('play'),
+  onQuit: () => {},
+  onRestart: () => ui.show('play', { mode: 'drill', hud: HUD }),
+  onReplay: () => ui.toast('Replay: broadcast view'),
+  onUseFallbackControls: () => ui.toast('Mouse controls on'),
+  onScreen: (name) => {
+    if (name === 'camera') ui.show('camera', { cameras: CAMERAS, selectedId: 'cont-1', presetKey: 'iphone-continuity' });
+  },
+};
+// Every handler call is recorded for dev/ui-interact.mjs.
+window.__calls = [];
+for (const k of Object.keys(handlers)) {
+  const fn = handlers[k];
+  handlers[k] = (...args) => { window.__calls.push([k, ...args]); return fn(...args); };
+}
+ui = createUI(document.getElementById('ui'), handlers);
+window.ui = ui;
+ui.settings(settings);
+ui.show('hub', hubData); // seeds the cached hub data the way main.js would
+ui.setCameraPreview(fakeCameraCanvas(poseLandmarks(0)));
+
+const skeletonTick = () => ui.setSkeleton(poseFrame(since()));
+setInterval(skeletonTick, 33);
+skeletonTick();
+
+switch (screen) {
+  case 'loading': ui.setLoading(0.62, 'Loading pose model · full'); break;
+  case 'title': ui.show('title', {}); break;
+  case 'camera': ui.show('camera', { cameras: CAMERAS, selectedId: 'cont-1', presetKey: 'iphone-continuity' }); break;
+  case 'calibrate': runCalibrate(qs.get('step') || 'body'); break;
+  case 'hub': ui.show('hub', hubData); break;
+  case 'drill-intro': ui.show('drill-intro', { drill: DRILLS.find((d) => d.id === (qs.get('drill') || 'fh-drive')), best: BESTS[qs.get('drill') || 'fh-drive'] }); break;
+  case 'play': runPlay(); break;
+  case 'pause': ui.show('play', { mode: 'drill', hud: { ...HUD, lastShot: SHOT } }); ui.shotCard(SHOT); ui.show('pause'); break;
+  case 'results': ui.results(SUMMARY); break;
+  case 'settings': ui.show('settings', settings); break;
+  case 'help': ui.show('help'); break;
+  default: ui.show(screen, {});
+}
+
+function runPlay() {
+  const mode = variant === 'match' ? 'match' : variant === 'rally' ? 'rally' : 'drill';
+  ui.show('play', { mode, hud: hudFor(mode) });
+  ui.shotCard(mode === 'match' ? { ...SHOT, stroke: 'bandeja', speedOut: 17.5, spinRpm: { top: -1320, side: 380, total: 1374 }, netClearance: 0.95, timing: 'late', spacing: 'good', points: null, success: null, notes: ['Contact further in front'] } : SHOT);
+  if (variant === 'banner') ui.banner('¡Por tres!', 'por-tres', { sub: 'Smash out over the back wall · +500' });
+  if (variant === 'fault') ui.banner('Net', 'net', { sub: 'Lift it: clear by half a metre' });
+  if (variant === 'behind' || variant === 'match') ui.ballIndicator({ angle: Math.PI * 0.86 });
+  if (variant === 'prompt') ui.hud({ ...HUD, prompt: 'Raise your racket to start' });
+  if (variant === 'banner') setTimeout(() => {}, 0);
+}
+
+function runCalibrate(step) {
+  ui.show('calibrate', { step, autoAdvance: qs.has('run') || step !== 'body' });
+  const ok = (qs.get('cal') || 'ok') === 'ok';
+  const status = () => {
+    const t = since();
+    if (step === 'body') {
+      return ok
+        ? { bodyInFrame: 1, visible: { head: true, shoulders: true, hips: true, knees: true, ankles: true }, distance: 2.74 + Math.sin(t) * 0.02, still: true, tracking: 'ok' }
+        : { bodyInFrame: 0.8, visible: { head: true, shoulders: true, hips: true, knees: true, ankles: false }, distance: 1.92, still: true, tracking: 'ok' };
+    }
+    if (step === 'spot') return { bodyInFrame: 1, distance: 2.7, still: t > Number(qs.get('still') || 0.8), tracking: 'ok' };
+    if (step === 'area') {
+      const a = Math.min(t, 3.2) * 2.1;
+      return { bodyInFrame: 1, distance: 2.7, tracking: 'ok', offset: { x: Math.cos(a) * 0.38, d: Math.sin(a) * 0.36 } };
+    }
+    return { bodyInFrame: 1, distance: 2.7, still: true, tracking: 'ok' };
+  };
+  // Hold the auto-advance on the body step for the screenshot unless ?run=1.
+  const iv = setInterval(() => {
+    ui.calibration(status());
+  }, 50);
+  if (step === 'latency' && qs.has('run')) {
+    document.querySelector('[data-action="lat-start"]')?.click();
+    // Simulated swings ~105 ms after each flash (+ jitter), as the tracker would report them.
+    let seen = 0;
+    const watch = setInterval(() => {
+      const on = document.querySelector('.lat-flash.on');
+      if (on && !on.dataset.sent) {
+        on.dataset.sent = '1';
+        const tFlash = performance.now();
+        if (seen++ !== 2) setTimeout(() => ui.calibration({ swingAt: tFlash + 98 + Math.random() * 18 }), 120);
+      } else if (!on) {
+        const f = document.querySelector('.lat-flash');
+        if (f) delete f.dataset.sent;
+      }
+      if (seen > 7) clearInterval(watch);
+    }, 8);
+  }
+}
+
+if (qs.has('cursor')) {
+  // Simulated BodySample: right hand raised, pointing at a target element; drives cursor.js.
+  const cursor = createHandCursor({ root: document.getElementById('ui'), ui, onPause: () => ui.show('pause') });
+  const sel = qs.get('cursor') === '1' ? '.btn.go, .play-tile' : qs.get('cursor');
+  const tick = () => {
+    const el = document.querySelector(sel);
+    const r = el ? el.getBoundingClientRect() : { left: innerWidth / 2, top: innerHeight / 2, width: 0, height: 0 };
+    const nx = (r.left + r.width * 0.55) / innerWidth, ny = (r.top + r.height * 0.5) / innerHeight;
+    // Invert cursor.js mapping (shoulder R at x=0.19, y=1.43; k=1).
+    const sx = 0.19, sy = 1.43;
+    const wx = sx + 0.12 + (nx - 0.5) * 0.62, wy = sy - 0.04 + (0.5 - ny) * 0.44;
+    const v = (x, y, z = 0.3) => ({ x, y, z });
+    ui && cursor.update({
+      t: performance.now(), valid: true, dominant: 'R',
+      joints: {
+        nose: v(0, 1.62), eyeL: v(-0.03, 1.66), eyeR: v(0.03, 1.66),
+        shoulderL: v(-0.19, 1.43), shoulderR: v(0.19, 1.43), hipL: v(-0.1, 0.93), hipR: v(0.1, 0.93),
+        wristL: v(-0.22, 0.9), wristR: v(wx, wy), elbowR: v(0.26, 1.2),
+      },
+    });
+    requestAnimationFrame(tick);
+  };
+  setTimeout(tick, 400);
+}
+
+const fi = Number(qs.get('focus') || 0);
+if (fi > 0) {
+  setTimeout(() => {
+    for (let i = 0; i < fi; i++) window.dispatchEvent(new KeyboardEvent('keydown', { key: qs.get('dir') || 'ArrowRight', bubbles: true }));
+  }, 300);
+}
+</script>
+</body>
+</html>

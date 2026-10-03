@@ -1,0 +1,25 @@
+# Third-party notices
+
+Víbora Padel is MIT-licensed (see `LICENSE`). It ships the following third-party files unmodified.
+Everything else (court, hall, rackets, ball, humanoids, textures, sounds, UI) is generated procedurally
+by this project's own code.
+
+| Component | Files | License | Copyright / source |
+|---|---|---|---|
+| three.js r186 | `vendor/three/three.module.js`, `vendor/three/three.core.js`, `vendor/three/addons/**` | MIT — full text in `vendor/three/LICENSE` | © 2010–2026 three.js authors · https://threejs.org |
+| MediaPipe Tasks Vision (Pose Landmarker) | `vendor/mediapipe/vision_bundle.mjs`, `vendor/mediapipe/wasm/*` | Apache License 2.0 — https://www.apache.org/licenses/LICENSE-2.0 | © Google LLC · https://github.com/google-ai-edge/mediapipe (upstream readme: `vendor/mediapipe/README.upstream.md`) |
+| MediaPipe pose landmarker models (lite / full / heavy) | `models/pose_landmarker_*.task` | Apache License 2.0 (model card: https://developers.google.com/mediapipe/solutions/vision/pose_landmarker) | © Google LLC |
+| WebXR Input Profiles — generic hand models | `assets/hands/left.glb`, `assets/hands/right.glb` | MIT — full text in `assets/hands/LICENSE.md` | © 2019 Amazon · https://github.com/immersive-web/webxr-input-profiles |
+| Big Shoulders Display (800, 900) | `fonts/big-shoulders-display-*.woff2` | SIL Open Font License 1.1 — full text in `fonts/LICENSE-big-shoulders.txt` | The Big Shoulders Project Authors |
+| Barlow Semi Condensed (400, 600, 700) | `fonts/barlow-semi-condensed-*.woff2` | SIL Open Font License 1.1 — full text in `fonts/LICENSE-barlow.txt` | © 2017 The Barlow Project Authors |
+
+Notes
+
+- The Apache-2.0 components are redistributed in their original, unmodified form. If you redistribute
+  this project in another form, include a copy of the Apache License 2.0 alongside them.
+- No telemetry and no third-party network calls at runtime: the pose model, WASM runtime, fonts and
+  hand models are loaded from this site with relative URLs, and camera frames never leave the device.
+  The MediaPipe bundle contains built-in usage logging (POSTs to `odml.pa.googleapis.com`); the app
+  answers those requests locally without sending them (`src/app/privacy.js`). The vendored file itself
+  is unmodified.
+- "VÍBORA" and the racket graphics are this project's own designs; no real brand is depicted.

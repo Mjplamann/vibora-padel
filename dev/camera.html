@@ -1,0 +1,447 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Víbora Padel — camera &amp; controls lab</title>
+<style>
+  :root { --bg: #07090d; --panel: #0f141c; --line: #1d2633; --ink: #e6edf5; --dim: #8292a6; --ok: #6fdc8c; --bad: #ff6b6b; --warn: #ffb547; --ball: #e4f14a; --cyan: #5fd3e6; --court: #123a63; }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; background: var(--bg); color: var(--ink); font: 13px/1.4 ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif; }
+  header { display: flex; align-items: baseline; gap: 18px; padding: 16px 22px 10px; }
+  h1 { margin: 0; font-size: 20px; letter-spacing: 0.04em; font-weight: 800; }
+  h1 span { color: var(--ball); }
+  h2 { margin: 0 0 8px; font-size: 13px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--dim); font-weight: 700; }
+  .sub { color: var(--dim); }
+  main { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; padding: 0 22px 22px; }
+  section { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 12px; }
+  .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-bottom: 10px; }
+  select, button { background: #18212d; color: var(--ink); border: 1px solid #2a3647; border-radius: 6px; padding: 6px 10px; font: inherit; }
+  button { cursor: pointer; }
+  button:hover, button:focus-visible, select:focus-visible { border-color: var(--cyan); outline: none; }
+  #view { width: 100%; aspect-ratio: 16 / 9; background: #000; border-radius: 6px; display: block; }
+  .stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; margin-top: 10px; }
+  .stat { background: #0a0e14; border: 1px solid var(--line); border-radius: 6px; padding: 7px 9px; }
+  .stat .k { color: var(--dim); font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; }
+  .stat .v { font-size: 18px; font-weight: 700; font-variant-numeric: tabular-nums; }
+  .stat .v small { font-size: 11px; color: var(--dim); font-weight: 500; }
+  #status { margin-top: 10px; font: 12px/1.45 ui-monospace, monospace; color: var(--dim); max-height: 110px; overflow: auto; white-space: pre-wrap; }
+  .err { display: none; margin-top: 10px; border: 1px solid rgba(255,107,107,0.5); background: rgba(255,107,107,0.08); border-radius: 6px; padding: 10px 12px; }
+  .err b { color: var(--bad); }
+  .err ol { margin: 6px 0 0 18px; padding: 0; }
+  .cams { display: grid; gap: 6px; margin-bottom: 10px; }
+  .cam { display: flex; gap: 8px; align-items: center; background: #0a0e14; border: 1px solid var(--line); border-radius: 6px; padding: 6px 9px; }
+  .tag { font-size: 11px; padding: 1px 7px; border-radius: 9px; background: rgba(95,211,230,0.12); color: var(--cyan); }
+  .tag.preset { background: rgba(228,241,74,0.1); color: var(--ball); }
+  .fb { display: grid; grid-template-columns: 1fr; gap: 8px; }
+  .fb-bottom { display: grid; grid-template-columns: 0.8fr 1.2fr; gap: 12px; align-items: start; margin-top: 8px; }
+  .fb canvas { width: 100%; display: block; border-radius: 6px; background: #05080c; }
+  #front { aspect-ratio: 16 / 9; cursor: crosshair; }
+  #top { aspect-ratio: 10 / 11; width: 100%; }
+  .legend { color: var(--dim); font-size: 12px; margin-top: 8px; }
+  kbd { background: #18212d; border: 1px solid #2a3647; border-bottom-width: 2px; border-radius: 4px; padding: 0 5px; font: 11px ui-monospace, monospace; color: var(--ink); }
+</style>
+</head>
+<body>
+<header>
+  <h1>VÍBORA <span>CAMERA</span> LAB</h1>
+  <div class="sub">camera.js · pose.js (MediaPipe PoseLandmarker) · fallback.js mouse/keyboard controls</div>
+</header>
+<main>
+  <section>
+    <h2>Camera &amp; pose</h2>
+    <div class="row">
+      <button id="refresh">Refresh cameras</button>
+      <select id="model"><option value="lite">lite</option><option value="full" selected>full</option><option value="heavy">heavy</option></select>
+      <button id="open">Open camera + track</button>
+      <button id="stop">Stop</button>
+    </div>
+    <div class="cams" id="cams"></div>
+    <canvas id="view" width="1280" height="720"></canvas>
+    <div class="stats">
+      <div class="stat"><div class="k">Camera</div><div class="v" id="s-res">–</div></div>
+      <div class="stat"><div class="k">Pose fps</div><div class="v" id="s-fps">–</div></div>
+      <div class="stat"><div class="k">Inference</div><div class="v" id="s-inf">–</div></div>
+      <div class="stat"><div class="k">Latency</div><div class="v" id="s-lat">–</div></div>
+      <div class="stat"><div class="k">Delegate</div><div class="v" id="s-del">–</div></div>
+      <div class="stat"><div class="k">People</div><div class="v" id="s-ppl">–</div></div>
+      <div class="stat"><div class="k">Frames</div><div class="v" id="s-frm">–</div></div>
+      <div class="stat"><div class="k">Timestamp</div><div class="v" id="s-ts">–</div></div>
+    </div>
+    <div class="err" id="err"></div>
+    <div id="status"></div>
+  </section>
+  <section>
+    <h2>Fallback controls</h2>
+    <div class="fb">
+      <canvas id="front" width="1280" height="720"></canvas>
+    </div>
+    <div class="fb-bottom">
+      <canvas id="top" width="500" height="550"></canvas>
+      <div>
+        <div class="row">
+          <button id="feed">Feed a ball</button>
+          <button id="auto">Feed + auto-swing <kbd>Space</kbd></button>
+          <select id="hand"><option value="right">right-handed</option><option value="left">left-handed</option></select>
+        </div>
+        <div class="legend">Move the mouse over the player view: the racket follows the pointer on a plane 0.65 m ahead of the eye. Flick through the ball to hit. <kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> / arrows move. The strobe shows the auto-swing every 1/60 s; <span style="color:var(--ball)">●</span> ball, <span style="color:#ff8a5c">●</span> contact. Orange face = forehand face, dark = back face.</div>
+        <div id="fbinfo" class="legend"></div>
+      </div>
+    </div>
+  </section>
+</main>
+<script type="module">
+import { listCameras, openCamera, preferredCamera } from '../src/tracking/camera.js';
+import { createPoseTracker } from '../src/tracking/pose.js';
+import { createFallbackControls, predictBallPath, eyeOf } from '../src/input/fallback.js';
+import { RACKET } from '../src/config.js';
+import { v3 } from '../src/util/vec3.js';
+
+const qs = new URLSearchParams(location.search);
+const AUTO = qs.get('auto') === '1';
+const $ = (id) => document.getElementById(id);
+const log = (s) => { $('status').textContent = `${new Date().toISOString().slice(11, 23)}  ${s}\n` + $('status').textContent; };
+
+// ------------------------------------------------------------------ camera + pose
+let cam = null, tracker = null, lastFrame = null, cams = [];
+const EDGES = [[11, 12], [11, 13], [13, 15], [12, 14], [14, 16], [11, 23], [12, 24], [23, 24], [23, 25], [25, 27], [24, 26], [26, 28], [27, 31], [28, 32], [15, 19], [16, 20], [0, 2], [0, 5], [2, 7], [5, 8]];
+
+function showError(e) {
+  const el = $('err');
+  el.style.display = 'block';
+  el.innerHTML = `<b>${e.title || 'Error'}</b> — ${e.message}${e.help && e.help.length ? `<ol>${e.help.map((h) => `<li>${h}</li>`).join('')}</ol>` : ''}`;
+}
+
+async function refresh(requestPermission = false) {
+  try {
+    cams = await listCameras({ requestPermission });
+    $('cams').innerHTML = cams.map((c, i) => `<label class="cam"><input type="radio" name="cam" value="${i}" ${c === preferredCamera(cams) ? 'checked' : ''}> ${c.label}
+      <span class="tag">${c.kind}</span><span class="tag preset">${c.presetKey}</span>${c.labelsHidden ? '<span class="tag">labels hidden</span>' : ''}</label>`).join('') || '<div class="sub">No cameras.</div>';
+    log(`listCameras → ${cams.length} device(s)`);
+  } catch (e) {
+    showError(e);
+  }
+}
+
+async function start() {
+  stop();
+  $('err').style.display = 'none';
+  const sel = document.querySelector('input[name=cam]:checked');
+  const c = sel ? cams[Number(sel.value)] : null;
+  try {
+    cam = await openCamera({ deviceId: c?.deviceId, width: 1280, height: 720, fps: 60 });
+    log(`openCamera → ${cam.label || 'camera'} ${cam.settings.width}×${cam.settings.height} @ ${cam.settings.frameRate ?? '?'} fps (${cam.kind}/${cam.presetKey})`);
+    $('s-res').innerHTML = `${cam.settings.width}×${cam.settings.height}<small> @${Math.round(cam.settings.frameRate || 0)}</small>`;
+    cam.onEnded(() => log('camera ended'));
+    await refresh();
+    tracker = await createPoseTracker({
+      video: cam.video, model: qs.get('model') || $('model').value, numPoses: 1, delegate: qs.get('delegate') || 'GPU',
+      onFrame: (f) => { lastFrame = f; },
+      onStatus: (s) => log(`pose ${s.phase}: ${s.message}`),
+    });
+    tracker.start();
+  } catch (e) {
+    showError(e);
+    log(`error: ${e.code || e.name}: ${e.message}`);
+    window.__camError = { code: e.code, message: e.message };
+  }
+}
+
+function stop() {
+  if (tracker) tracker.close();
+  if (cam) cam.stop();
+  tracker = null; cam = null; lastFrame = null;
+}
+
+const view = $('view'), vg = view.getContext('2d');
+function drawView() {
+  vg.fillStyle = '#000'; vg.fillRect(0, 0, view.width, view.height);
+  if (cam && cam.video.videoWidth) {
+    const vw = cam.video.videoWidth, vh = cam.video.videoHeight;
+    const s = Math.min(view.width / vw, view.height / vh);
+    const w = vw * s, h = vh * s, x0 = (view.width - w) / 2, y0 = (view.height - h) / 2;
+    vg.drawImage(cam.video, x0, y0, w, h);
+    const p = lastFrame?.people?.[0];
+    if (p) {
+      const P = (i) => [x0 + p.landmarks[i].x * w, y0 + p.landmarks[i].y * h];
+      vg.lineWidth = 4; vg.strokeStyle = 'rgba(95,211,230,0.9)';
+      for (const [a, b] of EDGES) {
+        if (p.landmarks[a].visibility < 0.4 || p.landmarks[b].visibility < 0.4) continue;
+        vg.beginPath(); vg.moveTo(...P(a)); vg.lineTo(...P(b)); vg.stroke();
+      }
+      vg.fillStyle = '#e4f14a';
+      for (let i = 0; i < 33; i++) if (p.landmarks[i].visibility > 0.4) { vg.beginPath(); vg.arc(...P(i), 4, 0, 7); vg.fill(); }
+    }
+  } else {
+    vg.fillStyle = '#8292a6'; vg.font = '28px system-ui'; vg.textAlign = 'center';
+    vg.fillText('No camera open', view.width / 2, view.height / 2);
+  }
+  if (tracker) {
+    const st = tracker.stats;
+    $('s-fps').textContent = st.fps.toFixed(1);
+    $('s-inf').innerHTML = `${st.inferMs.toFixed(1)}<small> ms</small>`;
+    $('s-lat').innerHTML = `${st.latencyMs.toFixed(0)}<small> ms</small>`;
+    $('s-del').textContent = st.delegate || '–';
+    $('s-ppl').textContent = st.people;
+    $('s-frm').textContent = st.frames;
+    $('s-ts').innerHTML = st.captureTime ? 'capture<small>Time</small>' : 'display<small>−1/fps</small>';
+  }
+}
+
+$('refresh').onclick = () => refresh(true);
+$('open').onclick = start;
+$('stop').onclick = stop;
+
+// ------------------------------------------------------------------ fallback controls
+const front = $('front'), fg = front.getContext('2d');
+const top = $('top'), tg = top.getContext('2d');
+let handed = 'right';
+let fb = createFallbackControls({ canvas: front, handed });
+const world = { time: 0, ball: null, player: { pos: v3(2.3, 0, 7.8), height: 1.75, eye: null }, settings: { fov: 70 } };
+world.player.eye = eyeOf(world.player);
+let path = null, pathT0 = 0;
+let strobe = [];
+let contactInfo = null;
+let phys = null;
+try {
+  phys = { ...(await import('../src/physics/racket.js')) };
+} catch { /* optional */ }
+
+function feed(auto) {
+  const side = handed === 'left' ? -1 : 1;
+  world.ball = { pos: v3(-0.8 * side, 1.0, -9.2), vel: v3(4.0 * side, 3.4, 17.2) };
+  path = predictBallPath(world.ball, { maxT: 2.2 });
+  pathT0 = world.time;
+  strobe = [];
+  contactInfo = null;
+  if (auto) fb.triggerAutoSwing();
+}
+$('feed').onclick = () => feed(false);
+$('auto').onclick = () => feed(true);
+addEventListener('keydown', (e) => { if (e.code === 'Space' && !world.ball) feed(false); });
+$('hand').onchange = (e) => {
+  handed = e.target.value;
+  fb.dispose();
+  fb = createFallbackControls({ canvas: front, handed });
+  world.player.pos.x = handed === 'left' ? -2.3 : 2.3;
+  world.player.eye = eyeOf(world.player);
+};
+
+function ballAt(t) {
+  if (!path || !path.length) return null;
+  const i = Math.min(path.length - 1, Math.max(0, Math.round((t - pathT0) * 240)));
+  return path[i];
+}
+
+// projection of a court point into the player's view (camera at eye, -z forward, pitch -6°)
+function project(p, eye, w, h) {
+  const pitch = -6 * Math.PI / 180;
+  const dx = p.x - eye.x, dy = p.y - eye.y, dz = p.z - eye.z;
+  const y = dy * Math.cos(-pitch) - dz * Math.sin(-pitch);
+  const z = dy * Math.sin(-pitch) + dz * Math.cos(-pitch);
+  if (z > -0.05) return null;
+  const f = (h / 2) / Math.tan(35 * Math.PI / 180);
+  return [w / 2 + (dx / -z) * f, h / 2 - (y / -z) * f, -z];
+}
+
+function racketOutline(pose) {
+  const x = v3().crossVectors(pose.axis, pose.normal).normalize();
+  const pts = [];
+  for (let i = 0; i <= 36; i++) {
+    const a = (i / 36) * Math.PI * 2;
+    const lx = Math.cos(a) * (RACKET.faceSemiX + RACKET.frameWidth), ly = Math.sin(a) * (RACKET.faceSemiY + RACKET.frameWidth);
+    pts.push(v3().copy(pose.grip).addScaled(pose.axis, RACKET.faceCenterY + ly).addScaled(x, lx));
+  }
+  return pts;
+}
+
+function drawCourtPersp(eye) {
+  const w = front.width, h = front.height;
+  const g = fg;
+  const sky = g.createLinearGradient(0, 0, 0, h);
+  sky.addColorStop(0, '#0a0f17'); sky.addColorStop(0.45, '#0c1520'); sky.addColorStop(1, '#0b2440');
+  g.fillStyle = sky; g.fillRect(0, 0, w, h);
+  const seg = (a, b, color, lw = 1.5) => {
+    // clip against near plane by sampling
+    g.strokeStyle = color; g.lineWidth = lw; g.beginPath();
+    let started = false;
+    for (let i = 0; i <= 24; i++) {
+      const p = { x: a.x + (b.x - a.x) * i / 24, y: a.y + (b.y - a.y) * i / 24, z: a.z + (b.z - a.z) * i / 24 };
+      const q = project(p, eye, w, h);
+      if (!q) { started = false; continue; }
+      if (!started) { g.moveTo(q[0], q[1]); started = true; } else g.lineTo(q[0], q[1]);
+    }
+    g.stroke();
+  };
+  // floor
+  const floor = [[-5, 10], [5, 10], [5, -10], [-5, -10]].map(([x, z]) => project({ x, y: 0, z: Math.min(z, eye.z - 0.3) }, eye, w, h));
+  if (floor.every(Boolean)) {
+    g.fillStyle = '#123a63'; g.beginPath(); floor.forEach((q, i) => (i ? g.lineTo(q[0], q[1]) : g.moveTo(q[0], q[1]))); g.fill();
+  }
+  const L = 'rgba(255,255,255,0.85)';
+  seg({ x: -5, y: 0, z: -10 }, { x: 5, y: 0, z: -10 }, L);
+  seg({ x: -5, y: 0, z: -10 }, { x: -5, y: 0, z: 10 }, L);
+  seg({ x: 5, y: 0, z: -10 }, { x: 5, y: 0, z: 10 }, L);
+  for (const z of [-6.95, 6.95]) seg({ x: -5, y: 0, z }, { x: 5, y: 0, z }, L);
+  seg({ x: 0, y: 0, z: -6.95 }, { x: 0, y: 0, z: 6.95 }, L);
+  // net
+  seg({ x: -5, y: 0.92, z: 0 }, { x: 0, y: 0.88, z: 0 }, '#f2f2f2', 2.5);
+  seg({ x: 0, y: 0.88, z: 0 }, { x: 5, y: 0.92, z: 0 }, '#f2f2f2', 2.5);
+  for (let x = -5; x <= 5; x += 0.25) seg({ x, y: 0, z: 0 }, { x, y: 0.89, z: 0 }, 'rgba(200,210,220,0.18)', 1);
+  // far glass + side glass outlines
+  seg({ x: -5, y: 3, z: -10 }, { x: 5, y: 3, z: -10 }, 'rgba(95,211,230,0.5)');
+  seg({ x: -5, y: 4, z: -10 }, { x: 5, y: 4, z: -10 }, 'rgba(95,211,230,0.25)');
+  for (const x of [-5, 5]) {
+    seg({ x, y: 3, z: -10 }, { x, y: 3, z: -8 }, 'rgba(95,211,230,0.5)');
+    seg({ x, y: 2, z: -8 }, { x, y: 2, z: -6 }, 'rgba(95,211,230,0.5)');
+    seg({ x, y: 0, z: -10 }, { x, y: 4, z: -10 }, 'rgba(95,211,230,0.35)');
+  }
+}
+
+function drawRacketPersp(pose, eye, alpha = 1, color = '#ff8a5c') {
+  const w = front.width, h = front.height;
+  const pts = racketOutline(pose).map((p) => project(p, eye, w, h));
+  if (pts.some((q) => !q)) return;
+  // face fill shaded by normal facing the viewer
+  const facing = pose.normal.z; // >0 = forehand face toward the player
+  fg.globalAlpha = alpha;
+  fg.fillStyle = facing < 0 ? 'rgba(30,34,40,0.92)' : 'rgba(232,87,42,0.9)';
+  fg.beginPath(); pts.forEach((q, i) => (i ? fg.lineTo(q[0], q[1]) : fg.moveTo(q[0], q[1]))); fg.closePath(); fg.fill();
+  fg.strokeStyle = color; fg.lineWidth = 3; fg.stroke();
+  const butt = project(v3().copy(pose.grip).addScaled(pose.axis, RACKET.buttY), eye, w, h);
+  const throat = project(v3().copy(pose.grip).addScaled(pose.axis, RACKET.faceCenterY - RACKET.faceSemiY), eye, w, h);
+  if (butt && throat) {
+    fg.strokeStyle = '#22262c'; fg.lineWidth = 10; fg.beginPath(); fg.moveTo(...butt); fg.lineTo(...throat); fg.stroke();
+  }
+  const sweet = project(v3().copy(pose.grip).addScaled(pose.axis, RACKET.sweetSpotY), eye, w, h);
+  if (sweet) { fg.fillStyle = '#fff'; fg.beginPath(); fg.arc(sweet[0], sweet[1], 3, 0, 7); fg.fill(); }
+  fg.globalAlpha = 1;
+}
+
+function drawBallPersp(b, eye, alpha = 1) {
+  const q = project(b, eye, front.width, front.height);
+  if (!q) return;
+  const f = (front.height / 2) / Math.tan(35 * Math.PI / 180);
+  const r = Math.max(2, (0.0325 / q[2]) * f);
+  fg.globalAlpha = alpha;
+  fg.fillStyle = '#e4f14a'; fg.beginPath(); fg.arc(q[0], q[1], r, 0, 7); fg.fill();
+  fg.globalAlpha = 1;
+}
+
+function drawTop(eye, pose) {
+  const w = top.width, h = top.height;
+  const sx = (x) => w / 2 + x * (w - 40) / 10, sz = (z) => 20 + (z + 1) * (h - 40) / 11;
+  tg.fillStyle = '#05080c'; tg.fillRect(0, 0, w, h);
+  tg.fillStyle = '#123a63'; tg.fillRect(sx(-5), sz(-1), sx(5) - sx(-5), sz(10) - sz(-1));
+  tg.strokeStyle = 'rgba(255,255,255,0.8)'; tg.lineWidth = 1.5;
+  tg.strokeRect(sx(-5), sz(-1), sx(5) - sx(-5), sz(10) - sz(-1));
+  tg.beginPath(); tg.moveTo(sx(-5), sz(6.95)); tg.lineTo(sx(5), sz(6.95)); tg.moveTo(sx(0), sz(0)); tg.lineTo(sx(0), sz(6.95)); tg.stroke();
+  tg.strokeStyle = '#f2f2f2'; tg.lineWidth = 3; tg.beginPath(); tg.moveTo(sx(-5), sz(0)); tg.lineTo(sx(5), sz(0)); tg.stroke();
+  tg.strokeStyle = 'rgba(95,211,230,0.7)'; tg.lineWidth = 3; tg.beginPath(); tg.moveTo(sx(-5), sz(10)); tg.lineTo(sx(5), sz(10)); tg.stroke();
+  if (path) {
+    tg.strokeStyle = 'rgba(228,241,74,0.45)'; tg.lineWidth = 1.5; tg.setLineDash([4, 4]); tg.beginPath();
+    path.forEach((s, i) => (i ? tg.lineTo(sx(s.x), sz(s.z)) : tg.moveTo(sx(s.x), sz(s.z))));
+    tg.stroke(); tg.setLineDash([]);
+  }
+  for (const s of strobe) {
+    const sw = v3().copy(s.pose.grip).addScaled(s.pose.axis, RACKET.sweetSpotY);
+    tg.fillStyle = 'rgba(255,138,92,0.55)'; tg.beginPath(); tg.arc(sx(sw.x), sz(sw.z), 2.5, 0, 7); tg.fill();
+  }
+  if (contactInfo) {
+    tg.fillStyle = '#ff8a5c'; tg.beginPath(); tg.arc(sx(contactInfo.point.x), sz(contactInfo.point.z), 6, 0, 7); tg.fill();
+  }
+  // player + racket
+  tg.fillStyle = '#5fd3e6'; tg.beginPath(); tg.arc(sx(world.player.pos.x), sz(world.player.pos.z), 7, 0, 7); tg.fill();
+  if (pose) {
+    const a = v3().copy(pose.grip), b = v3().copy(pose.grip).addScaled(pose.axis, RACKET.length - 0.06);
+    tg.strokeStyle = '#ff8a5c'; tg.lineWidth = 3; tg.beginPath(); tg.moveTo(sx(a.x), sz(a.z)); tg.lineTo(sx(b.x), sz(b.z)); tg.stroke();
+  }
+  const b = ballAt(world.time);
+  if (b) { tg.fillStyle = '#e4f14a'; tg.beginPath(); tg.arc(sx(b.x), sz(b.z), 4, 0, 7); tg.fill(); }
+  tg.fillStyle = '#8292a6'; tg.font = '13px system-ui'; tg.fillText('top view · near half', 10, h - 8);
+}
+
+let prevPose = null, prevBallPos = null, lastT = performance.now();
+function stepFallback(dt) {
+  world.time += dt;
+  const b = ballAt(world.time);
+  if (world.ball && b) { world.ball.pos.set(b.x, b.y, b.z); world.ball.vel.set(b.vx, b.vy, b.vz); }
+  if (path && world.time - pathT0 > 2.3) { world.ball = null; }
+  const out = fb.update(dt, world);
+  if (out.moveTarget) { world.player.pos.x = out.moveTarget.x; world.player.pos.z = out.moveTarget.z; world.player.eye = eyeOf(world.player); }
+  const pose = out.racket;
+  if (world.ball && path) strobe.push({ pose, t: world.time });
+  if (strobe.length > 80) strobe.shift();
+  if (phys && prevPose && prevBallPos && b && !contactInfo) {
+    const c = phys.sweptContact(prevPose, pose, prevBallPos, v3(b.x, b.y, b.z), 0.02);
+    if (c) {
+      contactInfo = { point: c.point, offCenter: c.offCenter, speed: pose.vel.length(), t: world.time };
+      $('fbinfo').innerHTML = `Contact at (${c.point.x.toFixed(2)}, ${c.point.y.toFixed(2)}, ${c.point.z.toFixed(2)}) m · racket ${(contactInfo.speed * 3.6).toFixed(0)} km/h · off-centre ${(c.offCenter * 100).toFixed(1)} cm`;
+    }
+  }
+  prevPose = pose;
+  prevBallPos = b ? v3(b.x, b.y, b.z) : null;
+  return pose;
+}
+
+function drawFallback(pose) {
+  const eye = world.player.eye;
+  drawCourtPersp(eye);
+  // strobe of the swing in the player's view
+  strobe.forEach((s, i) => { if (i % 2 === 0) drawRacketPersp(s.pose, eye, 0.12 + 0.3 * (i / strobe.length), 'rgba(255,138,92,0.6)'); });
+  if (path) {
+    for (let k = 0; k < path.length; k += 12) {
+      if (path[k].t + pathT0 > world.time) break;
+      drawBallPersp(path[k], eye, 0.25);
+    }
+  }
+  const b = ballAt(world.time);
+  if (b && world.ball) drawBallPersp(b, eye);
+  if (pose) drawRacketPersp(pose, eye);
+  drawTop(eye, pose);
+}
+
+function loop() {
+  const now = performance.now();
+  const dt = Math.min(0.05, (now - lastT) / 1000);
+  lastT = now;
+  drawView();
+  drawFallback(stepFallback(dt));
+  requestAnimationFrame(loop);
+}
+
+// ------------------------------------------------------------------ headless self-test
+if (AUTO) {
+  // Deterministic fallback strobe: feed + auto-swing, stepped at 60 Hz up to just after contact.
+  feed(true);
+  let pose = null;
+  for (let i = 0; i < 150; i++) {
+    pose = stepFallback(1 / 60);
+    if (contactInfo && world.time > contactInfo.t + 0.18) break;
+  }
+  drawFallback(pose);
+  const fbResult = { contact: contactInfo ? { ...contactInfo, point: { ...contactInfo.point } } : null };
+  await refresh();
+  await start();
+  const t0 = performance.now();
+  while (performance.now() - t0 < 60000 && !(tracker && tracker.stats.frames >= 20)) {
+    drawView();
+    await new Promise((r) => setTimeout(r, 100));
+  }
+  drawView();
+  window.__camResult = {
+    cameras: cams.map(({ label, kind, presetKey, labelsHidden }) => ({ label, kind, presetKey, labelsHidden })),
+    camera: cam ? { label: cam.label, kind: cam.kind, presetKey: cam.presetKey, settings: cam.settings } : null,
+    stats: tracker ? { ...tracker.stats } : null,
+    lastFrame: lastFrame ? { t: lastFrame.t, width: lastFrame.width, height: lastFrame.height, people: lastFrame.people.length } : null,
+    fallback: fbResult,
+    error: window.__camError || null,
+  };
+  window.__ready = true;
+} else {
+  refresh();
+  requestAnimationFrame(loop);
+}
+</script>
+</body>
+</html>

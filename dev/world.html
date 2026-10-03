@@ -1,0 +1,160 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Víbora Padel — world</title>
+<script type="importmap">{"imports":{"three":"../vendor/three/three.module.js","three/addons/":"../vendor/three/addons/"}}</script>
+<style>
+  html, body { margin: 0; height: 100%; background: #050608; overflow: hidden; }
+  canvas { display: block; width: 100vw; height: 100vh; }
+  #hud { position: fixed; left: 12px; bottom: 10px; font: 12px/1.3 ui-monospace, monospace; color: #8fa3b8; opacity: 0.8; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="hud"></div>
+<script type="module">
+import * as THREE from 'three';
+import { createRenderer } from '../src/render/scene.js';
+import { buildEnvironment } from '../src/render/environment.js';
+import { createEffects } from '../src/render/effects.js';
+import { ballFeltTexture, loadFonts } from '../src/render/textures.js';
+
+// ?view=fp|overview|side|top|glass  ?quality=ultra|high|balanced  ?fx=0|1  ?env=hall|room  ?live=1  ?frames=N
+const qs = new URLSearchParams(location.search);
+const view = qs.get('view') || 'fp';
+const quality = qs.get('quality') || 'high';
+const showFx = qs.get('fx') !== '0';
+const live = qs.get('live') === '1';
+const frames = Number(qs.get('frames') || 2);
+
+await loadFonts();
+const canvas = document.getElementById('c');
+const app = createRenderer(canvas, { quality, dynamicResolution: live });
+app.resize(innerWidth, innerHeight);
+addEventListener('resize', () => app.resize(innerWidth, innerHeight));
+
+const t0 = performance.now();
+const overrides = qs.get('turf') ? { turfSize: Number(qs.get('turf')) } : null;
+const env = buildEnvironment(app.scene, app.renderer, { quality, envMode: qs.get('env') || 'hall', overrides, debug: true });
+const buildMs = Math.round(performance.now() - t0);
+const fx = createEffects(app.scene, { net: env.net });
+env.setOpponentsVisible(qs.get('opp') === '1');
+if (qs.get('keyonly') === '1') {
+  for (const l of [...env.lights.fills, env.lights.hemi]) l.visible = false;
+  app.scene.environmentIntensity = 0.0;
+}
+
+// A ball in flight for scale.
+const felt = ballFeltTexture();
+const ball = new THREE.Mesh(
+  new THREE.SphereGeometry(0.0325, 48, 24),
+  new THREE.MeshStandardMaterial({ map: felt, bumpMap: felt.userData.bumpMap, bumpScale: 0.6, roughness: 0.92, emissive: 0x1a1f00 }),
+);
+ball.castShadow = true;
+ball.position.set(1.05, 1.32, 2.4);
+ball.rotation.set(0.4, 1.2, 0.2);
+app.scene.add(ball);
+
+const cam = app.camera;
+const views = {
+  fp: () => {
+    cam.fov = 70;
+    cam.position.set(2.3, 1.64, 7.8);
+    const pitch = THREE.MathUtils.degToRad(-6);
+    cam.lookAt(2.3, 1.64 + Math.tan(pitch) * 10, 7.8 - 10);
+  },
+  overview: () => {
+    cam.fov = 50;
+    cam.position.set(0, 7.2, 15.0);
+    cam.lookAt(0, 0.4, -1.2);
+  },
+  side: () => {
+    cam.fov = 55;
+    cam.position.set(-11.5, 3.2, 3.5);
+    cam.lookAt(0, 1.0, -1.5);
+  },
+  top: () => {
+    cam.fov = 60;
+    cam.position.set(0, 9.6, 0.01);
+    cam.lookAt(0, 0, 0);
+  },
+  glass: () => {
+    cam.fov = 60;
+    cam.position.set(3.4, 1.5, 7.2);
+    cam.lookAt(5, 1.2, 9.6);
+  },
+  feet: () => {
+    cam.fov = 70;
+    cam.position.set(2.3, 1.64, 7.8);
+    cam.lookAt(2.3, 0, 6.7);
+  },
+  fx: () => {
+    cam.fov = 60;
+    cam.position.set(-0.6, 1.5, -5.2);
+    cam.lookAt(-1.6, 0.8, -9.0);
+  },
+  net: () => {
+    cam.fov = 55;
+    cam.position.set(2.5, 1.3, 3.0);
+    cam.lookAt(0.5, 0.7, 0);
+  },
+};
+(views[view] || views.fp)();
+cam.updateProjectionMatrix();
+
+if (showFx) {
+  fx.targets([
+    { id: 'deep-cross', label: 'Deep cross', x0: -5, x1: 0, z0: -9.5, z1: -6.95, points: 100, kind: 'land' },
+    { id: 'line', label: 'Down the line', x0: 2, x1: 5, z0: -9.5, z1: -7.2, points: 60, kind: 'glass-after' },
+  ], 'deep-cross');
+  fx.landingMarker({ x: 2.55, y: 0, z: 5.6 });
+  fx.contactGhost({ x: 2.95, y: 0.98, z: 6.35 });
+  fx.bounce({ x: 0.4, y: 0, z: 3.6 }, 'turf', 16);
+  fx.glassHit({ x: -2.2, y: 1.15, z: -9.99 }, { x: 0, y: 0, z: 1 }, 18);
+  env.addBallMark({ x: -2.2, y: 1.15, z: -10 }, { x: 0, y: 0, z: 1 });
+  fx.netShake(1.2, 12);
+  fx.racketHit({ x: 1.2, y: 1.25, z: 2.6 }, 0.9);
+  if (view === 'fx') {
+    fx.bounce({ x: -1.0, y: 0, z: -7.6 }, 'turf', 18);
+    fx.racketHit({ x: -0.9, y: 1.0, z: -6.6 }, 0.9);
+    fx.glassHit({ x: -2.4, y: 1.0, z: -9.99 }, { x: 0, y: 0, z: 1 }, 20);
+    env.addBallMark({ x: -2.4, y: 1.0, z: -10 }, { x: 0, y: 0, z: 1 });
+    env.addBallMark({ x: -1.7, y: 1.4, z: -10 }, { x: 0, y: 0, z: 1 });
+    fx.netShake(-1.4, 14);
+  }
+  for (let i = 0; i < (view === 'fx' ? 3 : 6); i++) {
+    fx.update(1 / 60);
+    env.update(1 / 60);
+  }
+}
+
+if (qs.get('switch')) app.setQuality(qs.get('switch'));
+const hud = document.getElementById('hud');
+let n = 0;
+let last = performance.now();
+function frame() {
+  const now = performance.now();
+  const dt = Math.min(0.1, (now - last) / 1000);
+  last = now;
+  if (live) {
+    fx.update(dt);
+    env.update(dt);
+  }
+  app.render(live ? dt : 1 / 60);
+  n++;
+  const s = app.stats;
+  hud.textContent = `${view} · ${app.quality} · build ${buildMs} ms · draws ${s.drawCalls} · tris ${(s.triangles / 1000).toFixed(0)}k · fps ${s.fps.toFixed(0)} · pr ${s.pixelRatio}`;
+  if (n === frames) {
+    window.__stats = { drawCalls: s.drawCalls, triangles: s.triangles, buildMs, frameMs: Math.round(s.frameMs) };
+    console.log('WORLD', JSON.stringify(window.__stats));
+    window.__ready = true;
+    if (qs.get('hud') === '0') hud.remove();
+  }
+  if (live || n < frames) requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>

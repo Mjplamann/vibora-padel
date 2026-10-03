@@ -1,0 +1,19 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Actors Dev Harness</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #0b0d12; overflow: hidden; }
+  canvas { display: block; width: 100vw; height: 100vh; }
+  #label { position: fixed; left: 12px; top: 8px; color: #cfd6e4; font: 600 13px/1.4 system-ui, sans-serif; pointer-events: none; white-space: pre; }
+</style>
+<script type="importmap">{"imports":{"three":"../vendor/three/three.module.js","three/addons/":"../vendor/three/addons/"}}</script>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="label"></div>
+<script type="module" src="./actors.js"></script>
+</body>
+</html>

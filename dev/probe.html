@@ -1,0 +1,24 @@
+<!doctype html><html><head><meta charset="utf-8"><title>probe</title>
+<script type="importmap">{"imports":{"three":"../vendor/three/three.module.js","three/addons/":"../vendor/three/addons/"}}</script></head>
+<body style="margin:0;background:#000"><canvas id="c" width="800" height="450"></canvas>
+<script type="module">
+import * as THREE from 'three';
+import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+const r = new THREE.WebGLRenderer({canvas: document.getElementById('c'), antialias: true});
+const s = new THREE.Scene(); const cam = new THREE.PerspectiveCamera(60, 16/9, 0.02, 100); cam.position.set(0,1,3);
+const pm = new THREE.PMREMGenerator(r); s.environment = pm.fromScene(new RoomEnvironment(), 0.04).texture;
+const m = new THREE.Mesh(new THREE.SphereGeometry(0.5, 32, 16), new THREE.MeshStandardMaterial({color: 0xdfff3a, roughness: 0.6})); m.position.y = 1; s.add(m);
+const g = await new GLTFLoader().loadAsync('../assets/hands/right.glb'); g.scene.position.set(0.8,1,1); g.scene.scale.setScalar(3); s.add(g.scene);
+r.render(s, cam);
+const { FilesetResolver, PoseLandmarker } = await import('../vendor/mediapipe/vision_bundle.mjs');
+const t0 = performance.now();
+const fs = await FilesetResolver.forVisionTasks('../vendor/mediapipe/wasm');
+let pl, delegate = 'GPU';
+try { pl = await PoseLandmarker.createFromOptions(fs, {baseOptions:{modelAssetPath:'../models/pose_landmarker_lite.task', delegate:'GPU'}, runningMode:'VIDEO', numPoses:1}); }
+catch(e) { delegate='CPU'; pl = await PoseLandmarker.createFromOptions(fs, {baseOptions:{modelAssetPath:'../models/pose_landmarker_lite.task', delegate:'CPU'}, runningMode:'VIDEO', numPoses:1}); }
+const cv = document.createElement('canvas'); cv.width=320; cv.height=240; cv.getContext('2d').fillRect(0,0,320,240);
+const res = pl.detectForVideo(cv, performance.now());
+window.__probe = {webgl2: r.capabilities.isWebGL2, delegate, poses: res.landmarks.length, hasWorld: Array.isArray(res.worldLandmarks), loadMs: Math.round(performance.now()-t0)};
+console.log('PROBE', JSON.stringify(window.__probe));
+</script></body></html>

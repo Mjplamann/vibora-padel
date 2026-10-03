@@ -1,0 +1,531 @@
+// First-person arms, hands and racket, driven by world.player (court frame).
+// The racket's world transform equals player.racket exactly; the dominant hand is attached
+// to the racket with a canonical grip (see handPose.GRIP), fingers wrapped around the handle.
+import * as THREE from 'three';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import { clone as cloneSkinned } from 'three/addons/utils/SkeletonUtils.js';
+import { buildRacket } from './racket.js';
+import { RACKET } from '../config.js';
+import { createSkinMaterial, createFabricMaterial, limbGeometry, quatFromYZ, canvasTexture, cached } from './actorKit.js';
+import {
+  RIGHT_BIND, analyzeBind, poseHand, handleInArmature, handInRacketMatrix, chainNames,
+  cradleInRacketMatrix, cradleHandleInArmature, blendPoses,
+} from './handPose.js';
+
+const UP = new THREE.Vector3(0, 1, 0);
+const UPPER_ARM = 0.3;
+const FOREARM = 0.265;
+
+// ------------------------------------------------------------ hand models
+
+/** Wraps a loaded GLB hand: bones by name, bind data, canonical frame, skinned mesh. */
+function glbHand(gltf, handed, skinMat) {
+  const scene = gltf.scene;
+  const bones = {};
+  let mesh = null;
+  scene.traverse((o) => {
+    if (o.isBone) bones[o.name] = o;
+    if (o.isSkinnedMesh) mesh = o;
+  });
+  if (!mesh || !bones.wrist) throw new Error('hand glb: missing skin');
+  const bind = {};
+  for (const [name, b] of Object.entries(bones)) bind[name] = { pos: b.position.clone(), quat: b.quaternion.clone() };
+  mesh.material = skinMat;
+  mesh.frustumCulled = false;
+  mesh.castShadow = true;
+  mesh.receiveShadow = true;
+  const frame = analyzeBind(bind, handed);
+  // Place the GLB so canonical hand space = holder space.
+  scene.matrixAutoUpdate = false;
+  scene.matrix.copy(frame.toCanon);
+  scene.matrixWorldNeedsUpdate = true;
+  return {
+    object: scene,
+    bind,
+    frame,
+    apply(pose) {
+      for (const [name, t] of Object.entries(pose)) {
+        const b = bones[name];
+        if (!b) continue;
+        b.position.copy(t.pos);
+        b.quaternion.copy(t.quat);
+      }
+    },
+  };
+}
+
+/** Procedural capsule hand sharing the GLB bind data (used until / unless the GLB loads). */
+function proceduralHand(handed, skinMat) {
+  const sx = handed === 'left' ? -1 : 1;
+  const bind = {};
+  for (const [name, p] of Object.entries(RIGHT_BIND)) {
+    bind[name] = { pos: new THREE.Vector3(p[0] * sx, p[1], p[2]), quat: new THREE.Quaternion() };
+  }
+  const frame = analyzeBind(bind, handed);
+  const root = new THREE.Group();
+  const inner = new THREE.Group();
+  inner.matrixAutoUpdate = false;
+  inner.matrix.copy(frame.toCanon);
+  root.add(inner);
+  const segs = [];
+  const chains = chainNames();
+  const radius = { thumb: 0.0105, index: 0.0088, middle: 0.0092, ring: 0.0086, pinky: 0.0076 };
+  const unit = new THREE.CapsuleGeometry(1, 1, 4, 10);
+  for (const [finger, names] of Object.entries(chains)) {
+    for (let i = finger === 'thumb' ? 0 : 1; i < names.length - 1; i++) {
+      const m = new THREE.Mesh(unit, skinMat);
+      m.castShadow = true;
+      m.userData = { a: names[i], b: names[i + 1], r: radius[finger] * (1 - 0.08 * i) };
+      inner.add(m);
+      segs.push(m);
+    }
+  }
+  // Palm: a flattened rounded box between wrist and knuckles.
+  const palm = new THREE.Mesh(new THREE.SphereGeometry(1, 20, 14), skinMat);
+  palm.castShadow = true;
+  inner.add(palm);
+  const apply = (pose) => {
+    for (const m of segs) {
+      const a = pose[m.userData.a].pos, b = pose[m.userData.b].pos;
+      const len = a.distanceTo(b);
+      m.position.lerpVectors(a, b, 0.5);
+      m.quaternion.setFromUnitVectors(UP, _t1.subVectors(b, a).normalize());
+      m.scale.set(m.userData.r, Math.max(0.001, len * 0.5), m.userData.r);
+    }
+    const w = pose.wrist.pos;
+    const k = _t2.copy(pose['middle-finger-phalanx-proximal'].pos).add(pose['ring-finger-phalanx-proximal'].pos).multiplyScalar(0.5);
+    palm.position.lerpVectors(w, k, 0.55);
+    palm.quaternion.copy(quatFromYZ(_t1.subVectors(k, w), frame.normal));
+    palm.scale.set(0.043, 0.05, 0.016);
+  };
+  return { object: root, bind, frame, apply, procedural: true };
+}
+
+const _t1 = new THREE.Vector3();
+const _t2 = new THREE.Vector3();
+
+let handsPromise = null;
+function loadHandGltfs() {
+  if (!handsPromise) {
+    const loader = new GLTFLoader();
+    const url = (s) => new URL(`../../assets/hands/${s}.glb`, import.meta.url).href;
+    handsPromise = Promise.all([loader.loadAsync(url('left')), loader.loadAsync(url('right'))])
+      .then(([left, right]) => ({ left, right }));
+  }
+  return handsPromise;
+}
+
+// ------------------------------------------------------------ arm meshes
+
+function sweatbandTexture() {
+  return cached('sweatbandTex', () => canvasTexture(64, 64, (ctx, w, h) => {
+    ctx.fillStyle = '#ecebe6';
+    ctx.fillRect(0, 0, w, h);
+    ctx.fillStyle = '#1d2b4a';
+    ctx.fillRect(0, h * 0.44, w, h * 0.12);
+    for (let i = 0; i < 400; i++) { // terry loops
+      ctx.fillStyle = `rgba(0,0,0,${Math.random() * 0.06})`;
+      ctx.fillRect(Math.random() * w, Math.random() * h, 2, 2);
+    }
+  }, { repeat: true }));
+}
+
+function buildArm(skinMat, sleeveMat, bandMat) {
+  const group = new THREE.Group();
+  // Upper arm along -Y from the shoulder, nominal length UPPER_ARM.
+  const upper = new THREE.Group();
+  const upperSkin = new THREE.Mesh(limbGeometry(UPPER_ARM, [[0, 0.05], [0.35, 0.05], [0.65, 0.046], [1, 0.041]], { flatten: 0.9 }), skinMat);
+  const sleeve = new THREE.Mesh(limbGeometry(0.17, [[0, 0.066], [0.6, 0.064], [1, 0.062]], { flatten: 0.92 }), sleeveMat);
+  sleeve.position.y = 0.01;
+  const hem = new THREE.Mesh(new THREE.TorusGeometry(0.061, 0.005, 8, 32), sleeveMat);
+  hem.rotation.x = Math.PI / 2;
+  hem.scale.set(1, 0.92, 1);
+  hem.position.y = -0.165;
+  upper.add(upperSkin, sleeve, hem);
+  // Forearm: elbow -> wrist along -Y; cross-section wider across the radius/ulna.
+  const fore = new THREE.Group();
+  const foreSkin = new THREE.Mesh(limbGeometry(FOREARM, [[0, 0.04], [0.18, 0.044], [0.45, 0.038], [0.8, 0.028], [1, 0.0255]], { flatten: 0.78 }), skinMat);
+  const band = new THREE.Mesh(limbGeometry(0.058, [[0, 0.0285], [0.12, 0.0297], [0.88, 0.0293], [1, 0.0282]], { capSegments: 1, flatten: 0.8 }), bandMat);
+  fore.add(foreSkin, band);
+  group.add(upper, fore);
+  group.traverse((o) => { if (o.isMesh) { o.castShadow = true; o.receiveShadow = true; } });
+  return { group, upper, upperSkin, fore, foreSkin, band };
+}
+
+/** Orients an arm segment group (built along -Y) from a to b; zHint sets its twist. */
+function placeSegment(seg, a, b, zHint, nominal, skinMesh) {
+  const len = a.distanceTo(b);
+  seg.position.copy(a);
+  _t1.subVectors(a, b).normalize(); // local +Y points back toward the segment origin
+  quatFromYZ(_t1, zHint, seg.quaternion);
+  if (skinMesh) skinMesh.scale.y = len / nominal;
+  return len;
+}
+
+/** Two-bone IK: elbow position for shoulder S, wrist T and a pole direction. */
+export function solveElbow(S, T, l1, l2, pole, out = new THREE.Vector3()) {
+  const d = _ik1.subVectors(T, S);
+  const dist = THREE.MathUtils.clamp(d.length(), Math.abs(l1 - l2) + 1e-3, l1 + l2 - 1e-3);
+  d.normalize();
+  const a = Math.acos(THREE.MathUtils.clamp((l1 * l1 + dist * dist - l2 * l2) / (2 * l1 * dist), -1, 1));
+  const perp = _ik2.copy(pole).addScaledVector(d, -pole.dot(d)).normalize();
+  return out.copy(S).addScaledVector(d, Math.cos(a) * l1).addScaledVector(perp, Math.sin(a) * l1);
+}
+const _ik1 = new THREE.Vector3();
+const _ik2 = new THREE.Vector3();
+
+// Integration (main.js): near-eye culling. In a follow-through the arm crosses right in front
+// of the eye and would fill the screen; like a VR rig, segments closer than these distances
+// to renderOpts.eye are hidden for that frame.
+const NEAR_UPPER = 0.28;
+const NEAR_FORE = 0.2;
+const NEAR_RACKET = 0.2;
+// QA framing pass: the racket head fades out between these distances (face centre to eye),
+// unless the ball is near the racket (then it must stay solid: that is the contact).
+const FADE_RACKET_FAR = 0.35;
+const FADE_BALL_NEAR = 0.7;
+const _sd = new THREE.Vector3();
+/** Distance of segment a-b to the nearer of the rendered viewpoint and the tracked eye. */
+function eyeDistance(o, a, b) {
+  const d = segmentDistance(o.eye, a, b);
+  return o.eye2 ? Math.min(d, segmentDistance(o.eye2, a, b)) : d;
+}
+function segmentDistance(p, a, b) {
+  const ab = _sd.subVectors(b, a);
+  const l2 = ab.lengthSq();
+  const u = l2 > 1e-9 ? THREE.MathUtils.clamp((p.x - a.x) * ab.x + (p.y - a.y) * ab.y + (p.z - a.z) * ab.z, 0, l2) / l2 : 0;
+  return Math.hypot(a.x + ab.x * u - p.x, a.y + ab.y * u - p.y, a.z + ab.z * u - p.z);
+}
+
+// ------------------------------------------------------------ rig
+
+/**
+ * @returns {{ root: THREE.Group, update(player, dt, renderOpts?), setHanded(h), setSkin(c), setSleeve(c), racketMesh: THREE.Group, ready: Promise<boolean> }}
+ * renderOpts: { extrapolate?: seconds (<= 0.06), visible?: boolean }
+ */
+export function createFirstPersonRig({ handed = 'right', skinTone = '#c58c6a', sleeveColor = '#1d2b4a', racket = null } = {}) {
+  const root = new THREE.Group();
+  root.name = 'fp-rig';
+  const skinMat = createSkinMaterial(skinTone);
+  const sleeveMat = createFabricMaterial(sleeveColor);
+  const bandMat = new THREE.MeshPhysicalMaterial({
+    map: sweatbandTexture(), roughness: 0.95, sheen: 0.8, sheenRoughness: 0.8, sheenColor: new THREE.Color('#ffffff'),
+  });
+  const racketMesh = racket || buildRacket({ handed });
+  racketMesh.userData.setHanded?.(handed);
+  root.add(racketMesh);
+  // Near-eye fade of the racket: its own materials (buildRacket makes them per racket).
+  const racketMats = [];
+  racketMesh.traverse((o) => {
+    if (!o.isMesh || !o.material) return;
+    for (const m of Array.isArray(o.material) ? o.material : [o.material]) {
+      if (!racketMats.some((r) => r.m === m)) racketMats.push({ m, opacity: m.opacity, transparent: m.transparent, depthWrite: m.depthWrite });
+    }
+  });
+  let racketFade = 1;
+  function setRacketFade(f) {
+    if (Math.abs(f - racketFade) < 0.01 && (f === 1) === (racketFade === 1)) return;
+    racketFade = f;
+    for (const r of racketMats) {
+      if (f >= 1) {
+        r.m.opacity = r.opacity;
+        r.m.transparent = r.transparent;
+        r.m.depthWrite = r.depthWrite;
+      } else {
+        r.m.transparent = true;
+        r.m.depthWrite = false;
+        r.m.opacity = r.opacity * f;
+      }
+    }
+  }
+
+  const arms = { L: buildArm(skinMat, sleeveMat, bandMat), R: buildArm(skinMat, sleeveMat, bandMat) };
+  root.add(arms.L.group, arms.R.group);
+
+  const holders = { L: new THREE.Group(), R: new THREE.Group() };
+  root.add(holders.L, holders.R);
+  const hands = { L: null, R: null };
+  const poses = { L: null, R: null };
+  let state = { handed };
+  let usingGlb = false;
+  let gltfs = null;
+
+  const sideHanded = (side) => (side === 'L' ? 'left' : 'right');
+  const dominantSide = () => (state.handed === 'left' ? 'L' : 'R');
+
+  function installHand(side, model) {
+    const h = holders[side];
+    if (hands[side]) h.remove(hands[side].object);
+    hands[side] = model;
+    h.add(model.object);
+    const dominant = side === dominantSide();
+    if (dominant) {
+      const pose = poseHand(model.bind, model.frame, { mode: 'grip', handle: handleInArmature(model.frame, sideHanded(side)) });
+      model.apply(pose);
+      poses[side] = pose;
+      model.offPoses = null;
+    } else {
+      const relaxed = poseHand(model.bind, model.frame, { mode: 'relaxed' });
+      const cradle = poseHand(model.bind, model.frame, {
+        mode: 'grip', thumb: 'relaxed', handleRadius: RACKET.thickness / 2, handle: cradleHandleInArmature(model.frame, state.handed),
+      });
+      model.offPoses = { relaxed, cradle, blended: blendPoses(relaxed, relaxed, 0), w: 0 };
+      model.apply(relaxed);
+      poses[side] = relaxed;
+    }
+  }
+
+  /** Blends the off hand's fingers between relaxed and cradling (only when it changes). */
+  function applyOffBlend(side, w) {
+    const op = hands[side]?.offPoses;
+    if (!op || Math.abs(op.w - w) < 0.02) return;
+    op.w = w;
+    blendPoses(op.relaxed, op.cradle, w, op.blended);
+    hands[side].apply(op.blended);
+  }
+
+  function installAll() {
+    for (const side of ['L', 'R']) {
+      let model = null;
+      if (gltfs) {
+        try {
+          const src = side === 'L' ? gltfs.left : gltfs.right;
+          model = glbHand({ scene: cloneSkinned(src.scene) }, sideHanded(side), skinMat);
+          usingGlb = true;
+        } catch {
+          model = null;
+        }
+      }
+      installHand(side, model || proceduralHand(sideHanded(side), skinMat));
+    }
+  }
+  installAll();
+
+  const ready = loadHandGltfs().then((g) => {
+    gltfs = g;
+    installAll();
+    return usingGlb;
+  }).catch(() => false);
+
+  // Canonical hand-in-racket transform for the dominant hand, and the off-hand cradle.
+  let handInRacket = handInRacketMatrix(state.handed);
+  let cradleInRacket = cradleInRacketMatrix(state.handed);
+  let cradleW = 0;
+  const throatLocal = new THREE.Vector3(0, 0.1, 0);
+  const vThroat = new THREE.Vector3();
+  const mCradle = new THREE.Matrix4();
+  const pCradle = new THREE.Vector3();
+  const qCradle = new THREE.Quaternion();
+
+  // Scratch
+  const mRacket = new THREE.Matrix4();
+  const mHand = new THREE.Matrix4();
+  const vGrip = new THREE.Vector3();
+  const vAxis = new THREE.Vector3();
+  const vNorm = new THREE.Vector3();
+  const vScale = new THREE.Vector3(1, 1, 1);
+  const qRacket = new THREE.Quaternion();
+  const wristVis = { L: new THREE.Vector3(), R: new THREE.Vector3() };
+  const palmN = { L: new THREE.Vector3(), R: new THREE.Vector3() };
+  const shoulder = new THREE.Vector3();
+  const elbow = new THREE.Vector3();
+  const fwd = new THREE.Vector3();
+  const right = new THREE.Vector3();
+  const tmp = new THREE.Vector3();
+  const tmp2 = new THREE.Vector3();
+  const qTmp = new THREE.Quaternion();
+
+  function racketPoseFrom(player) {
+    if (player.racket) return player.racket;
+    const bc = player.bodyCourt;
+    const hf = bc?.handFrames?.[bc.dominant || dominantSide()];
+    return hf || null;
+  }
+
+  function bodyFacing(player) {
+    const j = player.bodyCourt?.joints;
+    if (j?.shoulderL && j?.shoulderR) {
+      right.set(j.shoulderR.x - j.shoulderL.x, 0, j.shoulderR.z - j.shoulderL.z);
+      if (right.lengthSq() > 1e-4) {
+        right.normalize();
+        fwd.crossVectors(UP, right); // right = +x  =>  forward = -z
+        return;
+      }
+    }
+    right.set(1, 0, 0);
+    fwd.set(0, 0, -1);
+  }
+
+  function update(player, dt = 0, renderOpts = {}) {
+    if (!player || renderOpts.visible === false) {
+      root.visible = false;
+      return;
+    }
+    if ((player.handed === 'left' || player.handed === 'right') && player.handed !== state.handed) setHanded(player.handed);
+    const rp = racketPoseFrom(player);
+    const bc = player.bodyCourt;
+    if (!rp && !bc) {
+      root.visible = false;
+      return;
+    }
+    root.visible = true;
+    arms.L.group.visible = arms.R.group.visible = renderOpts.arms !== false;
+    const scale = (player.height || 1.75) / 1.75;
+    const ex = THREE.MathUtils.clamp(renderOpts.extrapolate || 0, 0, 0.06);
+    bodyFacing(player);
+    const dom = dominantSide();
+    const off = dom === 'R' ? 'L' : 'R';
+
+    // --- racket (exact pose, optionally extrapolated for display)
+    racketMesh.visible = !!rp;
+    if (rp) {
+      vGrip.set(rp.grip.x, rp.grip.y, rp.grip.z);
+      vAxis.set(rp.axis.x, rp.axis.y, rp.axis.z);
+      vNorm.set(rp.normal.x, rp.normal.y, rp.normal.z);
+      if (ex > 0 && rp.vel) vGrip.add(tmp.set(rp.vel.x, rp.vel.y, rp.vel.z).multiplyScalar(ex));
+      if (ex > 0 && rp.angVel) {
+        tmp.set(rp.angVel.x, rp.angVel.y, rp.angVel.z);
+        const w = tmp.length();
+        if (w > 1e-6) {
+          qTmp.setFromAxisAngle(tmp.normalize(), w * ex);
+          vAxis.applyQuaternion(qTmp);
+          vNorm.applyQuaternion(qTmp);
+        }
+      }
+      quatFromYZ(vAxis, vNorm, qRacket);
+      racketMesh.position.copy(vGrip);
+      racketMesh.quaternion.copy(qRacket);
+      racketMesh.updateMatrix();
+      // Dominant hand rides on the racket.
+      mRacket.compose(vGrip, qRacket, vScale);
+      mHand.multiplyMatrices(mRacket, handInRacket);
+      mHand.decompose(holders[dom].position, holders[dom].quaternion, tmp2);
+      wristVis[dom].copy(holders[dom].position);
+      palmN[dom].set(0, 0, 1).applyQuaternion(holders[dom].quaternion);
+      holders[dom].visible = true;
+      // Near-eye culling / fading of the racket (follow-through or a high ready position right in
+      // front of the face would fill a third of the screen).
+      const ce = renderOpts.eye;
+      let fade = 1;
+      if (ce) {
+        tmp.copy(vGrip).addScaledVector(vAxis, RACKET.length + RACKET.buttY);
+        const near = eyeDistance(renderOpts, vGrip, tmp) < NEAR_RACKET;
+        racketMesh.visible = !near;
+        holders[dom].visible = !near;
+        tmp.copy(vGrip).addScaledVector(vAxis, RACKET.faceCenterY);
+        const b = renderOpts.ball;
+        const ballNear = b && Math.hypot(b.x - tmp.x, b.y - tmp.y, b.z - tmp.z) < FADE_BALL_NEAR;
+        if (!ballNear) {
+          const d = tmp.distanceTo(ce);
+          fade = THREE.MathUtils.smoothstep(d, NEAR_RACKET, FADE_RACKET_FAR) * 0.85 + 0.15;
+        }
+      }
+      setRacketFade(fade);
+    }
+
+    // --- joints (tracked, or synthesized for mouse/fallback control)
+    const j = bc?.joints;
+    const eye = player.eye || tmp.set(player.pos.x, (player.height || 1.75) * 0.936, player.pos.z);
+    for (const side of ['L', 'R']) {
+      const sgn = side === 'R' ? 1 : -1;
+      const S = j?.[`shoulder${side}`];
+      if (S) shoulder.set(S.x, S.y, S.z);
+      else shoulder.set(eye.x, eye.y - 0.21 * scale, eye.z).addScaledVector(right, 0.19 * scale * sgn).addScaledVector(fwd, -0.06);
+
+      if (side === off || !rp) {
+        // Off hand from its tracked joints (or a relaxed default when untracked).
+        const W = j?.[`wrist${side}`];
+        const I = j?.[`index${side}`];
+        const P = j?.[`pinky${side}`];
+        const holder = holders[side];
+        if (W && I && P) {
+          wristVis[side].set(W.x, W.y, W.z);
+          tmp.set((I.x + P.x) / 2 - W.x, (I.y + P.y) / 2 - W.y, (I.z + P.z) / 2 - W.z).normalize();
+          // Palm normal from the knuckle triangle (right: (I-W)x(P-W), left: negated).
+          tmp2.set(I.x - W.x, I.y - W.y, I.z - W.z).cross(_t2.set(P.x - W.x, P.y - W.y, P.z - W.z));
+          if (side === 'L') tmp2.negate();
+          if (tmp2.lengthSq() < 1e-8) {
+            const hf = bc?.handFrames?.[side];
+            if (hf) tmp2.set(hf.normal.x, hf.normal.y, hf.normal.z);
+            else tmp2.copy(right).multiplyScalar(-sgn);
+          }
+          tmp2.normalize();
+        } else {
+          wristVis[side].copy(shoulder).addScaledVector(UP, -0.52 * scale).addScaledVector(fwd, 0.16).addScaledVector(right, 0.05 * sgn);
+          tmp.set(0, -0.6, 0).addScaledVector(fwd, 0.8).normalize();
+          tmp2.copy(right).multiplyScalar(-sgn);
+        }
+        holder.position.copy(wristVis[side]);
+        quatFromYZ(tmp, tmp2, holder.quaternion);
+        palmN[side].copy(tmp2);
+        holder.visible = true;
+        // Ready-position cradle: snap the off hand onto the throat when it is close.
+        if (rp && side === off && renderOpts.cradle !== false) {
+          vThroat.copy(throatLocal).applyMatrix4(mRacket);
+          const palmC = _t1.copy(wristVis[side]).addScaledVector(tmp, 0.07);
+          const want = 1 - THREE.MathUtils.smoothstep(palmC.distanceTo(vThroat), 0.1, 0.24);
+          cradleW = dt > 0 ? cradleW + (want - cradleW) * (1 - Math.exp(-10 * dt)) : want;
+          if (cradleW > 0.001) {
+            mCradle.multiplyMatrices(mRacket, cradleInRacket);
+            mCradle.decompose(pCradle, qCradle, tmp2);
+            holder.position.lerp(pCradle, cradleW);
+            holder.quaternion.slerp(qCradle, cradleW);
+            wristVis[side].copy(holder.position);
+            palmN[side].set(0, 0, 1).applyQuaternion(holder.quaternion);
+          }
+          applyOffBlend(side, cradleW);
+        } else if (side === off) applyOffBlend(side, 0);
+      }
+
+      // Elbow: tracked, else IK with the elbow down/out/back.
+      const E = j?.[`elbow${side}`];
+      if (E) {
+        elbow.set(E.x, E.y, E.z);
+        if (side === dom && rp && ex > 0 && rp.vel) elbow.addScaledVector(tmp.set(rp.vel.x, rp.vel.y, rp.vel.z), ex * 0.5);
+      } else {
+        tmp.set(0, -1, 0).addScaledVector(right, 0.55 * sgn).addScaledVector(fwd, -0.35).normalize();
+        solveElbow(shoulder, wristVis[side], UPPER_ARM * scale, FOREARM * scale, tmp, elbow);
+      }
+
+      const arm = arms[side];
+      tmp.copy(palmN[side]);
+      placeSegment(arm.fore, elbow, wristVis[side], tmp, FOREARM, arm.foreSkin);
+      // Sweatband at the wrist end (unscaled), slightly overlapping the hand.
+      const foreLen = elbow.distanceTo(wristVis[side]);
+      arm.band.position.y = -(foreLen - 0.05);
+      // Upper arm: twist so the elbow crease faces forward-ish.
+      tmp2.copy(fwd).addScaledVector(right, -0.3 * sgn);
+      placeSegment(arm.upper, shoulder, elbow, tmp2, UPPER_ARM, arm.upperSkin);
+      const ce = renderOpts.eye;
+      arm.upper.visible = !ce || eyeDistance(renderOpts, shoulder, elbow) > NEAR_UPPER;
+      arm.fore.visible = !ce || eyeDistance(renderOpts, elbow, wristVis[side]) > NEAR_FORE;
+      // A forearm whose hand (and racket) has been culled reads as a stump: hide it too.
+      if (side === dom && rp && !holders[dom].visible) arm.fore.visible = false;
+    }
+    void dt;
+  }
+
+  function setHanded(h) {
+    state = { handed: h === 'left' ? 'left' : 'right' };
+    handInRacket = handInRacketMatrix(state.handed);
+    cradleInRacket = cradleInRacketMatrix(state.handed);
+    racketMesh.userData.setHanded?.(state.handed);
+    installAll();
+  }
+
+  return {
+    root,
+    racketMesh,
+    /** Current near-eye fade of the racket (1 = solid). */
+    get racketFade() { return racketFade; },
+    ready,
+    update,
+    setHanded,
+    setSkin(c) { skinMat.color.set(c); },
+    setSleeve(c) { sleeveMat.color.set(c); sleeveMat.sheenColor.set(c).lerp(new THREE.Color('#ffffff'), 0.45); },
+    /** Debug: canonical wrist position in the racket frame. */
+    wristInRacket() { return new THREE.Vector3().setFromMatrixPosition(handInRacket); },
+    get usingGlb() { return usingGlb; },
+    get poses() { return poses; },
+  };
+}

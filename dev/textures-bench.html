@@ -1,0 +1,22 @@
+<!doctype html><html><head><meta charset="utf-8"><title>tex bench</title>
+<script type="importmap">{"imports":{"three":"../vendor/three/three.module.js","three/addons/":"../vendor/three/addons/"}}</script></head>
+<body style="margin:0;background:#111;color:#ccc;font:12px monospace"><div id="o"></div>
+<script type="module">
+import * as T from '../src/render/textures.js';
+const out = {};
+const time = (k, f) => { const t = performance.now(); f(); out[k] = Math.round(performance.now() - t); };
+const size = Number(new URLSearchParams(location.search).get('turf') || 1024);
+time('turf', () => T.turfTextures(null, { size }));
+time('wear', () => T.courtWearTexture());
+time('mesh', () => T.meshAlphaTexture());
+time('net', () => T.netAlphaTexture());
+time('concrete', () => T.concreteTexture());
+time('panel', () => T.panelTexture());
+time('felt', () => T.ballFeltTexture());
+time('carbon', () => T.carbonTexture());
+time('grip', () => T.gripTexture());
+time('logo', () => T.logoTexture());
+console.log('BENCH', JSON.stringify(out));
+document.getElementById('o').textContent = JSON.stringify(out);
+window.__ready = true;
+</script></body></html>

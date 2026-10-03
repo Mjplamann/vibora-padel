@@ -1,0 +1,295 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Víbora Padel — audio lab</title>
+<style>
+  :root { --bg: #07090d; --panel: #0f141c; --line: #1d2633; --ink: #e6edf5; --dim: #8292a6; --ok: #6fdc8c; --bad: #ff6b6b; --ball: #e4f14a; --cyan: #5fd3e6; }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; background: var(--bg); color: var(--ink); font: 13px/1.35 ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif; }
+  header { display: flex; align-items: baseline; gap: 18px; padding: 16px 22px 8px; flex-wrap: wrap; }
+  h1 { margin: 0; font-size: 20px; letter-spacing: 0.04em; font-weight: 800; }
+  h1 span { color: var(--ball); }
+  .sub { color: var(--dim); }
+  #summary { margin-left: auto; font-variant-numeric: tabular-nums; }
+  .controls { display: flex; gap: 8px; padding: 0 22px 10px; flex-wrap: wrap; align-items: center; }
+  button { background: #18212d; color: var(--ink); border: 1px solid #2a3647; border-radius: 6px; padding: 6px 10px; font: inherit; cursor: pointer; }
+  button:hover, button:focus-visible { border-color: var(--cyan); outline: none; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(360px, 1fr)); gap: 10px; padding: 0 22px 22px; }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 9px 10px 10px; }
+  .card h2 { margin: 0 0 2px; font-size: 14px; display: flex; gap: 8px; align-items: center; }
+  .card h2 .chip { margin-left: auto; font-size: 11px; padding: 1px 7px; border-radius: 10px; font-weight: 600; }
+  .chip.ok { background: rgba(111,220,140,0.14); color: var(--ok); }
+  .chip.bad { background: rgba(255,107,107,0.16); color: var(--bad); }
+  .meta { color: var(--dim); font-size: 11.5px; display: flex; gap: 12px; margin-bottom: 6px; font-variant-numeric: tabular-nums; flex-wrap: wrap; }
+  .meta b { color: var(--ink); font-weight: 600; }
+  canvas { display: block; width: 100%; border-radius: 4px; background: #05070a; }
+  canvas.wave { height: 54px; margin-bottom: 4px; }
+  canvas.spec { height: 92px; }
+  .pad-wrap { display: flex; gap: 10px; align-items: center; color: var(--dim); }
+  #pad { width: 120px; height: 200px; background: #0b2a4a; border: 1px solid #2a3647; border-radius: 4px; cursor: crosshair; }
+</style>
+</head>
+<body>
+<header>
+  <h1>VÍBORA <span>AUDIO</span> LAB</h1>
+  <div class="sub">Offline render through the real graph: HRTF panner · hall convolver · limiter · 48 kHz stereo</div>
+  <div id="summary">rendering…</div>
+</header>
+<div class="controls">
+  <button id="unlock">▶ Unlock live audio</button>
+  <button data-play="racket">Racket</button>
+  <button data-play="racketOff">Mishit</button>
+  <button data-play="bounce">Bounce</button>
+  <button data-play="glass">Glass</button>
+  <button data-play="mesh">Mesh</button>
+  <button data-play="net">Net</button>
+  <button data-play="cord">Cord</button>
+  <button data-play="machine">Machine</button>
+  <button data-play="footstep">Step</button>
+  <button data-play="cheer">Cheer</button>
+  <button data-play="ui">UI</button>
+  <button data-play="rally">Rally demo</button>
+  <button id="amb">Ambience on/off</button>
+  <div class="pad-wrap"><canvas id="pad" width="120" height="200"></canvas><span>click court<br>to set event<br>position</span></div>
+</div>
+<div class="grid" id="grid"></div>
+<script type="module">
+import { createAudio } from '../src/audio/engine.js';
+
+const SR = 48000;
+const EYE = { x: 0.3, y: 1.64, z: 8.2 };
+const FWD = { x: 0, y: -0.1, z: -1 };
+const UP = { x: 0, y: 1, z: 0 };
+
+// name, label, render seconds, trigger
+const CASES = [
+  ['racket-drive', 'Racket · drive 22 m/s, sweet spot', 0.6, (a) => a.racket({ x: 0.75, y: 1.0, z: 7.6 }, { speed: 22, quality: 0.95 })],
+  ['racket-smash', 'Racket · smash 32 m/s', 0.6, (a) => a.racket({ x: 0.35, y: 2.4, z: 7.7 }, { speed: 32, quality: 1 })],
+  ['racket-block', 'Racket · soft block 6 m/s', 0.6, (a) => a.racket({ x: -0.4, y: 1.2, z: 7.6 }, { speed: 6, quality: 0.9 })],
+  ['racket-mishit', 'Racket · frame mishit 18 m/s', 0.6, (a) => a.racket({ x: 0.8, y: 0.9, z: 7.7 }, { speed: 18, quality: 0.15 })],
+  ['bounce-turf', 'Bounce · turf 7 m/s', 0.7, (a) => a.bounce({ x: 0.6, y: 0, z: 5.5 }, 'turf', 7)],
+  ['bounce-soft', 'Bounce · turf 2.5 m/s', 0.7, (a) => a.bounce({ x: 0.4, y: 0, z: 6.5 }, 'turf', 2.5)],
+  ['bounce-out', 'Bounce · outside concrete', 0.7, (a) => a.bounce({ x: 7, y: 0, z: 4 }, 'outsideFloor', 6)],
+  ['glass-back', 'Wall · back glass 14 m/s (behind)', 1.0, (a) => a.wall({ x: 1.2, y: 1.1, z: 10 }, 'glass', 14)],
+  ['glass-side', 'Wall · side glass 8 m/s', 1.0, (a) => a.wall({ x: 5, y: 1.0, z: 8.8 }, 'glass', 8)],
+  ['mesh-side', 'Wall · side mesh 12 m/s', 1.2, (a) => a.wall({ x: 5, y: 1.5, z: 4 }, 'mesh', 12)],
+  ['net', 'Net body 10 m/s', 0.9, (a) => a.net({ x: 0.5, y: 0.5, z: 0 }, 10)],
+  ['cord', 'Net cord', 0.8, (a) => a.cord({ x: -0.6, y: 0.9, z: 0 })],
+  ['machine', 'Ball machine (far baseline)', 1.0, (a) => a.machine({ x: 0, y: 1.0, z: -9.2 })],
+  ['footstep', 'Footstep · split-step 3 m/s', 0.6, (a) => a.footstep({ x: 0.45, y: 0, z: 8.3 }, 3)],
+  ['footstep-run', 'Footstep · sprint 6 m/s', 0.6, (a) => a.footstep({ x: 0.15, y: 0, z: 8.4 }, 6)],
+  ['cheer-big', 'Crowd · ¡Por tres! (level 1)', 5.8, (a) => a.cheer(1)],
+  ['cheer-small', 'Crowd · nice point (level 0.35)', 3.6, (a) => a.cheer(0.35)],
+  ['ui-click', 'UI · click', 0.5, (a) => a.ui('click')],
+  ['ui-confirm', 'UI · confirm', 0.8, (a) => a.ui('confirm')],
+  ['ui-success', 'UI · success', 1.0, (a) => a.ui('success')],
+  ['ambience', 'Ambience · HVAC + chatter + neighbour courts', 9.0, (a) => a.ambience(true)],
+];
+
+// ---------- analysis ----------
+function fft(re, im) {
+  const n = re.length;
+  for (let i = 1, j = 0; i < n; i++) {
+    let bit = n >> 1;
+    for (; j & bit; bit >>= 1) j ^= bit;
+    j ^= bit;
+    if (i < j) { [re[i], re[j]] = [re[j], re[i]]; [im[i], im[j]] = [im[j], im[i]]; }
+  }
+  for (let len = 2; len <= n; len <<= 1) {
+    const ang = (-2 * Math.PI) / len;
+    const wr = Math.cos(ang), wi = Math.sin(ang);
+    for (let i = 0; i < n; i += len) {
+      let cr = 1, ci = 0;
+      for (let k = 0; k < len / 2; k++) {
+        const a = i + k, b = a + len / 2;
+        const tr = re[b] * cr - im[b] * ci, ti = re[b] * ci + im[b] * cr;
+        re[b] = re[a] - tr; im[b] = im[a] - ti; re[a] += tr; im[a] += ti;
+        const ncr = cr * wr - ci * wi; ci = cr * wi + ci * wr; cr = ncr;
+      }
+    }
+  }
+}
+
+const db = (v) => (v > 0 ? 20 * Math.log10(v) : -Infinity);
+
+function metrics(buf) {
+  let peak = 0, ss = 0, nan = 0, n = 0;
+  for (let c = 0; c < buf.numberOfChannels; c++) {
+    const d = buf.getChannelData(c);
+    for (let i = 0; i < d.length; i++) {
+      const v = d[i];
+      if (!Number.isFinite(v)) { nan++; continue; }
+      const a = Math.abs(v);
+      if (a > peak) peak = a;
+      ss += v * v; n++;
+    }
+  }
+  // spectral centroid of the loudest 50 ms
+  const L = buf.getChannelData(0), R = buf.getChannelData(1);
+  return { peak, rms: Math.sqrt(ss / Math.max(1, n)), nan };
+}
+
+const MAGMA = [[0, 0, 4], [28, 16, 68], [79, 18, 123], [129, 37, 129], [181, 54, 122], [229, 80, 100], [251, 135, 97], [254, 194, 135], [252, 253, 191]];
+function cmap(t) {
+  t = Math.max(0, Math.min(1, t)) * (MAGMA.length - 1);
+  const i = Math.min(MAGMA.length - 2, Math.floor(t)), f = t - i;
+  const a = MAGMA[i], b = MAGMA[i + 1];
+  return [a[0] + (b[0] - a[0]) * f, a[1] + (b[1] - a[1]) * f, a[2] + (b[2] - a[2]) * f];
+}
+
+function drawWave(cv, buf) {
+  const w = (cv.width = cv.clientWidth * 2), h = (cv.height = cv.clientHeight * 2);
+  const g = cv.getContext('2d');
+  g.fillStyle = '#05070a'; g.fillRect(0, 0, w, h);
+  g.strokeStyle = '#1a2230'; g.beginPath(); g.moveTo(0, h / 2); g.lineTo(w, h / 2); g.stroke();
+  const colors = ['rgba(95,211,230,0.85)', 'rgba(228,241,74,0.6)'];
+  for (let c = 0; c < 2; c++) {
+    const d = buf.getChannelData(c);
+    const per = d.length / w;
+    g.fillStyle = colors[c];
+    for (let x = 0; x < w; x++) {
+      let lo = 0, hi = 0;
+      const s = Math.floor(x * per), e = Math.min(d.length, Math.floor((x + 1) * per));
+      for (let i = s; i < e; i++) { if (d[i] < lo) lo = d[i]; if (d[i] > hi) hi = d[i]; }
+      g.fillRect(x, h / 2 - hi * h / 2, 1, Math.max(1, (hi - lo) * h / 2));
+    }
+  }
+}
+
+function drawSpec(cv, buf) {
+  const w = (cv.width = cv.clientWidth * 2), h = (cv.height = cv.clientHeight * 2);
+  const g = cv.getContext('2d');
+  const img = g.createImageData(w, h);
+  const L = buf.getChannelData(0), R = buf.getChannelData(1);
+  const N = 2048, hop = Math.max(64, Math.floor(L.length / w));
+  const win = new Float32Array(N).map((_, i) => 0.5 - 0.5 * Math.cos((2 * Math.PI * i) / (N - 1)));
+  const fMin = 40, fMax = 20000;
+  const cols = Math.min(w, Math.floor(L.length / hop));
+  for (let x = 0; x < w; x++) {
+    const start = Math.floor((x / w) * L.length) - N / 2;
+    const re = new Float32Array(N), im = new Float32Array(N);
+    for (let i = 0; i < N; i++) {
+      const k = start + i;
+      re[i] = k >= 0 && k < L.length ? (L[k] + R[k]) * 0.5 * win[i] : 0;
+    }
+    fft(re, im);
+    for (let y = 0; y < h; y++) {
+      const f = fMin * (fMax / fMin) ** (1 - y / (h - 1));
+      const bin = Math.min(N / 2 - 1, Math.round((f / SR) * N));
+      const mag = Math.hypot(re[bin], im[bin]) / (N / 4);
+      const t = (db(mag) + 92) / 80;
+      const [r, gg, b] = cmap(t);
+      const o = (y * w + x) * 4;
+      img.data[o] = r; img.data[o + 1] = gg; img.data[o + 2] = b; img.data[o + 3] = 255;
+    }
+  }
+  g.putImageData(img, 0, 0);
+  g.fillStyle = 'rgba(230,237,245,0.55)'; g.font = '18px ui-monospace, monospace';
+  for (const f of [100, 1000, 10000]) {
+    const y = (1 - Math.log(f / fMin) / Math.log(fMax / fMin)) * (h - 1);
+    g.fillRect(0, y, 10, 1);
+    g.fillText(f >= 1000 ? `${f / 1000}k` : `${f}`, 14, y + 6);
+  }
+}
+
+// ---------- offline renders ----------
+const grid = document.getElementById('grid');
+const results = [];
+let allOk = true;
+for (const [name, label, secs, trigger] of CASES) {
+  // Trigger 0.1 s into the render (via suspend) so the limiter has settled, as it would live.
+  const PRE = 0.1;
+  const ctx = new OfflineAudioContext(2, Math.ceil(SR * (secs + PRE)), SR);
+  const audio = createAudio({ context: ctx, seed: 1234 });
+  await audio.unlock();
+  audio.setListener(EYE, FWD, UP);
+  let triggered;
+  ctx.suspend(PRE).then(() => { triggered = Promise.resolve(trigger(audio)).then(() => ctx.resume()); });
+  const t0 = performance.now();
+  const full = await ctx.startRendering();
+  await triggered;
+  const skip = Math.round(PRE * SR);
+  const buf = new AudioBuffer({ numberOfChannels: 2, length: full.length - skip, sampleRate: SR });
+  for (let c = 0; c < 2; c++) buf.getChannelData(c).set(full.getChannelData(c).subarray(skip));
+  const ms = performance.now() - t0;
+  const m = metrics(buf);
+  const ok = m.nan === 0 && m.peak > 1e-3 && m.peak < 1.0;
+  allOk &&= ok;
+  results.push({ name, peak: +m.peak.toFixed(4), peakDb: +db(m.peak).toFixed(1), rms: +m.rms.toFixed(5), rmsDb: +db(m.rms).toFixed(1), nan: m.nan, ok, renderMs: Math.round(ms) });
+  const card = document.createElement('div');
+  card.className = 'card';
+  card.innerHTML = `<h2>${label}<span class="chip ${ok ? 'ok' : 'bad'}">${ok ? 'PASS' : 'FAIL'}</span></h2>
+    <div class="meta"><span>peak <b>${db(m.peak).toFixed(1)} dBFS</b></span><span>RMS <b>${db(m.rms).toFixed(1)} dBFS</b></span><span>NaN <b>${m.nan}</b></span><span>${secs.toFixed(1)} s</span></div>
+    <canvas class="wave"></canvas><canvas class="spec"></canvas>`;
+  grid.appendChild(card);
+  drawWave(card.querySelector('.wave'), buf);
+  drawSpec(card.querySelector('.spec'), buf);
+}
+document.getElementById('summary').innerHTML = `${results.length} renders · <b style="color:${allOk ? 'var(--ok)' : 'var(--bad)'}">${allOk ? 'all pass' : 'FAILURES'}</b> · peak max ${Math.max(...results.map((r) => r.peakDb)).toFixed(1)} dBFS`;
+window.__audioResults = results;
+window.__audioOk = allOk;
+window.__ready = true;
+
+// ---------- live playground ----------
+let live = null;
+let ambOn = false;
+let evPos = { x: 0.6, z: 5 };
+const pad = document.getElementById('pad');
+function drawPad() {
+  const g = pad.getContext('2d');
+  g.fillStyle = '#0b2a4a'; g.fillRect(0, 0, 120, 200);
+  g.strokeStyle = 'rgba(255,255,255,0.8)'; g.lineWidth = 1;
+  g.strokeRect(10, 10, 100, 180);
+  g.beginPath(); g.moveTo(10, 100); g.lineTo(110, 100); g.stroke();
+  g.beginPath(); g.moveTo(10, 100 - 69.5); g.lineTo(110, 100 - 69.5); g.moveTo(10, 100 + 69.5); g.lineTo(110, 100 + 69.5); g.moveTo(60, 30.5); g.lineTo(60, 169.5); g.stroke();
+  g.fillStyle = '#5fd3e6'; g.beginPath(); g.arc(60 + EYE.x * 10, 100 + EYE.z * 10, 4, 0, 7); g.fill();
+  g.fillStyle = '#e4f14a'; g.beginPath(); g.arc(60 + evPos.x * 10, 100 + evPos.z * 10, 4, 0, 7); g.fill();
+}
+drawPad();
+pad.addEventListener('click', (e) => {
+  const r = pad.getBoundingClientRect();
+  evPos = { x: (e.clientX - r.left - 60) / 10, z: (e.clientY - r.top - 100) / 10 };
+  drawPad();
+});
+async function ensureLive() {
+  if (!live) live = createAudio();
+  await live.unlock();
+  live.setListener(EYE, FWD, UP);
+  return live;
+}
+document.getElementById('unlock').onclick = () => ensureLive();
+document.getElementById('amb').onclick = async () => { const a = await ensureLive(); ambOn = !ambOn; a.ambience(ambOn); };
+document.querySelectorAll('[data-play]').forEach((b) => (b.onclick = async () => {
+  const a = await ensureLive();
+  const p = { x: evPos.x, y: 1.0, z: evPos.z };
+  const k = b.dataset.play;
+  if (k === 'racket') a.racket(p, { speed: 24, quality: 0.95 });
+  else if (k === 'racketOff') a.racket(p, { speed: 18, quality: 0.1 });
+  else if (k === 'bounce') a.bounce({ ...p, y: 0 }, 'turf', 7);
+  else if (k === 'glass') a.wall(p, 'glass', 14);
+  else if (k === 'mesh') a.wall(p, 'mesh', 12);
+  else if (k === 'net') a.net(p, 10);
+  else if (k === 'cord') a.cord(p);
+  else if (k === 'machine') a.machine(p);
+  else if (k === 'footstep') a.footstep({ ...p, y: 0 }, 3);
+  else if (k === 'cheer') a.cheer(1);
+  else if (k === 'ui') a.ui('confirm');
+  else if (k === 'rally') {
+    const seq = [
+      [0, () => a.machine({ x: 0, y: 1, z: -9.2 })],
+      [0.75, () => a.bounce({ x: 1.6, y: 0, z: 6.2 }, 'turf', 7)],
+      [1.05, () => a.wall({ x: 2.0, y: 1.0, z: 10 }, 'glass', 9)],
+      [1.12, () => a.footstep({ x: 0.3, y: 0, z: 8.3 }, 3)],
+      [1.45, () => a.racket({ x: 1.0, y: 0.9, z: 8.6 }, { speed: 24, quality: 0.9 })],
+      [2.1, () => a.cord({ x: -1.2, y: 0.9, z: 0 })],
+      [2.6, () => a.bounce({ x: -2.5, y: 0, z: -3 }, 'turf', 5)],
+      [3.0, () => a.cheer(0.4)],
+    ];
+    seq.forEach(([t, f]) => setTimeout(f, t * 1000));
+  }
+}));
+</script>
+</body>
+</html>
