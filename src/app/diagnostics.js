@@ -75,7 +75,7 @@ function perMode(world) {
 
 /** The diagnostics object (JSON-safe). */
 export function buildDiagnostics(src = {}) {
-  const { world = null, settings = null, tracking = null, calibration = null, pwa = null, stats = null, params = null, env = {}, glasses = null, safety = null, robust = null } = src;
+  const { world = null, settings = null, tracking = null, calibration = null, pwa = null, stats = null, params = null, env = {}, glasses = null, safety = null, robust = null, bodyTracker = null } = src;
   const s = settings || (world && world.settings) || null;
   const T = world && world.timing;
   const cfg = world ? timingConfig(world) : null;
@@ -88,7 +88,7 @@ export function buildDiagnostics(src = {}) {
       version: (pwa && pwa.state && pwa.state.sw && pwa.state.sw.version) || null,
       displayMode: env.displayMode || null,
       url: env.url || null,
-      params: params ? { autopilot: !!params.autopilot, speed: params.speed, drill: params.drill, mode: params.mode, debug: !!params.debug, apProfile: params.apProfile || null } : null,
+      params: params ? { autopilot: !!params.autopilot, speed: params.speed, drill: params.drill, mode: params.mode, debug: !!params.debug, apProfile: params.apProfile || null, apClose: !!params.apClose } : null,
     },
     browser: { ua: env.ua || null, platform: env.platform || null, lang: env.lang || null, cores: env.cores ?? null, memoryGB: env.memory ?? null },
     display: { width: env.width ?? null, height: env.height ?? null, dpr: env.dpr ?? null, screen: env.screen || null },
@@ -114,6 +114,8 @@ export function buildDiagnostics(src = {}) {
     glasses: jsonSafe(glasses),
     safety: jsonSafe(safety),
     robust: robust ? { stats: jsonSafe(robust.stats || null), yawDeg: r3(robust.yawDeg ?? null), sideOn: robust.sideOn ?? null } : null,
+    // Close mode (tracking/body.js): 'full' | 'upper', camera tilt, upperFrames / modeSwitches.
+    bodyTracker: bodyTracker ? jsonSafe({ ...bodyTracker, tilt: bodyTracker.tilt ? { deg: r3(bodyTracker.tilt.deg), confidence: r3(bodyTracker.tilt.confidence) } : null }) : null,
   };
 }
 

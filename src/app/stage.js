@@ -7,23 +7,52 @@ import { createEffects } from '../render/effects.js';
 import { createBallView } from '../render/ballView.js';
 import { buildBallMachine } from '../render/machineView.js';
 import { createHumanoid } from '../render/humanoid.js';
+import { createFirstPersonBody, createTrackedPoser } from '../render/fpBody.js';
+import { humanTemplate } from '../render/humanModel.js';
+import { createDirector, PLAYER_KEY } from '../render/animation/director.js';
 import { buildRacket } from '../render/racket.js';
 import { createFirstPersonRig } from '../render/fpRig.js';
 import { createFirstPersonCamera } from '../render/fpCamera.js';
 import { createViewSync, elbowForRacket } from '../render/reconcile.js';
 import { setActorQuality } from '../render/actorKit.js';
 import { createRearView } from '../render/rearView.js';
-import { isFiniteVec, ballOk, matrixOk } from '../render/safeView.js';
+import { isFiniteVec, ballOk, matrixOk, frameOk } from '../render/safeView.js';
 import { GLASS_VIEW } from '../render/gaze.js';
 import { RACKET, COURT } from '../config.js';
 
+// Kits per role: team colours fixed, the rest (skin tone, hair, headwear, shoes) generated from a
+// seed (skinnedHuman.js kitFor), so every person looks different but stays the same all session.
 const KIT = {
-  coach: { shirt: '#e8572a', shorts: '#1b2a44', skin: '#9a6648', cap: '#1d2b4a' },
-  partner: { shirt: '#eef1f4', shorts: '#1d2b4a', skin: '#c58c6a', cap: '#eef1f4' },
-  rival: { shirt: '#c8263c', shorts: '#16181d', skin: '#b07a5a', cap: '#16181d' },
-  rival2: { shirt: '#c8263c', shorts: '#16181d', skin: '#7b4a33', cap: '#c8263c' },
-  static: { shirt: '#d9dde2', shorts: '#2b2f36', skin: '#a46b4b', cap: '#2b2f36' },
+  coach: { seed: 'coach', kit: { shirt: '#e8572a', trim: '#1d2b4a', shorts: '#1b2a44', shortsTrim: '#e8572a', skin: '#9a6648', headwear: '#1d2b4a', headwearKind: 'cap', hairStyle: 'short', hair: '#16110e' } },
+  partner: { seed: 'partner-B', kit: { shirt: '#eef1f4', trim: '#1d2b4a', shorts: '#1d2b4a', shortsTrim: '#eef1f4' } },
+  rival: { seed: 'rival-C', kit: { shirt: '#c8263c', trim: '#16181d', shorts: '#16181d', shortsTrim: '#c8263c' } },
+  rival2: { seed: 'rival-D', kit: { shirt: '#c8263c', trim: '#eef1f4', shorts: '#16181d', shortsTrim: '#c8263c' } },
+  static: { seed: 'static', kit: { shirt: '#d9dde2', trim: '#2b2f36', shorts: '#2b2f36', shortsTrim: '#d9dde2' } },
 };
+/** The player's own kit (first-person body, replay): navy shirt with orange trim, like the rig's sleeves. */
+function playerKit(settings) {
+  return {
+    shirt: '#1d2b4a', trim: '#e8572a', shorts: '#10131a', shortsTrim: '#e8572a', shoe: '#f4f4f4', shoeAccent: '#e8572a',
+    skin: settings.skinTone || '#c58c6a', hair: '#2a1d16', hairStyle: 'short', headwearKind: 'none', sockHeight: 0.11, wristband: 'racket', panels: true,
+  };
+}
+const SERVER_INDEX = { A: 0, B: 1, C: 0, D: 1 };
+/**
+ * A career player's colours (game/career.js: { shirt, shorts, cap: colour | null, skin, hair? })
+ * over the role kit; the rest of the look (hair style, shoes…) comes from the name seed.
+ */
+function careerKit(base, ck) {
+  if (!ck) return base;
+  const k = { ...base };
+  if (ck.shirt) { k.shirt = ck.shirt; k.shortsTrim = ck.shirt; }
+  if (ck.shorts) { k.shorts = ck.shorts; k.trim = ck.shorts; }
+  if (ck.skin) k.skin = ck.skin;
+  if (ck.hair) k.hair = ck.hair;
+  if ('cap' in ck) {
+    if (ck.cap) { k.headwearKind = 'cap'; k.headwear = ck.cap; k.headwearAccent = ck.shirt || k.headwearAccent; } else k.headwearKind = 'none';
+  }
+  return k;
+}
 
 const tmpV = new THREE.Vector3();
 const tmpEye = new THREE.Vector3();
@@ -31,6 +60,7 @@ const tmpV2 = new THREE.Vector3();
 const fwdV = new THREE.Vector3();
 const upV = new THREE.Vector3();
 const viewDirV = new THREE.Vector3();
+const basisM = new THREE.Matrix4();
 
 /**
  * @param {object} o
@@ -46,8 +76,9 @@ export async function createStage({ canvas, settings, quality, progress = () => 
   app.resize(window.innerWidth, window.innerHeight);
   await progress(0.3, 'Building the club…');
   await tick();
-  // The environment first: it captures the hall into the PMREM reflection maps.
-  const env = buildEnvironment(app.scene, app.renderer, { quality });
+  // The environment first: it captures the hall into the PMREM reflection maps. The venue (club, sunset,
+  // stadium: render/venues/*) is the free-play one from the settings; sessions may switch it (setVenue).
+  const env = buildEnvironment(app.scene, app.renderer, { quality, venue: settings.venue || 'club' });
   env.setOpponentsVisible(false);
   await progress(0.55, 'Stringing the rackets…');
   await tick();
@@ -62,10 +93,28 @@ export async function createStage({ canvas, settings, quality, progress = () => 
   const rig = createFirstPersonRig({ handed: settings.handed, skinTone: settings.skinTone || '#c58c6a', racket });
   app.scene.add(rig.root);
 
-  // Third-person stand-in for the player (replay, attract mode).
-  const self = createHumanoid({ shirt: '#1d2b4a', shorts: '#10131a', skin: settings.skinTone || '#c58c6a', handed: settings.handed, cap: '#e8572a' });
+  // The skinned athlete template (signed-distance body, polygonized once) before any person.
+  await progress(0.6, 'Warming up the players…');
+  await tick();
+  humanTemplate(1);
+  await tick();
+  humanTemplate(0);
+  await tick();
+
+  // Third-person stand-in for the player (replay, attract mode): the same skinned athlete as the
+  // first-person body, its racket hand following the recorded racket in replays.
+  const self = createHumanoid({ kit: playerKit(settings), seed: 'player', handed: settings.handed, height: settings.height || 1.8, racketColor: settings.racketColor || '#e8572a' });
   self.root.visible = false;
   app.scene.add(self.root);
+  // Replays recorded with the tracked joints (replay.js frame.player.bodyCourt) pose the stand-in
+  // from the real upper body instead of the stroke animation.
+  const selfPoser = createTrackedPoser(self.human);
+  // The player's own body in first person (torso, legs, shoes) and its full-body shadow.
+  const fpBody = createFirstPersonBody({ handed: settings.handed, height: settings.height || 1.75, kit: playerKit(settings) });
+  fpBody.root.visible = false;
+  app.scene.add(fpBody.root);
+  // Presence cues (split-steps, reactions, high fives) from the world and its bus events.
+  const director = createDirector();
 
   // Real racket path (replay): the tracked sweet spot around the contact.
   const pathMax = 90;
@@ -100,6 +149,7 @@ export async function createStage({ canvas, settings, quality, progress = () => 
   if (app.xr === undefined) app.xr = null;
   const fpCam = createFirstPersonCamera(app.camera, viewSettings, { getXR: () => app.xr });
   const rearView = createRearView(app);
+  rearView.warm();
   fpCam.mode = 'orbit';
   fpCam.snap();
   app.refreshQuality();
@@ -111,44 +161,112 @@ export async function createStage({ canvas, settings, quality, progress = () => 
   // frames reuse the recorded actor reference, so the same humanoid is driven.
   const pool = new Map();
   let rivalCount = 0;
+  let staticCount = 0;
   function humanoidFor(e) {
     let h = pool.get(e.key);
     if (h) return h;
     const s = e.state || {};
     let kit = KIT.coach;
-    if (e.static) kit = KIT.static;
-    else if (s.team === 0) kit = KIT.partner;
-    else if (s.team === 1 && s.name) kit = rivalCount++ % 2 ? KIT.rival2 : KIT.rival;
-    h = createHumanoid({ ...kit, handed: s.handed || 'right' });
+    let seed = kit.seed;
+    if (e.static) {
+      kit = KIT.static;
+      seed = `static-${staticCount++}`;
+    } else if (s.team === 0) {
+      kit = KIT.partner;
+      seed = `partner-${s.displayName || s.name || 'B'}`;
+    } else if (s.team === 1 && s.name) {
+      kit = rivalCount++ % 2 ? KIT.rival2 : KIT.rival;
+      seed = `rival-${s.displayName || s.name}`;
+    }
+    // Career players (game/career.js): their colours over the role kit, the rest of the look from the
+    // name seed (the same person looks the same in every match); handedness from the player card.
+    h = createHumanoid({ kit: careerKit(kit.kit, s.kit), seed: seed || kit.seed, handed: s.handed || 'right' });
+    h.ctx = { time: 0, ball: null, cue: null, partner: null, racket: null };
     app.scene.add(h.root);
     pool.set(e.key, h);
     return h;
   }
   const live = new Set();
-  function syncActors(entries, dt) {
+  const ballPos = { x: 0, y: 0, z: 0 };
+  // People on court for the director (reused objects, no per-frame allocation).
+  const people = [];
+  const peopleBuf = [];
+  function personAt(i) {
+    if (!peopleBuf[i]) peopleBuf[i] = { key: null, team: null, pos: { x: 0, z: 0 }, state: null, serverIndex: -1 };
+    return peopleBuf[i];
+  }
+  function gatherPeople(w, entries) {
+    people.length = 0;
+    let i = 0;
+    if (w.player && w.player.pos) {
+      const p = personAt(i++);
+      p.key = PLAYER_KEY; p.team = 0; p.state = null; p.serverIndex = 0;
+      p.pos.x = w.player.pos.x; p.pos.z = w.player.pos.z;
+      people.push(p);
+    }
+    for (const e of entries) {
+      if (!e || !e.state || e.static) continue;
+      const s = e.state;
+      // The match autopilot (name A) shares the player's position: it is the player.
+      if (s.name === 'A' && w.player && s.pos === w.player.pos) continue;
+      const p = personAt(i++);
+      p.key = e.key; p.team = s.team === 0 || s.team === 1 ? s.team : 1; p.state = s;
+      p.serverIndex = SERVER_INDEX[s.name] ?? 0;
+      p.pos.x = s.pos.x; p.pos.z = s.pos.z;
+      people.push(p);
+    }
+  }
+  function partnerOf(key, team) {
+    for (const p of people) if (p.team === team && p.key !== key) return p.pos;
+    return null;
+  }
+  function syncActors(entries, dt, w, liveWorld) {
     live.clear();
+    const b = shownBall && !shownBall.atRest && !shownBall.outside ? shownBall.pos : null;
+    if (b) { ballPos.x = b.x; ballPos.y = b.y; ballPos.z = b.z; }
+    const camPos = app.camera.position;
     for (const e of entries) {
       if (!e || !e.state) continue;
       const h = humanoidFor(e);
       h.root.visible = true;
-      h.update(e.state, dt);
+      h.setLodFor(camPos);
+      const c = h.ctx;
+      c.time = w ? w.time : c.time + dt;
+      c.ball = b ? ballPos : null;
+      c.cue = liveWorld && !e.static ? director.cue(e.key) : null;
+      c.partner = c.cue && c.cue.five ? partnerOf(e.key, e.state.team) : null;
+      h.update(e.state, dt, c);
       live.add(e.key);
     }
     for (const [k, h] of pool) {
       if (live.has(k)) continue;
       // Actors of a finished session never come back: free their GPU buffers.
       app.scene.remove(h.root);
-      h.root.traverse((o) => { if (o.geometry) o.geometry.dispose(); });
+      h.dispose ? h.dispose() : h.root.traverse((o) => { if (o.geometry) o.geometry.dispose(); });
       pool.delete(k);
     }
   }
+  // Live actors: entries reused frame to frame (no per-frame allocation).
+  const entryOut = [];
+  const entryOf = new Map();
+  function entry(a) {
+    let e = entryOf.get(a);
+    if (!e) {
+      e = { key: a, state: null, static: false };
+      entryOf.set(a, e);
+    }
+    e.state = a.state;
+    e.static = !!a.static;
+    return e;
+  }
   function actorEntries(w, skip) {
-    const out = [];
-    if (!w) return out;
+    entryOut.length = 0;
+    if (!w) return entryOut;
     if (w.actors) return w.actors; // replay frame
-    if (w.coach) out.push({ key: w.coach, state: w.coach.state, static: !!w.coach.static });
-    if (w.ai) for (const a of w.ai) if (a !== skip) out.push({ key: a, state: a.state, static: !!a.static });
-    return out;
+    if (entryOf.size > 32) entryOf.clear();
+    if (w.coach) entryOut.push(entry(w.coach));
+    if (w.ai) for (const a of w.ai) if (a !== skip) entryOut.push(entry(a));
+    return entryOut;
   }
 
   // Replay cutaway: the enclosure wall between a replay camera and the court (posts, rails,
@@ -166,6 +284,21 @@ export async function createStage({ canvas, settings, quality, progress = () => 
     app.renderer.localClippingEnabled = true;
     for (const m of CUT_MATS) {
       m.clippingPlanes = k ? [cutPlanes[k]] : null;
+      // Merge pass: an alpha-to-coverage material (the wire mesh on MSAA tiers) is not fully clipped
+      // (three.js fades a2c clipping by fwidth), and the cut-away mesh between a replay camera and
+      // the court rendered as dotted noise over the whole court. While the cutaway is on the material
+      // blends instead (as on the balanced tier).
+      if (k && m.alphaToCoverage) {
+        m.userData.cutA2C = true;
+        m.alphaToCoverage = false;
+        m.transparent = true;
+        m.depthWrite = false;
+      } else if (!k && m.userData.cutA2C) {
+        m.userData.cutA2C = false;
+        m.alphaToCoverage = true;
+        m.transparent = false;
+        m.depthWrite = true;
+      }
       m.needsUpdate = true;
     }
   }
@@ -187,6 +320,8 @@ export async function createStage({ canvas, settings, quality, progress = () => 
 
   // First-person body to draw: the player with the shown (predicted) racket and an arm that
   // follows it. One proxy per player object, reused every frame.
+  const selfCtx = { time: 0, ball: null, racket: null, cue: null };
+  const mirrorHidden = [rig.root, fpBody.root];
   let rigFor = null, rigProxy = null, rigBody = null;
   const elbowOut = { x: 0, y: 0, z: 0 };
   function rigPlayer(player, racket) {
@@ -243,7 +378,14 @@ export async function createStage({ canvas, settings, quality, progress = () => 
     }
     shownBall = rb;
     ballView.update(rb, dt, vs.hitFrame ? 1 : o.alpha ?? 1);
-    syncActors(actorEntries(w, o.skipActor), dt);
+    const entries = actorEntries(w, o.skipActor);
+    // Presence cues only for a live world (replay frames have no bus and are rebuilt every frame).
+    const liveWorld = !!(w && w.bus && typeof w.bus.on === 'function');
+    if (liveWorld) {
+      gatherPeople(w, entries);
+      director.update(w, people);
+    }
+    syncActors(entries, dt, w, liveWorld);
     // Machine.
     const m = w && w.machine;
     machine.visible = !!m;
@@ -268,15 +410,31 @@ export async function createStage({ canvas, settings, quality, progress = () => 
     // A live world's racket is already predicted for this frame (game/swingPredict.js); a
     // replay frame's recorded one may still be extrapolated by the caller.
     const predicted = !!(rigOk && vs.racket && w.player.renderRacket !== undefined);
-    rig.update(rigOk ? (predicted ? rigPlayer(w.player, vs.racket) : w.player) : null, dt, {
+    const rigSubject = rigOk ? (predicted ? rigPlayer(w.player, vs.racket) : w.player) : null;
+    rig.update(rigSubject, dt, {
       extrapolate: predicted ? 0 : o.extrapolate || 0, visible: rigOk, eye: viewEye, eye2: rigOk ? w.player.eye : null, ball: rb && !rb.atRest ? rb.pos : null,
       viewDir: app.camera.getWorldDirection(viewDirV),
     });
+    // Own body under the camera + its full-body shadow (same tracked joints and shown racket).
+    if (rigSubject && o.body !== false) {
+      fpBody.update(rigSubject, dt, {
+        visible: true, racket: rigSubject.racket || null, time: w.time, cue: liveWorld ? director.cue(PLAYER_KEY) : null, viewDir: viewDirV, camPos: app.camera.position,
+      });
+    } else fpBody.update(null);
     if (o.selfActor) {
       self.root.visible = true;
-      self.update(o.selfActor, dt);
-      // In replay the tracked racket (ghost) is the racket; the mannequin's own one is hidden.
-      if (self.racket) self.racket.visible = !o.ghostPose;
+      selfCtx.time = w && Number.isFinite(w.time) ? w.time : selfCtx.time + dt;
+      selfCtx.ball = rb && !rb.atRest ? rb.pos : null;
+      // Replay: the racket hand follows the recorded (tracked) racket, drawn as the ghost racket.
+      selfCtx.racket = o.ghostPose && frameOk(o.ghostPose) ? o.ghostPose : null;
+      const pl = w && w.player;
+      const tracked = !!(pl && pl.bodyCourt && pl.bodyCourt.joints && pl.bodyCourt.joints.shoulderL);
+      if (tracked) {
+        self.root.position.set(pl.pos.x, 0, pl.pos.z);
+        self.human.setLodFor(app.camera.position);
+        selfPoser.update(pl, dt, { racket: selfCtx.racket, time: selfCtx.time });
+      } else self.update(o.selfActor, dt, selfCtx);
+      if (self.racket) self.racket.visible = !selfCtx.racket;
     } else self.root.visible = false;
     // Replay aids.
     const path = o.racketPath;
@@ -299,7 +457,7 @@ export async function createStage({ canvas, settings, quality, progress = () => 
       const z = tmpV2.set(gp.normal.x, gp.normal.y, gp.normal.z);
       z.addScaledVector(y, -z.dot(y)).normalize();
       const x = fwdV.crossVectors(y, z);
-      ghostRacket.quaternion.setFromRotationMatrix(new THREE.Matrix4().makeBasis(x, y, z));
+      ghostRacket.quaternion.setFromRotationMatrix(basisM.makeBasis(x, y, z));
     } else ghostRacket.visible = false;
     fpCam.update(cameraWorld(w), dt, o.dtReal ?? dt);
     // Rear-view mirror (settings.glassView 'mirror'): while the ball is behind the eye in the
@@ -349,11 +507,15 @@ export async function createStage({ canvas, settings, quality, progress = () => 
     if (keys.includes('halo')) ballView.setHalo(!!s.halo);
     if (keys.includes('skinTone')) {
       rig.setSkin(s.skinTone);
+      fpBody.setKit({ skin: s.skinTone });
+      self.setKit({ skin: s.skinTone });
     }
+    if (keys.includes('height') && s.height) fpBody.setHeight(s.height);
     if (keys.includes('racketColor')) rig.racketMesh?.userData?.setColor?.(s.racketColor);
     if (keys.includes('handed')) {
       rig.setHanded(s.handed);
       self.setHanded(s.handed);
+      fpBody.setHanded(s.handed);
     }
     if (keys.includes('quality')) {
       app.setQuality(s.quality);
@@ -363,6 +525,14 @@ export async function createStage({ canvas, settings, quality, progress = () => 
 
   function setGaze(on) {
     viewSettings.gazeFollow = !!on;
+  }
+
+  /**
+   * Venue of the hall (render/environment.js env.setVenue: club | sunset | stadium; a no-op when it is
+   * already up). Court materials, actors and the rig persist across venues. Returns the venue metadata.
+   */
+  function setVenue(v) {
+    return env.setVenue(v);
   }
 
   // ---- render safety net ------------------------------------------------------
@@ -435,7 +605,7 @@ export async function createStage({ canvas, settings, quality, progress = () => 
       } else {
         lastXrT = 0;
         app.render(dt);
-        if (rearView.visible && view === 'fp') rearView.render([rig.root]);
+        if (rearView.visible && view === 'fp') rearView.render(mirrorHidden);
       }
     } finally {
       unguardMeshes();
@@ -465,6 +635,14 @@ export async function createStage({ canvas, settings, quality, progress = () => 
     rig,
     fpCam,
     self,
+    fpBody,
+    director,
+    /** Presence counters: people drawn, their triangles, fp body and director stats. */
+    get presence() {
+      let tris = 0;
+      for (const h of pool.values()) tris += h.human.triangles;
+      return { humans: pool.size, humanTriangles: tris, fpBody: { ...fpBody.stats, visible: fpBody.root.visible }, director: { ...director.events } };
+    },
     viewSettings,
     setView,
     get view() { return view; },
@@ -473,6 +651,7 @@ export async function createStage({ canvas, settings, quality, progress = () => 
     listener,
     applySettings,
     setGaze,
+    setVenue,
     resize,
     render,
     rearView,

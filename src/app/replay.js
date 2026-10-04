@@ -12,6 +12,29 @@ const CONTACT_PHASE = { smash: 0.6, serve: 0.6 };
 
 const v3o = (v) => ({ x: v.x, y: v.y, z: v.z });
 
+// Upper-body joints recorded for the replay body (render/fpBody.js createTrackedPoser).
+const REPLAY_JOINTS = ['nose', 'earL', 'earR', 'shoulderL', 'shoulderR', 'elbowL', 'elbowR', 'wristL', 'wristR', 'indexL', 'indexR', 'pinkyL', 'pinkyR', 'hipL', 'hipR'];
+function packJoints(bc) {
+  if (!bc || !bc.joints) return null;
+  const out = new Float32Array(REPLAY_JOINTS.length * 3);
+  REPLAY_JOINTS.forEach((n, i) => {
+    const j = bc.joints[n];
+    out[i * 3] = j ? j.x : NaN;
+    out[i * 3 + 1] = j ? j.y : NaN;
+    out[i * 3 + 2] = j ? j.z : NaN;
+  });
+  return out;
+}
+function lerpJoints(a, b, u, dominant) {
+  const joints = {};
+  REPLAY_JOINTS.forEach((n, i) => {
+    const k = i * 3;
+    if (!Number.isFinite(a[k]) || !Number.isFinite(b[k])) return;
+    joints[n] = { x: a[k] + (b[k] - a[k]) * u, y: a[k + 1] + (b[k + 1] - a[k + 1]) * u, z: a[k + 2] + (b[k + 2] - a[k + 2]) * u };
+  });
+  return { joints, dominant: dominant || 'R' };
+}
+
 function copyActorState(s) {
   return {
     pos: { x: s.pos.x, y: 0, z: s.pos.z },
@@ -56,6 +79,8 @@ export function createRecorder({ seconds = 6, hz = 60 } = {}) {
         height: pl.height,
         handed: pl.handed,
         racket: r ? { grip: v3o(r.grip), axis: v3o(r.axis), normal: v3o(r.normal) } : null,
+        joints: packJoints(pl.bodyCourt),
+        dominant: pl.bodyCourt ? pl.bodyCourt.dominant : null,
       },
       actors,
       machine: m ? { pos: { x: m.pos.x, y: m.pos.y, z: m.pos.z }, state: { headYaw: m.state.headYaw, headPitch: m.state.headPitch } } : null,
@@ -132,9 +157,11 @@ function nlerpV(a, b, u, out = {}) {
  * @param snap recorder.snapshot()
  * @param o { rate = 0.4, from (sim t) }
  */
-export function createReplayPlayer(snap, { rate = 0.4, from = null } = {}) {
+export function createReplayPlayer(snap, { rate = 0.4, from = null, to = null } = {}) {
   const frames = snap.frames;
   const start = from != null ? Math.max(snap.t0, from) : snap.t0;
+  // Optional end of the clip (a highlight stops shortly after its moment).
+  const end = to != null ? Math.max(start + 0.5, Math.min(snap.t1, to)) : snap.t1;
   let t = start;
   let loops = 0;
   let idx = 0;
@@ -177,7 +204,7 @@ export function createReplayPlayer(snap, { rate = 0.4, from = null } = {}) {
         axis: nlerpV(pa.racket.axis, pb.racket.axis, u),
         normal: nlerpV(pa.racket.normal, pb.racket.normal, u),
       } : pa.racket,
-      bodyCourt: null,
+      bodyCourt: pa.joints && pb.joints ? lerpJoints(pa.joints, pb.joints, u, pa.dominant) : null,
     };
     const actors = a.actors.map((e) => {
       const eb = b.actors.find((x) => x.key === e.key);
@@ -204,7 +231,7 @@ export function createReplayPlayer(snap, { rate = 0.4, from = null } = {}) {
       selfActor,
       racketPath: path,
       ghostPose: player.racket,
-      progress: (t - start) / Math.max(1e-6, snap.t1 - start),
+      progress: (t - start) / Math.max(1e-6, end - start),
     };
   }
 
@@ -212,7 +239,7 @@ export function createReplayPlayer(snap, { rate = 0.4, from = null } = {}) {
     /** Advances by real dt; returns false once the clip has looped `maxLoops` times. */
     step(dtReal, maxLoops = 2) {
       t += dtReal * rate;
-      if (t > snap.t1) {
+      if (t > end) {
         loops++;
         t = start;
         idx = 0;
@@ -221,16 +248,123 @@ export function createReplayPlayer(snap, { rate = 0.4, from = null } = {}) {
     },
     frame,
     /** Jumps to sim time `to` (clamped to the clip). */
-    seek(to) {
-      t = Math.min(snap.t1, Math.max(start, to));
+    seek(at) {
+      t = Math.min(end, Math.max(start, at));
       idx = 0;
     },
     /** Contact times of the player's hits inside the clip. */
-    get hits() { return snap.hits.filter((h) => h.t >= start && h.t <= snap.t1).map((h) => h.t); },
+    get hits() { return snap.hits.filter((h) => h.t >= start && h.t <= end).map((h) => h.t); },
     get t() { return t; },
     get rate() { return rate; },
     set rate(r) { rate = r; },
     get loops() { return loops; },
-    get duration() { return snap.t1 - start; },
+    get duration() { return end - start; },
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Replay director: picks the special moments worth an automatic slow-motion replay from the
+// session's bus events: a por tres / por cuatro, a smash winner or a winner by the player in a
+// rally or match, a won rally of 20+ shots, a streak of perfect-timing hits, a shattered glass
+// target. Pure.
+//
+// QA r5: replays interrupted about one match point in three (7.6 per 10 min: every 15-shot rally,
+// either side's). Now only the player's pair's highlights count, a long rally needs 20 shots and the
+// point won, and a match replays at most one moment per game (the best one), rally mode one per 2 min.
+
+/** Moment kinds, by priority (higher wins when two fall in the same window). */
+export const REPLAY_MOMENTS = Object.freeze({
+  'por-tres': Object.freeze({ priority: 5, label: '¡Por tres!', es: 'Por tres', views: Object.freeze(['side', 'broadcast']), rate: 0.35 }),
+  'por-cuatro': Object.freeze({ priority: 5, label: '¡Por cuatro!', es: 'Por cuatro', views: Object.freeze(['broadcast', 'side']), rate: 0.35 }),
+  smash: Object.freeze({ priority: 4.5, label: 'Smash winner', es: 'Remate ganador', views: Object.freeze(['side', 'broadcast']), rate: 0.35 }),
+  'long-rally': Object.freeze({ priority: 4, label: 'What a rally', es: 'Peloteo de', views: Object.freeze(['broadcast', 'ball']), rate: 0.5 }),
+  winner: Object.freeze({ priority: 3, label: 'Winner', es: 'Ganador', views: Object.freeze(['broadcast', 'side']), rate: 0.4 }),
+  target: Object.freeze({ priority: 3, label: 'Glass broken', es: 'Cristal roto', views: Object.freeze(['ball', 'broadcast']), rate: 0.4 }),
+  perfect: Object.freeze({ priority: 2, label: 'Perfect timing', es: 'Golpes perfectos', views: Object.freeze(['side', 'broadcast']), rate: 0.4 }),
+});
+export const LONG_RALLY = 20;
+export const PERFECT_STREAK = 3;
+const SMASH_STROKES = new Set(['smash', 'vibora']);
+
+/**
+ * @param {{ minGap?: number, kinds?: string[], perGame?: boolean }} o minGap: sim s between two
+ *   automatic replays; kinds: which moments may trigger (default all); perGame: at most one replay per
+ *   game of a match (a `rally:outcome` with `gameWon` closes the game). The app asks take(world) once
+ *   the ball is dead.
+ */
+export function createReplayDirector({ minGap = 20, kinds = null, perGame = false } = {}) {
+  let pending = null;
+  let lastAt = -Infinity;
+  let lastPlayerHitT = null;
+  let lastPlayerStroke = null;
+  let perfectRun = 0;
+  let game = 0; // games completed (match): a replay belongs to the game of its moment
+  let replayedGame = -1;
+  const allowed = (k) => !kinds || kinds.includes(k);
+
+  function offer(kind, t, extra = {}) {
+    if (!allowed(kind) || !REPLAY_MOMENTS[kind]) return;
+    if (perGame && replayedGame === game) return;
+    const m = REPLAY_MOMENTS[kind];
+    if (pending && REPLAY_MOMENTS[pending.kind].priority >= m.priority) return;
+    pending = { kind, t: t ?? lastPlayerHitT, label: m.label, es: m.es, views: m.views, rate: m.rate, priority: m.priority, game, ...extra };
+  }
+
+  /** Every bus event of the session (world.bus). */
+  function onBus(type, p, world) {
+    if (!p) return;
+    if (type === 'ball:hit' && p.shot && p.shot.by === 'player' && !p.shot.provisional) {
+      lastPlayerHitT = p.shot.t;
+      lastPlayerStroke = p.shot.stroke || null;
+    } else if (type === 'challenge:perfect' || type === 'timing:perfect') {
+      perfectRun = p.streak || perfectRun + 1;
+      if (perfectRun === PERFECT_STREAK || (perfectRun > PERFECT_STREAK && perfectRun % 5 === 0)) {
+        offer('perfect', lastPlayerHitT, { label: `Perfect timing ×${perfectRun}`, es: `${perfectRun} golpes perfectos` });
+      }
+    } else if (type === 'challenge:target-hit') {
+      offer('target', lastPlayerHitT);
+    } else if (type === 'rally:outcome') {
+      // Only the player's own winning shot (not the partner's, not an opponent's error) is a highlight;
+      // a long rally must be won by the player's pair.
+      const mine = p.winner === 0 && (p.lastBy === 'player' || p.lastBy === undefined);
+      const won = p.winner === 0;
+      const len = Number.isFinite(p.rallyLength) ? p.rallyLength : 0;
+      if ((p.reason === 'por-tres' || p.reason === 'por-cuatro') && mine) offer(p.reason, lastPlayerHitT);
+      else if (mine && p.lastBy === 'player' && (p.reason === 'double-bounce' || p.reason === 'winner') && SMASH_STROKES.has(lastPlayerStroke)) offer('smash', lastPlayerHitT);
+      else if (won && len >= LONG_RALLY) offer('long-rally', lastPlayerHitT, { label: `${len}-shot rally`, es: `Peloteo de ${len}` });
+      else if (mine && p.lastBy === 'player' && (p.reason === 'double-bounce' || p.reason === 'winner')) offer('winner', lastPlayerHitT);
+      if (p.gameWon) game++;
+    }
+    if (world && pending && pending.at === undefined) pending.at = world.time;
+  }
+
+  /**
+   * The moment to replay now, or null. Call when the ball is dead (between points / reps):
+   * respects minGap and drops moments older than 6 s (the recorder keeps 6 s).
+   */
+  function take(world) {
+    if (!pending) return null;
+    const now = world ? world.time : 0;
+    if (pending.t === null || pending.t === undefined || now - pending.t > 5.5) {
+      pending = null;
+      return null;
+    }
+    if (now - lastAt < minGap) {
+      pending = null;
+      return null;
+    }
+    const m = pending;
+    pending = null;
+    lastAt = now;
+    replayedGame = m.game;
+    return m;
+  }
+
+  return {
+    onBus,
+    take,
+    get pending() { return pending; },
+    clear() { pending = null; perfectRun = 0; },
+    resetPerfect() { perfectRun = 0; },
   };
 }

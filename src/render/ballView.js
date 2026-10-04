@@ -2,7 +2,7 @@
 // shadows (floor and nearby glass), a faint additive motion trail, optional halo and flashes,
 // and the round-3 visibility aids (minimum on-screen size, glow, drop-line, reach ring).
 import * as THREE from 'three';
-import { BALL, COURT, SIM } from '../config.js';
+import { BALL, COURT, SIM, RACKET } from '../config.js';
 import { cached, hash2, tileNoise, heightToNormalCanvas, actorQuality } from './actorKit.js';
 
 // Seam of a tennis/padel ball on the unit sphere: s(t) = (a cos t + b cos 3t, a sin t - b sin 3t, 2 sqrt(ab) sin 2t), a + b = 1.
@@ -197,8 +197,83 @@ export function ballDisplayScale(d, minDeg, r = BALL.radius) {
   return Math.max(1, want / (2 * r));
 }
 
+/**
+ * Felt fuzz: a slightly larger shell whose alpha rises toward the silhouette and is broken into
+ * fibres, so the ball's outline reads soft and hairy up close (sub-pixel and invisible far away).
+ */
+function createFuzzMaterial() {
+  return new THREE.ShaderMaterial({
+    uniforms: { uColor: { value: new THREE.Color('#cfe63a') }, uLight: { value: 1 } },
+    vertexShader: /* glsl */ `
+      varying vec3 vN; varying vec3 vV; varying vec3 vL;
+      void main() {
+        vec4 mv = modelViewMatrix * vec4(position, 1.0);
+        vN = normalize(normalMatrix * normal);
+        vV = normalize(-mv.xyz);
+        vL = position;
+        gl_Position = projectionMatrix * mv;
+      }`,
+    fragmentShader: /* glsl */ `
+      uniform vec3 uColor; uniform float uLight;
+      varying vec3 vN; varying vec3 vV; varying vec3 vL;
+      float h(vec3 p) { return fract(sin(dot(p, vec3(12.9898, 78.233, 37.719))) * 43758.5453); }
+      void main() {
+        float rim = 1.0 - abs(dot(normalize(vN), normalize(vV)));
+        float fib = h(floor(normalize(vL) * 140.0));
+        float a = smoothstep(0.35, 1.0, rim) * (0.25 + 0.75 * fib) * 0.55;
+        if (a < 0.02) discard;
+        float lit = 0.45 + 0.55 * max(dot(normalize(vN), normalize(vec3(0.2, 1.0, 0.3))), 0.0);
+        gl_FragColor = vec4(uColor * lit * uLight, a);
+      }`,
+    transparent: true,
+    depthWrite: false,
+  });
+}
+
+/**
+ * Motion blur at speed: the ball swept over a 1/120 s exposure. The trailing hemisphere of a
+ * sphere is pushed back along the velocity in the vertex shader (a capsule), and its alpha is the
+ * time the ball covers each point of the streak: subtle at drive pace, a visible smear on smashes.
+ * The solid ball stays drawn on top, so readability is never traded for the effect.
+ */
+export const BLUR_SHUTTER_S = 1 / 120;
+function createBlurMaterial() {
+  return new THREE.ShaderMaterial({
+    uniforms: {
+      uCenter: { value: new THREE.Vector3() },
+      uDir: { value: new THREE.Vector3(0, 0, 1) },
+      uR: { value: 0.0325 },
+      uLen: { value: 0 },
+      uA: { value: 0 },
+      uColor: { value: new THREE.Color('#d6ec4a') },
+    },
+    vertexShader: /* glsl */ `
+      uniform vec3 uCenter; uniform vec3 uDir; uniform float uR; uniform float uLen;
+      varying float vS;
+      void main() {
+        vec3 n = normalize(position);
+        float back = clamp(-dot(n, uDir) * 3.0, 0.0, 1.0);
+        vec3 p = uCenter + n * uR - uDir * uLen * back;
+        vS = dot(p - uCenter, -uDir) / max(uLen + uR, 1e-4);
+        gl_Position = projectionMatrix * viewMatrix * vec4(p, 1.0);
+      }`,
+    fragmentShader: /* glsl */ `
+      uniform float uA; uniform vec3 uColor;
+      varying float vS;
+      void main() {
+        float s = clamp(vS, 0.0, 1.0);
+        float a = uA * pow(1.0 - s, 1.4) * step(0.0, vS);
+        if (a < 0.004) discard;
+        gl_FragColor = vec4(uColor, a);
+      }`,
+    transparent: true,
+    depthWrite: false,
+  });
+}
+
 const RING_YELLOW = new THREE.Color('#ffd84a');
 const RING_GREEN = new THREE.Color('#3dff7a');
+const GHOST_CYAN = new THREE.Color('#bff7ff');
 
 const TRAIL_N = 28;
 const TRAIL_SECONDS = 0.12;
@@ -219,6 +294,20 @@ export function createBallView(scene, { halo = false, trail = true, shadows = tr
   ball.castShadow = true;
   ball.name = 'ball';
   group.add(ball);
+
+  const fuzzMat = createFuzzMaterial();
+  const fuzz = new THREE.Mesh(new THREE.IcosahedronGeometry(1.07, 3), fuzzMat);
+  fuzz.renderOrder = 2;
+  fuzz.name = 'ball-fuzz';
+  ball.add(fuzz);
+  fuzz.scale.setScalar(r);
+  const blurMat = createBlurMaterial();
+  const blur = new THREE.Mesh(new THREE.SphereGeometry(1, 24, 12), blurMat);
+  blur.frustumCulled = false;
+  blur.renderOrder = 2;
+  blur.visible = false;
+  blur.name = 'ball-blur';
+  group.add(blur);
 
   const blobMat = new THREE.MeshBasicMaterial({ map: blobTexture(), transparent: true, depthWrite: false, color: 0x000000, opacity: 0.6 });
   blobMat.alphaMap = blobTexture();
@@ -271,7 +360,46 @@ export function createBallView(scene, { halo = false, trail = true, shadows = tr
   ring.renderOrder = 7;
   ring.visible = false;
   group.add(ring);
+  // Racket ghost at the planned contact (QA r5, game/swingAssist.js contactGhostPose): a faint
+  // racket face (rim, light fill, throat and handle) drawn in the racket's own frame (origin at the
+  // grip, +Y handle -> tip, +Z face normal), one quad shaded in the fragment shader: one draw call.
+  const GH = { cy: RACKET.faceCenterY, sx: RACKET.faceSemiX + RACKET.frameWidth, sy: RACKET.faceSemiY + RACKET.frameWidth };
+  const ghostMat = new THREE.ShaderMaterial({
+    uniforms: { uA: { value: 0 }, uColor: { value: new THREE.Color('#bff7ff') } },
+    vertexShader: 'varying vec2 vP; void main(){ vP = position.xy; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }',
+    fragmentShader: /* glsl */ `
+      varying vec2 vP; uniform float uA; uniform vec3 uColor;
+      void main() {
+        vec2 q = (vP - vec2(0.0, ${GH.cy.toFixed(4)})) / vec2(${GH.sx.toFixed(4)}, ${GH.sy.toFixed(4)});
+        float e = length(q);
+        float rim = smoothstep(0.82, 0.93, e) * (1.0 - smoothstep(0.98, 1.06, e));
+        float fill = 0.16 * (1.0 - smoothstep(0.9, 0.98, e));
+        float hx = abs(vP.x);
+        float throat = (1.0 - smoothstep(0.014, 0.02, hx)) * step(-0.06, vP.y) * (1.0 - smoothstep(${(GH.cy - GH.sy * 0.9).toFixed(4)}, ${(GH.cy - GH.sy * 0.8).toFixed(4)}, vP.y));
+        float a = uA * max(rim + fill, throat * 0.7);
+        if (a < 0.004) discard;
+        gl_FragColor = vec4(uColor, a);
+      }`,
+    transparent: true,
+    depthWrite: false,
+    side: THREE.DoubleSide,
+    blending: THREE.AdditiveBlending,
+  });
+  const ghostGeo = new THREE.PlaneGeometry(GH.sx * 2.2, GH.cy + GH.sy * 1.1 + 0.07);
+  ghostGeo.translate(0, (GH.cy + GH.sy * 1.1 - 0.07) / 2, 0);
+  const ghost = new THREE.Mesh(ghostGeo, ghostMat);
+  ghost.renderOrder = 6;
+  ghost.frustumCulled = false;
+  ghost.visible = false;
+  group.add(ghost);
+  let ghostAlpha = 0;
+  const _gx = new THREE.Vector3(), _gy = new THREE.Vector3(), _gz = new THREE.Vector3(), _gm = new THREE.Matrix4();
+  ghost.onBeforeRender = (renderer, sc, camera) => {
+    const mirror = !!(camera.userData && camera.userData.isMirror);
+    ghostMat.uniforms.uA.value = !mirror && camera === mainCamera ? ghostAlpha : 0;
+  };
   let displayScale = 1;
+  let lineAlpha = 0.42; // the drop-line's opacity for the visibility setting (faded near the eye)
   let ringState = null;
   let ringOpacity = 0;
   let mainCamera = null; // the first camera to draw the ball each frame (the player's view)
@@ -301,6 +429,11 @@ export function createBallView(scene, { halo = false, trail = true, shadows = tr
       dropLine.rotation.y = Math.atan2(_camPos.x - dropLine.position.x, _camPos.z - dropLine.position.z);
       dropLine.scale.x = Math.max(0.005, d * 0.0028);
       dropLine.updateMatrixWorld();
+      // Merge pass: a ball overhead (lob, bandeja, smash) puts its drop-line right through the eye,
+      // where the thin strip filled a third of the picture as a green column. It fades out within
+      // 0.8 m (horizontally) of the camera.
+      const dh = Math.hypot(_camPos.x - dropLine.position.x, _camPos.z - dropLine.position.z);
+      lineMat.uniforms.uA.value = lineAlpha * THREE.MathUtils.smoothstep(dh, 0.35, 0.8);
     }
     if (ring.visible && ringState) {
       const p = ringState.progress;
@@ -329,7 +462,9 @@ export function createBallView(scene, { halo = false, trail = true, shadows = tr
   trailMesh.visible = trail;
   group.add(trailMesh);
 
-  const hist = []; // {x,y,z,t}
+  // Trail history: a fixed pool of points reused in place (no allocation per frame).
+  const histPool = Array.from({ length: TRAIL_N + 2 }, () => ({ x: 0, y: 0, z: 0, t: 0 }));
+  const hist = []; // views into histPool, oldest first
   let clock = 0;
   let lastId = null;
   let visible = true;
@@ -379,7 +514,7 @@ export function createBallView(scene, { halo = false, trail = true, shadows = tr
     mainCamera = null;
     if (!b || !visible) {
       group.visible = false;
-      hist.length = 0;
+      while (hist.length) histPool.push(hist.pop());
       return;
     }
     group.visible = true;
@@ -388,7 +523,7 @@ export function createBallView(scene, { halo = false, trail = true, shadows = tr
     if (!b.atRest && b.vel && alpha < 1) renderPos.addScaledVector(b.vel, -(1 - alpha) / SIM.tickRate);
     const teleport = (b.id !== undefined && b.id !== lastId) || renderPos.distanceToSquared(prevRender) > 4;
     lastId = b.id;
-    if (teleport) hist.length = 0;
+    if (teleport) while (hist.length) histPool.push(hist.pop());
     prevRender.copy(renderPos);
     ball.position.copy(renderPos);
 
@@ -404,8 +539,25 @@ export function createBallView(scene, { halo = false, trail = true, shadows = tr
 
     // Trail history (only while moving fast enough to read as motion).
     const speed = b.vel ? Math.hypot(b.vel.x, b.vel.y, b.vel.z) : 0;
-    if (!b.atRest && speed > 3) hist.push({ x: renderPos.x, y: renderPos.y, z: renderPos.z, t: clock });
-    while (hist.length && (clock - hist[0].t > TRAIL_SECONDS || hist.length > TRAIL_N)) hist.shift();
+    while (hist.length && (clock - hist[0].t > TRAIL_SECONDS || hist.length >= TRAIL_N)) histPool.push(hist.shift());
+    if (!b.atRest && speed > 3) {
+      const h = histPool.pop() || { x: 0, y: 0, z: 0, t: 0 };
+      h.x = renderPos.x; h.y = renderPos.y; h.z = renderPos.z; h.t = clock;
+      hist.push(h);
+    }
+
+    // Motion blur streak (speed × shutter behind the ball, drawn radius).
+    const blurLen = !b.atRest ? speed * BLUR_SHUTTER_S : 0;
+    const rr = r * Math.max(1, displayScale);
+    blur.visible = blurLen > rr * 1.5;
+    if (blur.visible) {
+      const u = blurMat.uniforms;
+      u.uCenter.value.copy(ball.position);
+      u.uDir.value.set(b.vel.x, b.vel.y, b.vel.z).multiplyScalar(1 / Math.max(speed, 1e-6));
+      u.uR.value = rr * 0.98;
+      u.uLen.value = blurLen;
+      u.uA.value = Math.min(0.5, (0.9 * 2 * rr) / (blurLen + 2 * rr));
+    }
 
     // Visibility aids: the drawn ball never sinks into the floor when it is drawn bigger.
     if (source && source.visibility) {
@@ -423,6 +575,7 @@ export function createBallView(scene, { halo = false, trail = true, shadows = tr
     if (dropLine.visible) {
       dropLine.position.set(renderPos.x, 0.005, renderPos.z);
       dropLine.scale.y = Math.max(0.01, renderPos.y - r * displayScale);
+      lineAlpha = vis.line;
       lineMat.uniforms.uA.value = vis.line;
     }
     ringState = source && source.ring ? source.ring() : null;
@@ -433,6 +586,23 @@ export function createBallView(scene, { halo = false, trail = true, shadows = tr
       ringOpacity = Math.max(0, Math.min(1, ringState.fade)) * (ringState.green ? 1 : ringState.inWindow ? 0.85 : 0.5);
     } else ringOpacity = 0;
     ringMat.opacity = ringOpacity;
+    const gs = source && source.ghost ? source.ghost() : null;
+    ghost.visible = !!(gs && gs.alpha > 0.005);
+    if (ghost.visible) {
+      _gy.set(gs.axis.x, gs.axis.y, gs.axis.z);
+      _gz.set(gs.normal.x, gs.normal.y, gs.normal.z);
+      _gx.crossVectors(_gy, _gz);
+      if (_gx.lengthSq() > 1e-8 && Number.isFinite(gs.grip.x + gs.grip.y + gs.grip.z)) {
+        _gx.normalize();
+        _gz.crossVectors(_gx, _gy).normalize();
+        _gm.makeBasis(_gx, _gy, _gz);
+        ghost.quaternion.setFromRotationMatrix(_gm);
+        ghost.position.set(gs.grip.x, gs.grip.y, gs.grip.z);
+        ghostMat.uniforms.uColor.value.copy(gs.green ? RING_GREEN : GHOST_CYAN);
+        ghostAlpha = gs.alpha;
+      } else ghost.visible = false;
+    }
+    if (!ghost.visible) ghostAlpha = 0;
 
     // Contact shadows.
     if (shadows) {
@@ -468,7 +638,7 @@ export function createBallView(scene, { halo = false, trail = true, shadows = tr
     setVisible(v) {
       visible = !!v;
       group.visible = visible;
-      if (!visible) hist.length = 0;
+      if (!visible) while (hist.length) histPool.push(hist.pop());
     },
     setHalo(on) { haloSprite.visible = !!on; },
     setTrail(on) { trailMesh.visible = !!on; },
@@ -491,6 +661,12 @@ export function createBallView(scene, { halo = false, trail = true, shadows = tr
       scene.remove(group);
       ball.geometry.dispose();
       trailGeo.dispose();
+      fuzz.geometry.dispose();
+      blur.geometry.dispose();
+      fuzzMat.dispose();
+      blurMat.dispose();
+      ghostGeo.dispose();
+      ghostMat.dispose();
     },
   };
 }

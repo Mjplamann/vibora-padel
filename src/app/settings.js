@@ -4,6 +4,8 @@
 import { resolveSettings } from '../game/world.js';
 import { UI_DEFAULT_SETTINGS } from '../ui/ui.js';
 import { TRACKING } from '../config.js';
+import { VENUE_IDS, DEFAULT_VENUE } from '../render/venues/meta.js';
+import { RACKETS, OUTFITS, DEFAULT_RACKET, DEFAULT_OUTFIT } from '../game/progression.js';
 
 export const STORAGE_KEY = 'vibora.settings.v1';
 
@@ -22,9 +24,11 @@ export const VIEW_DEFAULTS = Object.freeze({ fov: 74, viewPitch: -14, eyeOffset:
  * hitPrediction (predictive hitting) is a world default (game/world.js DEFAULT_SETTINGS).
  * glassView: how a ball behind the player is shown (render/gaze.js GLASS_VIEW): 'mirror' (the view
  * stays on the net, a rear-view mirror inset shows the glass), 'turn' (a smooth head turn up to
- * 75°) or 'fixed'. Glasses mode keeps its own settings (src/xr/glasses.js, 'vibora.xr.v1').
+ * 75°) or 'fixed'. racketGhost: a faint racket at the planned contact (timing hitting). Glasses mode keeps its own settings (src/xr/glasses.js, 'vibora.xr.v1').
  */
-export const APP_DEFAULTS = Object.freeze({ offAxisYaw: false, glassView: 'mirror' });
+export const APP_DEFAULTS = Object.freeze({ offAxisYaw: false, glassView: 'mirror', racketGhost: true, cameraTilt: 'auto' });
+/** Settings → Camera tilt choices (deg up; 'auto' = measured in calibration). */
+export const CAMERA_TILTS = Object.freeze(['auto', '0', '5', '10', '15', '20']);
 
 /** Safe localStorage wrapper ({getItem,setItem} or null). */
 export function safeStorage() {
@@ -63,7 +67,18 @@ function clampSettings(s) {
   if (!['realistic', 'enhanced', 'max'].includes(s.ballVisibility)) s.ballVisibility = 'enhanced';
   s.learningSlowmo = s.learningSlowmo === true ? 'on' : s.learningSlowmo === false ? 'off' : ['on', 'off'].includes(s.learningSlowmo) ? s.learningSlowmo : 'auto';
   s.timingTick = s.timingTick === true;
+  // Round 5: the racket ghost at the planned contact (game/swingAssist.js contactGhostPose).
+  s.racketGhost = s.racketGhost !== false;
+  if (!CAMERA_TILTS.includes(String(s.cameraTilt))) s.cameraTilt = 'auto';
+  s.cameraTilt = String(s.cameraTilt);
   if (!['ultra', 'high', 'balanced'].includes(s.quality)) s.quality = 'high';
+  // Round 4: venue, umpire, callouts, replays, equipped racket / outfit (stored values are checked).
+  if (!VENUE_IDS.includes(s.venue)) s.venue = DEFAULT_VENUE;
+  if (!['es', 'en', 'off'].includes(s.umpireLang)) s.umpireLang = 'es';
+  s.callouts = s.callouts !== false;
+  s.autoReplay = s.autoReplay !== false;
+  if (typeof s.racketModel !== 'string' || !RACKETS.some((r) => r.id === s.racketModel)) s.racketModel = DEFAULT_RACKET;
+  if (typeof s.outfit !== 'string' || !OUTFITS.some((o) => o.id === s.outfit)) s.outfit = DEFAULT_OUTFIT;
   if (!TRACKING.cameraPresets[s.cameraPreset]) s.cameraPreset = TRACKING.defaultCamera;
   s.hfovDeg = TRACKING.cameraPresets[s.cameraPreset].hfov;
   return s;
@@ -80,6 +95,8 @@ export function loadSettings(storage) {
   }
   const base = resolveSettings({ ...UI_DEFAULT_SETTINGS, ...VIEW_DEFAULTS, ...APP_DEFAULTS, ...stored });
   base.volumes = { ...UI_DEFAULT_SETTINGS.volumes, ...(stored.volumes || {}) };
+  // Crowd volume (round 4; older saves have none): 0..1, default 0.7.
+  base.volumes.crowd = Number.isFinite(base.volumes.crowd) ? Math.min(1, Math.max(0, base.volumes.crowd)) : 0.7;
   return clampSettings(base);
 }
 

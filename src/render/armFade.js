@@ -90,3 +90,79 @@ export function sideOnAlpha(a, b, eye) {
   const t = clamp01((d - SIDE_ON_FADE_DIST[0]) / (SIDE_ON_FADE_DIST[1] - SIDE_ON_FADE_DIST[0]));
   return t * t * (3 - 2 * t);
 }
+
+/**
+ * Forearm "bulb" (QA2 / round 3 leftover): with the racket raised (back-glass preparation, high
+ * ready position) the elbow end of the forearm sits 0.2-0.35 m from the camera, where the per-pixel
+ * depth fade leaves it half transparent: a large translucent blob at the bottom of the picture.
+ * Round 4 faded the forearm along its length (and the stub by (1 - k)^2), but partial strengths
+ * still left wide half-transparent areas: QA r5 saw a "ghost bulb" at the racket hand at contact.
+ *
+ * Round 5: no limb is ever drawn half transparent over a wide area. Every fade is a CUT with a
+ * narrow soft edge, and what changes is WHERE the cut sits:
+ * - along the forearm (t = 0 at the elbow, 1 at the wrist): alpha = smoothstep(c, c + band, t),
+ *   c from alongCutStart(): -band with the upper-arm stub drawn (the whole forearm, elbow cap and
+ *   all, joins the stub), ALONG_CUT.cap with the stub hidden (the rounded elbow cap is cut, so the
+ *   forearm never ends in a sphere), up to ALONG_CUT.cuff when the elbow is at the eye (only the
+ *   wrist end with the hand), and on to 1 + band as the wrist itself comes to the eye (hidden);
+ * - by view depth (per fragment): nearCutAlpha(), a 3 cm band where a limb reaching toward the
+ *   lens leaves the picture, at the depth where the old smooth fade was half transparent (same
+ *   mean coverage of the picture, without the disc);
+ * - the upper-arm stub is drawn solid or not at all (stubShown, with hysteresis).
+ */
+export const ALONG_CUT = Object.freeze({ band: 0.16, cap: 0.02, cuff: 0.5, near: 0.3, far: 0.42 });
+
+/** Cut start c (in forearm length units) for the stub state and the elbow-to-eye distance (m). */
+export function alongCutStart(stubDrawn, elbowDist) {
+  if (stubDrawn) return -ALONG_CUT.band;
+  const d = Number.isFinite(elbowDist) ? elbowDist : 1;
+  const t = clamp01((d - ALONG_CUT.near) / (ALONG_CUT.far - ALONG_CUT.near));
+  const k = 1 - t * t * (3 - 2 * t);
+  return ALONG_CUT.cap + (ALONG_CUT.cuff - ALONG_CUT.cap) * k;
+}
+
+/**
+ * Pushes the cut toward the wrist for a whole-forearm factor f (0..1: the wrist close to the eye,
+ * beside the eye, side-on): f = 1 keeps c, f = 0 hides the forearm (c = 1 + band).
+ */
+export function alongCutHide(c, f) {
+  const end = 1 + ALONG_CUT.band;
+  return c + (end - c) * (1 - clamp01(f));
+}
+
+/** Forearm opacity at fraction t (0 elbow .. 1 wrist) for a cut starting at c. */
+export function alongCutAlpha(t, c) {
+  const u = clamp01((t - c) / ALONG_CUT.band);
+  return u * u * (3 - 2 * u);
+}
+
+/** Per-fragment near cut: angular radius where a limb is cut (rad) and the half width of the band. */
+export const NEAR_CUT = Object.freeze({ A: 0.2, dA: 0.009 });
+
+/** View depths (m) of the near cut for a limb of `radius`: gone below `near`, solid beyond `far`. */
+export function nearCutDepths(radius) {
+  return { near: radius / (NEAR_CUT.A + NEAR_CUT.dA), far: radius / (NEAR_CUT.A - NEAR_CUT.dA) };
+}
+
+/** Opacity of a limb fragment of `radius` at view depth `depth` (m). */
+export function nearCutAlpha(radius, depth) {
+  const { near, far } = nearCutDepths(radius);
+  const t = clamp01((depth - near) / (far - near));
+  return t * t * (3 - 2 * t);
+}
+
+/**
+ * Upper-arm stub drawn (solid) or hidden: only with the elbow well away from the eye (on at
+ * STUB_SHOW.on, off below STUB_SHOW.off: hysteresis), the view not pitched down at the body (the
+ * stub's end read as a disc over the torso) and the arm not raised / beside the eye / side-on.
+ */
+export const STUB_SHOW = Object.freeze({ on: 0.66, off: 0.6, minViewY: -0.34 });
+export function stubShown(prev, elbowDist, viewDirY, factor) {
+  if (!(factor >= 0.5)) return false;
+  if (Number.isFinite(viewDirY) && viewDirY < STUB_SHOW.minViewY) return false;
+  if (!Number.isFinite(elbowDist)) return false;
+  return prev ? elbowDist >= STUB_SHOW.off : elbowDist >= STUB_SHOW.on;
+}
+
+/** Longest forearm drawn (x nominal): a stretched tracked forearm is drawn at this length from the wrist. */
+export const FOREARM_MAX_RATIO = 1.12;

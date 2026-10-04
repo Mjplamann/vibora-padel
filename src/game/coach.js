@@ -22,10 +22,36 @@ import { CONTACT_OFFSETS } from './human.js';
  * kill: share of high net volleys that are put away at an angle.
  */
 export const COACH_LEVELS = Object.freeze({
-  rookie: Object.freeze({ sigma: 0.8, kmh: [45, 60], topRpm: [200, 900], maxSpeed: 4.2, accel: 10, reaction: 0.35, smash: 0, lob: 0.45, chiquita: 0.2, err: 0.1, kill: 0.15 }),
-  club: Object.freeze({ sigma: 0.5, kmh: [60, 80], topRpm: [500, 1500], maxSpeed: 5.0, accel: 12, reaction: 0.25, smash: 0.25, lob: 0.45, chiquita: 0.35, err: 0.05, kill: 0.35 }),
-  pro: Object.freeze({ sigma: 0.25, kmh: [85, 100], topRpm: [900, 2200], maxSpeed: 5.5, accel: 14, reaction: 0.18, smash: 0.6, lob: 0.45, chiquita: 0.35, err: 0.025, kill: 0.55 }),
+  // Round 5 (QA r5: a rookie final was won 8-0, 6 points from AI errors, the player hit few balls):
+  // rookies rally. Fewer unforced errors, and `feed` of their drives go to the human player's
+  // forehand at a comfortable depth (game/coach.js chooseShot), so points are won by the player's
+  // own winners. Club feeds a little; Pro plays to the open court.
+  rookie: Object.freeze({ sigma: 0.8, kmh: [45, 60], topRpm: [200, 900], maxSpeed: 4.2, accel: 10, reaction: 0.35, smash: 0, lob: 0.45, chiquita: 0.2, err: 0.065, kill: 0.1, feed: 0.55 }),
+  club: Object.freeze({ sigma: 0.5, kmh: [60, 80], topRpm: [500, 1500], maxSpeed: 5.0, accel: 12, reaction: 0.25, smash: 0.25, lob: 0.45, chiquita: 0.35, err: 0.05, kill: 0.35, feed: 0.2 }),
+  pro: Object.freeze({ sigma: 0.25, kmh: [85, 100], topRpm: [900, 2200], maxSpeed: 5.5, accel: 14, reaction: 0.18, smash: 0.6, lob: 0.45, chiquita: 0.35, err: 0.025, kill: 0.55, feed: 0 }),
 });
+
+const LEVEL_KEYS = Object.freeze(['rookie', 'club', 'pro']);
+/** Below Rookie (career skill -1 .. 0, a player whose form has dropped): slower, more feeding, more gifts. */
+const BEGINNER = Object.freeze({ sigma: 0.75, kmh: [36, 48], topRpm: [150, 700], maxSpeed: 3.8, accel: 9, reaction: 0.42, smash: 0, lob: 0.4, chiquita: 0.1, err: 0.1, kill: 0.05, feed: 0.75 });
+/** Level name of a numeric skill (0 rookie .. 1 club .. 2 pro). */
+export const levelOfSkill = (x) => (x < 0.5 ? 'rookie' : x < 1.5 ? 'club' : 'pro');
+/**
+ * Preset for a continuous skill 0..2 (career adaptive difficulty, round 5): every number of the
+ * neighbouring presets interpolated (ranges per end).
+ */
+export function presetForSkill(x) {
+  const k = clamp(Number.isFinite(x) ? x : 1, -1, 2);
+  const i = k < 0 ? -1 : Math.min(1, Math.floor(k));
+  const f = k - i;
+  const A = i < 0 ? BEGINNER : COACH_LEVELS[LEVEL_KEYS[i]], B = COACH_LEVELS[LEVEL_KEYS[i + 1]];
+  const out = {};
+  for (const key of Object.keys(A)) {
+    const a = A[key], b = B[key];
+    out[key] = Array.isArray(a) ? [a[0] + (b[0] - a[0]) * f, a[1] + (b[1] - a[1]) * f] : a + (b - a) * f;
+  }
+  return out;
+}
 
 /**
  * Underhand serve spin per level (rpm): slice (backspin) and sidespin windows; the side
@@ -38,6 +64,83 @@ export const SERVE_SPIN = Object.freeze({
 });
 /** Hand feeds carry a little sidespin (rpm, either way). */
 export const FEED_SIDE_RPM = 200;
+
+/**
+ * Playing personalities (career opponents and partners). Each tunes the level preset:
+ *   lob / chiquita / kill / smash: added to the level's shares (clamped 0..0.85);
+ *   lobBack: share of defensive lobs against opponents who stay back; lobApex: lob apex window (m);
+ *   pace: drive pace factor; topK: topspin factor; err: unforced-error factor;
+ *   glass: share of drives aimed at the back glass (level default 0.4); glassSkill: lowers the
+ *   difficulty of balls played off the glass; netRush: chance to follow an attacking shot to the net;
+ *   talk: how often the player calls the ball (partner callouts, game/callouts.js).
+ */
+export const PERSONALITIES = Object.freeze({
+  'all-rounder': Object.freeze({
+    id: 'all-rounder', name: 'All-rounder', es: 'Completo', icon: 'balance',
+    desc: 'Solid everywhere, few gifts. Patient from the back, sharp at the net.',
+    descEs: 'Sólido en todo, regala poco.', mods: Object.freeze({ talk: 0.6 }),
+  }),
+  lobber: Object.freeze({
+    id: 'lobber', name: 'Lobber', es: 'Globero', icon: 'lob',
+    desc: 'Lives on the lob. Expect high, deep balls that push you off the net.',
+    descEs: 'Vive del globo: bolas altas y profundas para echarte de la red.',
+    mods: Object.freeze({ lob: 0.3, chiquita: -0.15, lobBack: 0.2, lobApex: Object.freeze([6.4, 7.6]), pace: 0.94, talk: 0.5 }),
+  }),
+  'big-hitter': Object.freeze({
+    id: 'big-hitter', name: 'Big hitter', es: 'Pegador', icon: 'power',
+    desc: 'Flat, fast drives and smashes for the fence. Powerful, but errors come.',
+    descEs: 'Drives planos y remates a la valla. Potente, pero falla.',
+    mods: Object.freeze({ pace: 1.14, topK: 1.15, smash: 0.3, kill: 0.15, err: 1.6, glass: 0.18, talk: 0.8 }),
+  }),
+  'wall-master': Object.freeze({
+    id: 'wall-master', name: 'Wall master', es: 'Maestro de paredes', icon: 'wall',
+    desc: 'Reads every rebound and returns everything off the glass. Patient, deep, rarely misses.',
+    descEs: 'Lee cada rebote y lo devuelve todo de pared.',
+    mods: Object.freeze({ glass: 0.72, glassSkill: 0.3, err: 0.75, pace: 0.96, talk: 0.4 }),
+  }),
+  'net-rusher': Object.freeze({
+    id: 'net-rusher', name: 'Net rusher', es: 'Volea y red', icon: 'net',
+    desc: 'Attacks the net at every chance and finishes points with angled volleys.',
+    descEs: 'Sube a la red siempre que puede y cierra con voleas.',
+    mods: Object.freeze({ netRush: 0.75, kill: 0.25, lob: -0.15, pace: 1.04, talk: 0.9 }),
+  }),
+  chiquita: Object.freeze({
+    id: 'chiquita', name: 'Chiquita artist', es: 'Artista de la chiquita', icon: 'touch',
+    desc: 'Soft, dipping balls at your feet when you come to the net. Pure touch.',
+    descEs: 'Bolas bajas y suaves a los pies cuando subes a la red.',
+    mods: Object.freeze({ chiquita: 0.3, lob: -0.1, pace: 0.92, err: 0.9, talk: 0.5 }),
+  }),
+});
+export const PERSONALITY_IDS = Object.freeze(Object.keys(PERSONALITIES));
+
+/**
+ * Level preset tuned by a personality (and a pace factor, e.g. the rally marathon). skill (0..2,
+ * optional): a continuous level instead of the named one (career adaptive difficulty).
+ */
+export function tunedLevel(level = 'club', personality = null, pace = 1, skill = null) {
+  const L = Number.isFinite(skill) ? presetForSkill(skill) : COACH_LEVELS[level] || COACH_LEVELS.club;
+  const P = (PERSONALITIES[personality] || PERSONALITIES['all-rounder']).mods;
+  const share = (base, add) => clamp(base + (add || 0), 0, 0.85);
+  const k = (P.pace ?? 1) * pace;
+  return {
+    ...L,
+    kmh: [L.kmh[0] * k, L.kmh[1] * k],
+    topRpm: [L.topRpm[0] * (P.topK ?? 1), L.topRpm[1] * (P.topK ?? 1)],
+    lob: share(L.lob, P.lob),
+    chiquita: share(L.chiquita, P.chiquita),
+    kill: share(L.kill, P.kill),
+    smash: share(L.smash, P.smash),
+    err: L.err * (P.err ?? 1),
+    glass: P.glass ?? 0.4,
+    glassSkill: P.glassSkill ?? 0,
+    lobBack: P.lobBack ?? 0,
+    lobApex: P.lobApex || [6.0, 7.0],
+    netRush: P.netRush ?? 0,
+    talk: P.talk ?? 0.6,
+    feed: L.feed ?? 0,
+    pace,
+  };
+}
 
 /** Ready depth (|z|, m) at the net and at the back. */
 export const NET_Z = 3.2;
@@ -69,8 +172,9 @@ const SAFE_X = 3.6; // lateral aim window (m): about 1.4 m inside the side walls
 export function createCoach({
   level = 'club', rng = createRng(0xc0ac4), side = 'far', team = null, by = 'coach', home = null,
   handed = 'right', bindPos = null, bindVel = null, covers = null, opponents = null, name = null,
+  personality = null, kit = null, displayName = null, skill = null,
 } = {}) {
-  const L = COACH_LEVELS[level] || COACH_LEVELS.club;
+  let L = tunedLevel(level, personality, 1, skill);
   const sz = side === 'far' ? -1 : 1; // sign of z on our half
   const tm = team ?? (side === 'far' ? 1 : 0);
   const baseFacing = side === 'far' ? 0 : Math.PI;
@@ -83,6 +187,11 @@ export function createCoach({
     pos, vel, facing: baseFacing, stroke: null, swingPhase: 0, swingT: 0, holding: 'ready',
     racket: { grip: v3(), axis: v3(0, 1, 0), normal: v3(0, 0, 1), vel: v3(), t: 0 },
     handed, side, team: tm, level, name, home: homePos, plan: null, lastShot: null, hits: 0, misses: 0,
+    // Career: playing personality, display name and kit colours for the renderer ({ shirt, shorts, cap, skin }).
+    personality: PERSONALITIES[personality] ? personality : 'all-rounder', displayName: displayName || name, kit: kit || null,
+    // Presentation only (render/animation/director.js): sim time of a scheduled serve's contact, so the
+    // server's ball drop and bounce lead into the swing at the real contact.
+    serveAt: null,
   };
   let role = 'back'; // 'back' | 'net'
   let lastSeenShot = 0;
@@ -111,6 +220,7 @@ export function createCoach({
     swing = null;
     state.holding = 'ready';
     state.swingPhase = 0;
+    state.serveAt = null;
   }
 
   function opponentsOf(world) {
@@ -182,11 +292,11 @@ export function createCoach({
     const [k0, k1] = L.kmh;
     const tz = (depth) => -sz * depth; // z on the other half
     // Pace and spin vary shot to shot (QA: every bandeja was 57 km/h / -700 rpm, no sidespin).
-    const lv = level === 'pro' ? 1 : level === 'rookie' ? 0 : 0.5;
+    const lv = Number.isFinite(skill) ? clamp(skill / 2, 0, 1) : level === 'pro' ? 1 : level === 'rookie' ? 0 : 0.5;
     const sideRpm = (amp) => rng.range(-amp, amp) * (0.5 + lv);
     if (stroke === 'bandeja') {
       if (c.pos.y > 2.15 && Math.abs(c.pos.z) < 6 && rng() < L.smash) {
-        if (level === 'pro' && Math.abs(c.pos.z) < 4 && rng() < 0.4) {
+        if ((Number.isFinite(skill) ? skill >= 1.5 : level === 'pro') && Math.abs(c.pos.z) < 4 && rng() < 0.4) {
           // Por tres: flat and hard from near the net, bounced 2.4–3.4 m past it so it kicks
           // up over the 4 m back wall (needs ~130 km/h+ on the sand-filled turf).
           return {
@@ -204,9 +314,10 @@ export function createCoach({
         speed: rng.range(48 + 10 * lv, 62 + 10 * lv) / 3.6, top: -rng.range(500, 1000 + 400 * lv), side: sideRpm(600),
       };
     }
-    if (oppAtNet && r < L.lob) {
+    const lobNow = oppAtNet ? r < L.lob : L.lobBack > 0 && c.kind !== 'volley' && Math.abs(pos.z) > 6 && r < L.lobBack;
+    if (lobNow) {
       return {
-        kind: 'lob', stroke: 'lob', target: v3(rng.range(-3.2, 3.2), 0, tz(rng.range(8.0, 9.0))), apex: rng.range(6.0, 7.0),
+        kind: 'lob', stroke: 'lob', target: v3(rng.range(-3.2, 3.2), 0, tz(rng.range(8.0, 9.0))), apex: rng.range(L.lobApex[0], L.lobApex[1]),
         top: rng.range(-200, 600 + 600 * lv), side: sideRpm(300),
       };
     }
@@ -237,7 +348,16 @@ export function createCoach({
         speed: (k0 * rng.range(0.68, 0.82)) / 3.6, top: -rng.range(150, 500), side: sideRpm(250),
       };
     }
-    const glass = rng() < 0.4; // to the back glass: the player practises salida de pared
+    // Feeding the human (rookies, a little at club): a comfortable ball to their forehand, mid-deep.
+    const hp = tm === 1 && world.player && world.player.pos;
+    if (!volley && hp && L.feed > 0 && rng() < L.feed) {
+      const fh = (world.player.handed || world.settings.handed) === 'left' ? -1 : 1;
+      return {
+        kind: 'drive', stroke, target: v3(clamp(hp.x + fh * rng.range(0.5, 0.9), -SAFE_X, SAFE_X), 0, tz(clamp(Math.abs(hp.z) - rng.range(1.0, 1.8), 5.4, 7.6))),
+        speed: (rng.range(k0, k0 + (k1 - k0) * 0.5) * 0.95) / 3.6, top: rng.range(L.topRpm[0], L.topRpm[1]) * 0.8, side: sideRpm(250), feed: true,
+      };
+    }
+    const glass = rng() < L.glass; // to the back glass: the player practises salida de pared
     const depth = volley ? rng.range(6.5, 8.4) : glass ? rng.range(8.4, 9.0) : rng.range(7.0, 8.4);
     const kmh = rng.range(k0, k1) * (volley ? 0.85 : 1);
     return {
@@ -257,7 +377,7 @@ export function createCoach({
     const y = ball.pos.y;
     if (y < 0.45) d += 0.8;
     else if (y > 2.2) d += 0.5;
-    if (p.kind === 'after-wall') d += 0.3;
+    if (p.kind === 'after-wall') d += 0.3 - L.glassSkill;
     if (p.choice.kind === 'lob' && (y < 0.5 || vin > 16)) d += 0.5; // lobbing a low / fast ball
     const stretch = Math.hypot(pos.x - p.stance.x, pos.z - p.stance.z);
     if (stretch > 0.2) d += 2.5 * (stretch - 0.2);
@@ -443,6 +563,9 @@ export function createCoach({
     if (rec) {
       state.lastShot = rec;
       state.hits++;
+      // Net rushers follow an attacking shot in.
+      const attack = choice.kind === 'drive' || choice.kind === 'chiquita' || choice.kind === 'kill' || choice.kind === 'volley' || choice.kind === 'bandeja';
+      if (L.netRush > 0 && attack && !choice.error && rng() < L.netRush) role = 'net';
     }
     return rec;
   }
@@ -476,9 +599,11 @@ export function createCoach({
   function serve(world, box, delay = 1.2) {
     placeAt(servePosition(box));
     pendingServe = { box, at: world.time + delay };
+    state.serveAt = pendingServe.at;
   }
 
   function doServe(world, box) {
+    state.serveAt = null;
     const from = v3(pos.x + right.x * dom * 0.45, 0.85, pos.z + fwd.z * 0.35);
     // Receiver's box on the other half: diagonal from our box side.
     const recvRightX = -sz; // near receiver's right is +x, far receiver's right is -x
@@ -504,10 +629,18 @@ export function createCoach({
     servePosition,
     placeAt,
     setHome,
+    /** Pace factor on top of the level and personality (rally marathon: rises with the rally). */
+    setPace(k) {
+      L = tunedLevel(level, state.personality, Number.isFinite(k) && k > 0 ? k : 1, skill);
+    },
+    get pace() { return L.pace; },
+    /** The tuned level preset in use (level × personality × pace). */
+    get tuning() { return L; },
     get state() {
       return state;
     },
     level,
+    personality: state.personality,
     team: tm,
     side,
     get role() {

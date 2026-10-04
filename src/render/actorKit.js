@@ -90,17 +90,22 @@ export function heightToNormalCanvas(src, strength = 2) {
   out.height = h;
   const octx = out.getContext('2d');
   const img = octx.createImageData(w, h);
-  const H = (x, y) => sd[(((y + h) % h) * w + ((x + w) % w)) * 4] / 255;
+  // Heights unpacked once (wrapping lookups and the ImageData accessor stay out of the loop).
+  const hs = new Float32Array(w * h);
+  for (let k = 0; k < w * h; k++) hs[k] = sd[k * 4] / 255;
+  const od = img.data;
   for (let y = 0; y < h; y++) {
+    const r0 = y * w, rUp = ((y + h - 1) % h) * w, rDn = ((y + 1) % h) * w;
     for (let x = 0; x < w; x++) {
-      const dx = (H(x + 1, y) - H(x - 1, y)) * strength;
-      const dy = (H(x, y + 1) - H(x, y - 1)) * strength;
-      const len = Math.hypot(dx, dy, 1);
-      const i = (y * w + x) * 4;
-      img.data[i] = ((-dx / len) * 0.5 + 0.5) * 255;
-      img.data[i + 1] = ((dy / len) * 0.5 + 0.5) * 255;
-      img.data[i + 2] = ((1 / len) * 0.5 + 0.5) * 255;
-      img.data[i + 3] = 255;
+      const xl = x === 0 ? w - 1 : x - 1, xr = x === w - 1 ? 0 : x + 1;
+      const dx = (hs[r0 + xr] - hs[r0 + xl]) * strength;
+      const dy = (hs[rDn + x] - hs[rUp + x]) * strength;
+      const inv = 1 / Math.sqrt(dx * dx + dy * dy + 1);
+      const i = (r0 + x) * 4;
+      od[i] = (-dx * inv * 0.5 + 0.5) * 255;
+      od[i + 1] = (dy * inv * 0.5 + 0.5) * 255;
+      od[i + 2] = (inv * 0.5 + 0.5) * 255;
+      od[i + 3] = 255;
     }
   }
   octx.putImageData(img, 0, 0);

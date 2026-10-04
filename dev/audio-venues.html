@@ -1,0 +1,145 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Víbora Padel — venue audio</title>
+<style>
+  body { margin: 0; background: #07090c; color: #e6edf5; font: 14px/1.4 ui-sans-serif, system-ui, sans-serif; }
+  h1 { font-size: 20px; margin: 16px 20px 4px; }
+  #summary { margin: 0 20px 12px; color: #9fb0c2; }
+  #grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; padding: 0 20px 20px; }
+  .card { background: #0e1319; border: 1px solid #1c2633; border-radius: 8px; padding: 8px 10px; }
+  .card h2 { font-size: 13px; margin: 0 0 4px; display: flex; justify-content: space-between; }
+  .meta { color: #9fb0c2; font-size: 12px; display: flex; gap: 10px; flex-wrap: wrap; }
+  canvas { width: 100%; height: 54px; display: block; margin-top: 4px; }
+  .ok { color: #5fe08a; } .bad { color: #ff6b6b; }
+</style>
+</head>
+<body>
+<h1>Venue audio · OfflineAudioContext renders</h1>
+<div id="summary">rendering…</div>
+<div id="grid"></div>
+<script type="module">
+import { createAudio } from '../src/audio/engine.js';
+import { venueMeta } from '../src/render/venues/meta.js';
+
+const SR = 48000;
+const EYE = { x: 0.3, y: 1.64, z: 8.2 };
+const FWD = { x: 0, y: -0.1, z: -1 };
+const UP = { x: 0, y: 1, z: 0 };
+const V = (id) => venueMeta(id);
+// name, label, seconds, venue, ambience?, schedule [[t, fn(audio)]]
+const CASES = [
+  ['pock-drive', 'Pock · drive 22 m/s, sweet spot', 0.5, 'club', false, [[0, (a) => a.racket({ x: 0.75, y: 1.0, z: 7.6 }, { speed: 22, quality: 0.95 })]]],
+  ['pock-smash', 'Pock · smash 32 m/s', 0.5, 'club', false, [[0, (a) => a.racket({ x: 0.35, y: 2.4, z: 7.7 }, { speed: 32, quality: 1 })]]],
+  ['pock-block', 'Pock · soft block 6 m/s', 0.5, 'club', false, [[0, (a) => a.racket({ x: -0.4, y: 1.2, z: 7.6 }, { speed: 6, quality: 0.9 })]]],
+  ['pock-frame', 'Pock · frame mis-hit 18 m/s', 0.5, 'club', false, [[0, (a) => a.racket({ x: 0.8, y: 0.9, z: 7.7 }, { speed: 18, quality: 0.1, offCenter: 0.95 })]]],
+  ['glass-back-mid', 'Glass · back pane, mid 14 m/s', 0.9, 'club', false, [[0, (a) => a.wall({ x: 0.1, y: 1.4, z: 10 }, 'glass', 14)]]],
+  ['glass-back-edge', 'Glass · back pane near a clamp', 0.9, 'club', false, [[0, (a) => a.wall({ x: 2.95, y: 0.15, z: 10 }, 'glass', 14)]]],
+  ['glass-side-2m', 'Glass · side 2 m pane 9 m/s', 0.9, 'club', false, [[0, (a) => a.wall({ x: 5, y: 1.1, z: 7.0 }, 'glass', 9)]]],
+  ['glass-side-3m', 'Glass · side 3 m pane 9 m/s', 0.9, 'club', false, [[0, (a) => a.wall({ x: 5, y: 1.1, z: 9.1 }, 'glass', 9)]]],
+  ['mesh', 'Mesh · side 12 m/s', 1.0, 'club', false, [[0, (a) => a.wall({ x: 5, y: 1.5, z: 4 }, 'mesh', 12)]]],
+  ['bounce-turf', 'Bounce · turf 8 m/s', 0.6, 'club', false, [[0, (a) => a.bounce({ x: 0.6, y: 0, z: 5.5 }, 'turf', 8)]]],
+  ['whoosh-live', 'Whoosh · live start → peak 20 m/s → end', 0.8, 'club', false, [
+    [0, (a) => a.swing({ phase: 'start', speed: 4, pos: { x: 0.9, y: 1.1, z: 8.3 } })],
+    [0.16, (a) => a.swing({ phase: 'peak', speed: 20, pos: { x: 0.6, y: 1.0, z: 7.8 } })],
+    [0.3, (a) => a.swing({ phase: 'end', speed: 6, pos: { x: 0.1, y: 1.2, z: 7.7 } })],
+  ]],
+  ['whoosh-peak', 'Whoosh · peak only 25 m/s', 0.6, 'club', false, [[0, (a) => a.swing({ phase: 'peak', speed: 25, pos: { x: 0.6, y: 1.1, z: 7.9 } })]]],
+  ['whoosh-smash', 'Whoosh · smash 30 m/s (live)', 0.8, 'club', false, [
+    [0, (a) => a.swing({ phase: 'start', speed: 6, pos: { x: 0.4, y: 2.4, z: 8.1 } })],
+    [0.14, (a) => a.swing({ phase: 'peak', speed: 30, pos: { x: 0.3, y: 2.3, z: 7.7 } })],
+  ]],
+  ['whoosh-slow', 'Whoosh · slow 8 m/s (quiet)', 0.6, 'club', false, [[0, (a) => a.swing({ phase: 'peak', speed: 8, pos: { x: 0.6, y: 1.1, z: 7.9 } })]]],
+  ['pock-sunset', 'Pock · open air (sunset: no tail)', 0.8, 'sunset', false, [[0, (a) => a.racket({ x: 0.75, y: 1.0, z: 7.6 }, { speed: 22, quality: 0.95 })]]],
+  ['pock-club', 'Pock · club hall (1.4 s tail)', 0.8, 'club', false, [[0, (a) => a.racket({ x: 0.75, y: 1.0, z: 7.6 }, { speed: 22, quality: 0.95 })]]],
+  ['pock-stadium', 'Pock · arena (2.3 s tail)', 0.8, 'stadium', false, [[0, (a) => a.racket({ x: 0.75, y: 1.0, z: 7.6 }, { speed: 22, quality: 0.95 })]]],
+  ['crowd-applause', 'Crowd · applause (stadium)', 4.2, 'stadium', false, [[0, (a) => a.crowd('applause', 0.8)]]],
+  ['crowd-ooh', 'Crowd · ooh (stadium)', 2.0, 'stadium', false, [[0, (a) => a.crowd('ooh', 0.8)]]],
+  ['crowd-groan', 'Crowd · groan (stadium)', 2.0, 'stadium', false, [[0, (a) => a.crowd('groan', 0.8)]]],
+  ['crowd-roar', 'Crowd · roar, por tres (stadium)', 5.5, 'stadium', false, [[0, (a) => a.crowd('roar', 1)]]],
+  ['crowd-aah', 'Crowd · aah (stadium)', 2.0, 'stadium', false, [[0, (a) => a.crowd('aah', 0.8)]]],
+  ['crowd-club', 'Crowd · applause (club: a few members)', 3.0, 'club', false, [[0, (a) => a.crowd('applause', 0.6)]]],
+  ['crowd-sunset', 'Crowd · cheer (sunset terrace)', 3.5, 'sunset', false, [[0, (a) => a.crowd('cheer', 0.7)]]],
+  ['amb-club', 'Ambience · club (HVAC, chatter, neighbours)', 6.0, 'club', true, []],
+  ['amb-sunset', 'Ambience · sunset (sea, breeze, birds)', 6.0, 'sunset', true, []],
+  ['amb-stadium', 'Ambience · stadium (crowd murmur)', 6.0, 'stadium', true, [[3.0, (a) => a.crowd('hush', 1)]]],
+  ['duck', 'Duck · stadium murmur ducked under speech', 4.0, 'stadium', true, [[1.5, (a) => a.duck(1)], [3.0, (a) => a.duck(0)]]],
+];
+
+const db = (v) => (v > 0 ? 20 * Math.log10(v) : -Infinity);
+function metrics(buf, from = 0) {
+  let peak = 0, ss = 0, nan = 0, n = 0, tail = 0, tn = 0;
+  const t3 = Math.round(0.3 * SR);
+  for (let c = 0; c < buf.numberOfChannels; c++) {
+    const d = buf.getChannelData(c);
+    for (let i = from; i < d.length; i++) {
+      const v = d[i];
+      if (!Number.isFinite(v)) { nan++; continue; }
+      const a = Math.abs(v);
+      if (a > peak) peak = a;
+      ss += v * v; n++;
+      if (i > t3 && i < t3 + 0.2 * SR) { tail += v * v; tn++; }
+    }
+  }
+  return { peak, rms: Math.sqrt(ss / Math.max(1, n)), nan, tailRms: Math.sqrt(tail / Math.max(1, tn)) };
+}
+function drawWave(cv, buf) {
+  const w = (cv.width = cv.clientWidth * 2), h = (cv.height = cv.clientHeight * 2);
+  const g = cv.getContext('2d');
+  g.fillStyle = '#05070a'; g.fillRect(0, 0, w, h);
+  const colors = ['rgba(95,211,230,0.85)', 'rgba(228,241,74,0.6)'];
+  for (let c = 0; c < 2; c++) {
+    const d = buf.getChannelData(c);
+    const per = d.length / w;
+    g.fillStyle = colors[c];
+    for (let x = 0; x < w; x++) {
+      let lo = 0, hi = 0;
+      const s = Math.floor(x * per), e = Math.min(d.length, Math.floor((x + 1) * per));
+      for (let i = s; i < e; i++) { if (d[i] < lo) lo = d[i]; if (d[i] > hi) hi = d[i]; }
+      g.fillRect(x, h / 2 - hi * h / 2, 1, Math.max(1, (hi - lo) * h / 2));
+    }
+  }
+}
+const grid = document.getElementById('grid');
+const results = [];
+let allOk = true;
+for (const [name, label, secs, venue, amb, schedule] of CASES) {
+  const PRE = 0.1;
+  const ctx = new OfflineAudioContext(2, Math.ceil(SR * (secs + PRE)), SR);
+  const audio = createAudio({ context: ctx, seed: 1234, venue });
+  await audio.unlock();
+  audio.setListener(EYE, FWD, UP);
+  audio.setVenue(V(venue));
+  if (amb) await audio.ambience(true);
+  const pending = [];
+  const q = (t) => Math.round((PRE + t) * SR / 128) * 128 / SR;
+  for (const [t, fn] of schedule) {
+    pending.push(ctx.suspend(q(t)).then(() => { fn(audio); return Promise.resolve().then(() => ctx.resume()); }));
+  }
+  const t0 = performance.now();
+  const full = await ctx.startRendering();
+  await Promise.all(pending);
+  const ms = performance.now() - t0;
+  const skip = Math.round(PRE * SR);
+  const buf = new AudioBuffer({ numberOfChannels: 2, length: full.length - skip, sampleRate: SR });
+  for (let c = 0; c < 2; c++) buf.getChannelData(c).set(full.getChannelData(c).subarray(skip));
+  const m = metrics(buf);
+  const ok = m.nan === 0 && m.peak > 1e-3 && m.peak < 1.0;
+  allOk &&= ok;
+  results.push({ name, venue, peak: +m.peak.toFixed(4), peakDb: +db(m.peak).toFixed(1), rmsDb: +db(m.rms).toFixed(1), tailDb: +db(m.tailRms).toFixed(1), nan: m.nan, ok, renderMs: Math.round(ms) });
+  const card = document.createElement('div');
+  card.className = 'card';
+  card.innerHTML = `<h2>${label}<span class="${ok ? 'ok' : 'bad'}">${ok ? 'PASS' : 'FAIL'}</span></h2>
+    <div class="meta"><span>peak ${db(m.peak).toFixed(1)} dBFS</span><span>RMS ${db(m.rms).toFixed(1)}</span><span>tail@0.3s ${db(m.tailRms).toFixed(1)}</span><span>NaN ${m.nan}</span></div>
+    <canvas></canvas>`;
+  grid.appendChild(card);
+  drawWave(card.querySelector('canvas'), buf);
+}
+document.getElementById('summary').textContent = `${results.length} renders · ${allOk ? 'all pass' : 'FAILURES'} · max peak ${Math.max(...results.map((r) => r.peakDb)).toFixed(1)} dBFS`;
+window.__audioResults = results;
+window.__audioOk = allOk;
+window.__ready = true;
+</script>
+</body>
+</html>

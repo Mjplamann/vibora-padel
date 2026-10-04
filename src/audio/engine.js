@@ -12,154 +12,29 @@
 //   cheer / ui (stereo, not spatial) -> sfxBus / uiBus ------------/
 //
 // The synthesis functions are pure (Float32Array in, Float32Array out) and exported as
-// `synth` so they can be checked under Node. Nothing here touches browser globals at import.
+// `synth` (and `venueSynth`, src/audio/venueSynth.js) so they can be checked under Node. Nothing
+// here touches browser globals at import.
+//
+// Round 4: venues (setVenue(meta) from src/render/venues/meta.js) set the reverb (club hall, open
+// air, arena), the ambience bed (HVAC + chatter + neighbour courts / sea, breeze and birds /
+// arena crowd murmur) and the crowd (crowd(kind, level): applause, cheer, roar, ooh, aah, groan,
+// hush, murmur, heard from the stands around the court). swing(evt) plays the racket whoosh from
+// 'player:swing'; duck(amount) lowers the crowd and ambience under speech. The racket pock is the
+// padel EVA-core model (venueSynth.genPock) and every glass pane rings with its own modes.
 
 import { createRng, clamp } from '../util/math.js';
+import {
+  TAU, SPEED_OF_SOUND, Biquad, mode, noise, grains, lowpass1, normalize, fadeTail, impactWeight, jitter,
+  VOWELS, panGains, voice, peakOf, seamless,
+} from './dsp.js';
 
-const TAU = Math.PI * 2;
-const SPEED_OF_SOUND = 343;
-const MAX_VOICES = 40;
+import {
+  genPock, genGlassPane, glassPanelAt, genWhoosh, WHOOSH_PEAK_S, genApplause, genCrowdVowel, genCrowdBed, genSea, genBreeze,
+  genBird, genVenueIR, venueSynth,
+} from './venueSynth.js';
+import { venueMeta } from '../render/venues/meta.js';
 
-// --------------------------------------------------------------------------------------
-// DSP kit
-// --------------------------------------------------------------------------------------
-
-/** RBJ-cookbook biquad, transposed direct form II. */
-class Biquad {
-  constructor(type, f, q, sr, gainDb = 0) {
-    this.z1 = 0;
-    this.z2 = 0;
-    this.set(type, f, q, sr, gainDb);
-  }
-
-  set(type, f, q, sr, gainDb = 0) {
-    const w = (TAU * clamp(f, 10, sr * 0.45)) / sr;
-    const cw = Math.cos(w);
-    const alpha = Math.sin(w) / (2 * q);
-    let b0, b1, b2, a1, a2;
-    let a0 = 1 + alpha;
-    if (type === 'lp') {
-      b0 = (1 - cw) / 2; b1 = 1 - cw; b2 = b0; a1 = -2 * cw; a2 = 1 - alpha;
-    } else if (type === 'hp') {
-      b0 = (1 + cw) / 2; b1 = -(1 + cw); b2 = b0; a1 = -2 * cw; a2 = 1 - alpha;
-    } else if (type === 'bp') {
-      b0 = alpha; b1 = 0; b2 = -alpha; a1 = -2 * cw; a2 = 1 - alpha;
-    } else {
-      const A = 10 ** (gainDb / 40);
-      b0 = 1 + alpha * A; b1 = -2 * cw; b2 = 1 - alpha * A;
-      a0 = 1 + alpha / A; a1 = -2 * cw; a2 = 1 - alpha / A;
-    }
-    this.b0 = b0 / a0; this.b1 = b1 / a0; this.b2 = b2 / a0;
-    this.a1 = a1 / a0; this.a2 = a2 / a0;
-    return this;
-  }
-
-  process(x) {
-    const y = this.b0 * x + this.z1;
-    this.z1 = this.b1 * x - this.a1 * y + this.z2;
-    this.z2 = this.b2 * x - this.a2 * y;
-    return y;
-  }
-}
-
-const makeFilters = (specs, sr) => (specs || []).map(([type, f, q, g]) => new Biquad(type, f, q, sr, g));
-const runFilters = (fs, x) => {
-  for (let k = 0; k < fs.length; k++) x = fs[k].process(x);
-  return x;
-};
-
-/**
- * Adds a damped sinusoid (one vibration mode) to buf.
- * o: { glide: initial relative pitch excess (pitch falls to f), glideTau, attack, phase, pan }
- */
-function mode(buf, sr, t0, f, amp, tau, o = {}) {
-  if (amp <= 0 || f >= sr * 0.48) return;
-  const start = Math.max(0, Math.round(t0 * sr));
-  const n = Math.min(buf.length - start, Math.ceil(tau * sr * 7));
-  const dk = Math.exp(-1 / (tau * sr));
-  const ga = Math.exp(-1 / ((o.glideTau ?? 0.012) * sr));
-  const aa = Math.exp(-1 / ((o.attack ?? 0.00015) * sr));
-  const w = (TAU * f) / sr;
-  let e = amp, g = o.glide || 0, a = 1, ph = o.phase ?? 0;
-  for (let i = 0; i < n; i++) {
-    buf[start + i] += e * (1 - a) * Math.sin(ph);
-    ph += w * (1 + g);
-    e *= dk;
-    g *= ga;
-    a *= aa;
-  }
-}
-
-/** Adds an enveloped, filtered noise burst: (1 - e^(-t/attack)) * e^(-t/tau), cut at dur. */
-function noise(buf, sr, t0, amp, attack, tau, rng, filters = null, dur = tau * 7) {
-  if (amp <= 0) return;
-  const start = Math.max(0, Math.round(t0 * sr));
-  const n = Math.min(buf.length - start, Math.ceil(dur * sr));
-  const fs = makeFilters(filters, sr);
-  const dk = Math.exp(-1 / (tau * sr));
-  const aa = Math.exp(-1 / (Math.max(attack, 1e-5) * sr));
-  let e = amp, a = 1;
-  const fade = Math.min(n, Math.ceil(0.002 * sr));
-  for (let i = 0; i < n; i++) {
-    let x = rng() * 2 - 1;
-    x = runFilters(fs, x);
-    const tail = i > n - fade ? (n - i) / fade : 1;
-    buf[start + i] += x * e * (1 - a) * tail;
-    e *= dk;
-    a *= aa;
-  }
-}
-
-/** Sparse granular texture (sand, mesh rattle, net rustle): many tiny filtered noise grains. */
-function grains(buf, sr, rng, { count, t0 = 0, spread, shape = 1.6, amp, durMin, durMax, fMin, fMax, q = 4, decay = 1.2, am = null }) {
-  for (let g = 0; g < count; g++) {
-    const u = rng() ** shape; // denser near the start
-    const t = t0 + u * spread;
-    const life = 1 - u;
-    let a = amp * life ** decay * (0.25 + 0.75 * rng());
-    if (am) a *= am(t);
-    const f = fMin * (fMax / fMin) ** rng();
-    const dur = durMin + (durMax - durMin) * rng();
-    noise(buf, sr, t, a, dur * 0.08, dur * 0.35, rng, [['bp', f, q]], dur);
-  }
-}
-
-/** One-pole low-pass over the whole buffer (air absorption / occlusion). */
-function lowpass1(buf, sr, fc) {
-  if (fc >= sr * 0.45) return;
-  const a = Math.exp((-TAU * fc) / sr);
-  let y = 0;
-  for (let i = 0; i < buf.length; i++) {
-    y = buf[i] + a * (y - buf[i]);
-    buf[i] = y;
-  }
-}
-
-/** Scales the buffer so its peak equals target (keeps dynamics consistent per sound family). */
-function normalize(buf, target) {
-  let peak = 0;
-  for (let i = 0; i < buf.length; i++) {
-    const v = Math.abs(buf[i]);
-    if (v > peak) peak = v;
-  }
-  if (peak > 1e-9) {
-    const k = target / peak;
-    for (let i = 0; i < buf.length; i++) buf[i] *= k;
-  }
-  return buf;
-}
-
-/** Short raised-cosine fade at the end so buffers never stop on a click. */
-function fadeTail(buf, sr, sec = 0.01) {
-  const n = Math.min(buf.length, Math.ceil(sec * sr));
-  for (let i = 0; i < n; i++) buf[buf.length - 1 - i] *= 0.5 - 0.5 * Math.cos((Math.PI * i) / n);
-  return buf;
-}
-
-/** Excitation weight of mode frequency f for an impact with an effective pulse width tc (s). */
-const impactWeight = (f, tc) => 1 / Math.sqrt(1 + (f * tc * 2.2) ** 2);
-
-const jitter = (rng, amount) => 1 + (rng() - 0.5) * 2 * amount;
+const MAX_VOICES = 48;
 
 // --------------------------------------------------------------------------------------
 // One-shot generators. Each returns a mono Float32Array at sample rate sr.
@@ -368,43 +243,6 @@ function genFootstep(sr, rng, { speed = 2 } = {}) {
 // Stereo generators: crowd cheer, ambience beds, hall impulse response, UI.
 // --------------------------------------------------------------------------------------
 
-const VOWELS = [
-  [730, 1090], [530, 1840], [270, 2290], [570, 840], [300, 870], [660, 1720], [490, 1350], [640, 1190],
-];
-
-/** Equal-power pan of a mono signal sample into [L, R]. */
-const panGains = (p) => [Math.cos(((p + 1) * Math.PI) / 4), Math.sin(((p + 1) * Math.PI) / 4)];
-
-/**
- * A single voice: naive sawtooth glottal source + breath noise through two formant
- * band-passes. Writes into L/R with a fixed pan. f0At(t) and envAt(t) shape intonation/loudness.
- */
-function voice(L, R, sr, rng, { t0, dur, pan, f0At, envAt, vowelAt, breath = 0.35, amp = 1 }) {
-  const start = Math.max(0, Math.round(t0 * sr));
-  const n = Math.min(L.length - start, Math.round(dur * sr));
-  const [gl, gr] = panGains(pan);
-  const f1 = new Biquad('bp', 700, 5, sr);
-  const f2 = new Biquad('bp', 1200, 7, sr);
-  const tilt = new Biquad('lp', 2600, 0.7, sr);
-  let ph = 0;
-  for (let i = 0; i < n; i++) {
-    const t = i / sr;
-    if ((i & 63) === 0) {
-      const [a, b] = vowelAt(t);
-      f1.set('bp', a, 5, sr);
-      f2.set('bp', b, 7, sr);
-    }
-    const e = envAt(t);
-    if (e < 1e-4) continue;
-    ph += f0At(t) / sr;
-    if (ph >= 1) ph -= 1;
-    const src = (2 * ph - 1) * (1 - breath) + (rng() * 2 - 1) * breath;
-    const y = tilt.process(f1.process(src) * 1.0 + f2.process(src) * 0.6) * e * amp;
-    L[start + i] += y * gl;
-    R[start + i] += y * gr;
-  }
-}
-
 /** Crowd swell for big points: shouts, a noisy roar, applause and, when big, a whistle. */
 function genCheer(sr, rng, { level = 1 } = {}) {
   const lv = clamp(level, 0, 1);
@@ -483,28 +321,6 @@ function genCheer(sr, rng, { level = 1 } = {}) {
     R[i] *= k;
   }
   return [L, R];
-}
-
-function peakOf(buf) {
-  let p = 0;
-  for (let i = 0; i < buf.length; i++) p = Math.max(p, Math.abs(buf[i]));
-  return p;
-}
-
-/** Writes a seamless loop: generates len + xf samples via fill(), crossfades the tail into the head. */
-function seamless(sr, seconds, xfSec, fill) {
-  const len = Math.ceil(sr * seconds);
-  const xf = Math.ceil(sr * xfSec);
-  const L = new Float32Array(len + xf), R = new Float32Array(len + xf);
-  fill(L, R);
-  const outL = L.slice(0, len), outR = R.slice(0, len);
-  for (let i = 0; i < xf; i++) {
-    const a = Math.sin((Math.PI / 2) * (i / xf));
-    const b = Math.cos((Math.PI / 2) * (i / xf));
-    outL[i] = L[i] * a + L[len + i] * b;
-    outR[i] = R[i] * a + R[len + i] * b;
-  }
-  return [outL, outR];
 }
 
 /** HVAC: brown-noise rumble, airflow hiss, faint 50 Hz mains hum, slow breathing. Seamless loop. */
@@ -691,7 +507,12 @@ export const synth = {
   chatter: genChatter,
   impulse: genImpulse,
   lowpass1,
+  // Round 4 (venueSynth.js)
+  pock: genPock,
+  glassPane: genGlassPane,
+  whoosh: genWhoosh,
 };
+export { venueSynth, glassPanelAt };
 
 // --------------------------------------------------------------------------------------
 // WebAudio engine
@@ -714,6 +535,11 @@ const NOOP_AUDIO = Object.freeze({
   ui() {},
   ambience() {},
   setVolume() {},
+  setVenue() {},
+  swing() {},
+  crowd() {},
+  duck() {},
+  venue: null,
   bindBus: () => () => {},
   dispose() {},
 });
@@ -725,6 +551,9 @@ const setParam = (param, value, ctx, smooth = 0) => {
 };
 
 const finite = (v) => Number.isFinite(v.x) && Number.isFinite(v.y) && Number.isFinite(v.z);
+
+/** Crowd bus gain per unit of the crowd volume setting (0.7 -> 0.8, the level the venues were mixed at). */
+export const CROWD_TRIM = 0.8 / 0.7;
 
 /**
  * Creates the audio engine. createAudio() with no arguments targets a realtime AudioContext
@@ -738,7 +567,9 @@ export function createAudio(opts = {}) {
   let ctx = opts.context || null;
   const offline = !!(ctx && typeof ctx.startRendering === 'function');
   const rng = createRng(opts.seed ?? ((Date.now() ^ 0x5bd1e995) >>> 0));
-  const vol = { master: 0.9, sfx: 1, ambience: 0.35 };
+  // crowd: the crowd bus (reactions, arena murmur), settings.volumes.crowd (default 0.7 -> gain 0.8).
+  const vol = { master: 0.9, sfx: 1, ambience: 0.35, crowd: 0.7 };
+  const crowdGain = () => vol.crowd * CROWD_TRIM;
   const listener = { pos: { x: 0, y: 1.64, z: 8 }, fwd: { x: 0, y: 0, z: -1 }, up: { x: 0, y: 1, z: 0 } };
   const active = [];
   let n = null; // graph nodes
@@ -747,6 +578,12 @@ export function createAudio(opts = {}) {
   let disposed = false;
   const cheerCache = new Map();
   let prewarmed = false;
+  let venue = venueMeta(opts.venue || 'club');
+  const crowdCache = new Map(); // kind -> [[L, R], ...] variants
+  let crowdBed = null; // { gains: GainNode[], level }
+  let duckAmt = 0;
+  let liveWhoosh = null;
+  let noiseBuf = null;
 
   const running = () => n && !disposed && (offline || ctx.state === 'running');
 
@@ -770,26 +607,39 @@ export function createAudio(opts = {}) {
     const ambBus = ctx.createGain();
     ambBus.gain.value = vol.ambience;
     ambBus.connect(master);
-    const verb = ctx.createConvolver();
-    verb.normalize = false;
-    const [irL, irR] = genImpulse(ctx.sampleRate, createRng(7), 1.4);
-    const ir = ctx.createBuffer(2, irL.length, ctx.sampleRate);
-    ir.getChannelData(0).set(irL);
-    ir.getChannelData(1).set(irR);
-    verb.buffer = ir;
+    // Crowd bus: reactions and the arena murmur (ducked under speech with the ambience).
+    const crowdBus = ctx.createGain();
+    crowdBus.gain.value = crowdGain();
+    crowdBus.connect(master);
     const wet = ctx.createGain();
     wet.gain.value = 1;
-    verb.connect(wet);
     wet.connect(master);
+    const verb = makeVerb(venue.acoustics);
+    verb.connect(wet);
     const sfxVerb = ctx.createGain();
     sfxVerb.gain.value = vol.sfx;
     sfxVerb.connect(verb);
     const ambVerb = ctx.createGain();
     ambVerb.gain.value = vol.ambience;
     ambVerb.connect(verb);
-    n = { out, master, sfx, ui, ambBus, verb, wet, sfxVerb, ambVerb };
+    n = { out, master, sfx, ui, ambBus, crowdBus, verb, wet, sfxVerb, ambVerb };
     applyListener();
   }
+
+  /** Convolver with the venue's impulse response (club hall, arena, open air). */
+  function makeVerb(ac) {
+    const verb = ctx.createConvolver();
+    verb.normalize = false;
+    const [irL, irR] = genVenueIR(ctx.sampleRate, createRng(7), ac);
+    const ir = ctx.createBuffer(2, irL.length, ctx.sampleRate);
+    ir.getChannelData(0).set(irL);
+    ir.getChannelData(1).set(irR);
+    verb.buffer = ir;
+    return verb;
+  }
+
+  /** Reverb send scale for the venue (the sends were tuned for the club's 15 % wet hall). */
+  const wetScale = () => (venue.acoustics.wet ?? 0.15) / 0.15;
 
   function applyListener() {
     if (!ctx) return;
@@ -811,11 +661,11 @@ export function createAudio(opts = {}) {
     }
   }
 
-  function makePanner(pos) {
+  function makePanner(pos, refDistance = 1.2) {
     const p = ctx.createPanner();
     p.panningModel = 'HRTF';
     p.distanceModel = 'inverse';
-    p.refDistance = 1.2;
+    p.refDistance = refDistance;
     p.maxDistance = 120;
     p.rolloffFactor = 1;
     if (p.positionX) {
@@ -852,20 +702,20 @@ export function createAudio(opts = {}) {
     const g = ctx.createGain();
     g.gain.value = o.gain ?? 1;
     src.connect(g);
-    const bus = o.bus === 'ui' ? n.ui : o.bus === 'amb' ? n.ambBus : n.sfx;
+    const bus = o.bus === 'ui' ? n.ui : o.bus === 'amb' ? n.ambBus : o.bus === 'crowd' ? n.crowdBus : n.sfx;
     const nodes = [src, g];
     if (pos && finite(pos)) {
-      const p = makePanner(pos);
+      const p = makePanner(pos, o.refDistance ?? 1.2);
       g.connect(p);
       p.connect(bus);
       nodes.push(p);
     } else g.connect(bus);
-    const sendGain = o.reverb ?? 0.2;
+    const sendGain = (o.reverb ?? 0.2) * (o.bus === 'ui' ? 1 : wetScale());
     if (sendGain > 0) {
       const send = ctx.createGain();
       send.gain.value = sendGain;
       g.connect(send);
-      send.connect(o.bus === 'amb' ? n.ambVerb : n.sfxVerb);
+      send.connect(o.bus === 'amb' || o.bus === 'crowd' ? n.ambVerb : n.sfxVerb);
       nodes.push(send);
     }
     const voiceRec = { src, nodes, end: when + buffer.duration };
@@ -883,7 +733,7 @@ export function createAudio(opts = {}) {
         /* already stopped */
       }
     }
-    src.start(Math.max(when, ctx.currentTime));
+    src.start(Math.max(when, ctx.currentTime), o.offset || 0);
   }
 
   const posOf = (pos) => (pos && finite(pos) ? pos : null);
@@ -911,7 +761,7 @@ export function createAudio(opts = {}) {
     return { hvac, chatter };
   }
 
-  function startLoop(chans, gain, reverb) {
+  function startLoop(chans, gain, reverb, { pos = null, bus = null } = {}) {
     const buffer = ctx.createBuffer(2, chans[0].length, ctx.sampleRate);
     buffer.getChannelData(0).set(chans[0]);
     buffer.getChannelData(1).set(chans[1]);
@@ -923,18 +773,55 @@ export function createAudio(opts = {}) {
     g.gain.setValueAtTime(0, t);
     g.gain.linearRampToValueAtTime(gain, t + (offline ? 0.3 : 2.5));
     src.connect(g);
-    g.connect(n.ambBus);
+    let out = g;
+    if (pos) {
+      const p = makePanner(pos);
+      p.panningModel = 'equalpower';
+      p.refDistance = 8;
+      g.connect(p);
+      out = p;
+    }
+    out.connect(bus || n.ambBus);
     const send = ctx.createGain();
-    send.gain.value = reverb;
+    send.gain.value = reverb * wetScale();
     g.connect(send);
     send.connect(n.ambVerb);
     src.start(t, rng() * buffer.duration * 0.9);
-    return { src, g, send };
+    return { src, g, send, gain };
+  }
+
+  /** Mono noise loop for the live whoosh (built once). */
+  function whiteNoise() {
+    if (noiseBuf) return noiseBuf;
+    const len = ctx.sampleRate;
+    noiseBuf = ctx.createBuffer(1, len, ctx.sampleRate);
+    const d = noiseBuf.getChannelData(0);
+    const r = createRng(99);
+    for (let i = 0; i < len; i++) d[i] = r() * 2 - 1;
+    return noiseBuf;
+  }
+
+  // ---- open air (sunset): birds ----------------------------------------------------------
+
+  function createBirds() {
+    let next = ctx.currentTime + 1 + rng() * 3;
+    function scheduleUntil(tEnd) {
+      while (next < tEnd) {
+        const k = rng();
+        const kind = k < 0.45 ? 'swift' : k < 0.75 ? 'gull' : 'sparrow';
+        const a = rng() * Math.PI * 2;
+        const r = kind === 'sparrow' ? 10 + rng() * 6 : 18 + rng() * 30;
+        const pos = { x: Math.cos(a) * r, y: kind === 'sparrow' ? 6 + rng() * 4 : 12 + rng() * 22, z: Math.sin(a) * r - 6 };
+        play(genBird(ctx.sampleRate, rng, { kind }), pos, { when: next, gain: kind === 'gull' ? 0.9 : 0.7, reverb: 0.05, bus: 'amb' });
+        next += 2 + rng() * (kind === 'swift' ? 5 : 8);
+      }
+    }
+    return { scheduleUntil };
   }
 
   /** Neighbouring courts at x = ±13: rallies of pock - bounce - (glass) - pock, then a pause. */
-  function createNeighbours() {
-    const courts = [-13, 13].map((x, i) => ({ x, next: ctx.currentTime + 1 + rng() * 4 + i * 2, end: 1, left: 0 }));
+  function createNeighbours(xs = [-13, 13]) {
+    const courts = xs.map((x, i) => ({ x, next: ctx.currentTime + 1 + rng() * 4 + i * 2, end: 1, left: 0 }));
     function scheduleUntil(tEnd) {
       for (const c of courts) {
         while (c.next < tEnd) {
@@ -945,14 +832,15 @@ export function createAudio(opts = {}) {
           const t = c.next;
           const zHit = c.end * (6.5 + rng() * 3);
           const hitPos = { x: c.x + (rng() - 0.5) * 6, y: 0.7 + rng() * 0.7, z: zHit };
-          play(genRacket(ctx.sampleRate, rng, { speed: 12 + rng() * 14, quality: 0.6 + 0.4 * rng() }), hitPos,
+          play(genPock(ctx.sampleRate, rng, { speed: 12 + rng() * 14, quality: 0.6 + 0.4 * rng() }), hitPos,
             { when: t, gain: 0.85, reverb: 0.5, occlusion: true, bus: 'amb' });
           const bounceT = t + 0.6 + rng() * 0.25;
           const bz = -c.end * (5 + rng() * 4);
           play(genBounce(ctx.sampleRate, rng, { surface: 'turf', speed: 5 + rng() * 5 }), { x: c.x + (rng() - 0.5) * 7, y: 0, z: bz },
             { when: bounceT, gain: 0.8, reverb: 0.5, occlusion: true, bus: 'amb' });
           if (rng() < 0.3) {
-            play(genGlass(ctx.sampleRate, rng, { speed: 5 + rng() * 6 }), { x: c.x + (rng() - 0.5) * 8, y: 1, z: -c.end * 10 },
+            const gp = { x: c.x + (rng() - 0.5) * 8, y: 0.6 + rng() * 1.2, z: -c.end * 10 };
+            play(genGlassPane(ctx.sampleRate, rng, { speed: 5 + rng() * 6, panel: glassPanelAt(gp) }), gp,
               { when: bounceT + 0.35, gain: 0.8, reverb: 0.55, occlusion: true, bus: 'amb' });
           }
           c.left--;
@@ -966,18 +854,52 @@ export function createAudio(opts = {}) {
 
   async function startAmbience() {
     if (amb || !n) return;
-    amb = { loops: [], timer: null, pending: true };
+    amb = { loops: [], timer: null, pending: true, kind: venue.ambience };
     const mine = amb;
-    const beds = await buildAmbienceBeds();
-    if (amb !== mine || disposed) return;
+    const schedulers = [];
+    const sr = ctx.sampleRate;
+    const r = createRng(rng.int(1, 1e9));
+    if (venue.ambience === 'sunset') {
+      // Open air: the sea below the cliff, the breeze in the palms, birds, the court next door.
+      const secs = offline ? Math.min(24, ctx.length / sr + 2) : 24;
+      const sea = genSea(sr, r, { seconds: secs });
+      if (!offline) await yieldIdle();
+      const breeze = genBreeze(sr, r, { seconds: Math.min(secs, 20) });
+      if (amb !== mine || disposed) return;
+      amb.loops.push(startLoop(sea, 0.75, 0, { pos: { x: -6, y: -4, z: -40 } }));
+      amb.loops.push(startLoop(breeze, 0.6, 0));
+      schedulers.push(createBirds(), createNeighbours([13]));
+    } else if (venue.ambience === 'stadium') {
+      // Arena: the crowd murmur from the stands (spatial), the building's low hum.
+      const hvac = genHvac(sr, r, offline ? Math.min(12, ctx.length / sr + 2) : 12);
+      const beds = [];
+      const nBeds = offline ? 2 : 3;
+      for (let k = 0; k < nBeds; k++) {
+        if (!offline) await yieldIdle();
+        beds.push(genCrowdBed(sr, r, { seconds: offline ? Math.min(14, ctx.length / sr + 2) : 14, talkers: offline ? 6 : 12 }));
+      }
+      if (amb !== mine || disposed) return;
+      amb.loops.push(startLoop(hvac, 0.35, 0.05));
+      const src = venue.crowd.sources;
+      const gains = [];
+      src.forEach((p, i) => {
+        const l = startLoop(beds[i % beds.length], 0.55 * venue.crowd.bed, 0.4, { pos: p, bus: n.crowdBus });
+        amb.loops.push(l);
+        gains.push(l);
+      });
+      crowdBed = { loops: gains, level: 1 };
+    } else {
+      const beds = await buildAmbienceBeds();
+      if (amb !== mine || disposed) return;
+      amb.loops.push(startLoop(beds.hvac, 0.55, 0.05));
+      amb.loops.push(startLoop(beds.chatter, 0.5, 0.7));
+      schedulers.push(createNeighbours());
+    }
     amb.pending = false;
-    amb.loops.push(startLoop(beds.hvac, 0.55, 0.05));
-    amb.loops.push(startLoop(beds.chatter, 0.5, 0.7));
-    const nb = createNeighbours();
-    if (offline) nb.scheduleUntil(ctx.length / ctx.sampleRate);
-    else {
-      nb.scheduleUntil(ctx.currentTime + 1);
-      amb.timer = setInterval(() => running() && nb.scheduleUntil(ctx.currentTime + 1), 250);
+    if (offline) for (const s2 of schedulers) s2.scheduleUntil(ctx.length / ctx.sampleRate);
+    else if (schedulers.length) {
+      for (const s2 of schedulers) s2.scheduleUntil(ctx.currentTime + 1);
+      amb.timer = setInterval(() => running() && schedulers.forEach((s2) => s2.scheduleUntil(ctx.currentTime + 1)), 250);
     }
   }
 
@@ -985,6 +907,7 @@ export function createAudio(opts = {}) {
     if (!amb) return;
     const a = amb;
     amb = null;
+    crowdBed = null;
     if (a.timer) clearInterval(a.timer);
     const t = ctx.currentTime;
     for (const l of a.loops) {
@@ -1011,6 +934,55 @@ export function createAudio(opts = {}) {
     if (offline || prewarmed) return;
     prewarmed = true;
     [3, 2, 1, 3].forEach((key, i) => setTimeout(() => warmCheer(key), 2500 + i * 1200));
+    prewarmCrowd(4000);
+  }
+
+  // ---- crowd reactions ---------------------------------------------------------------------
+
+  /** Crowd size by venue level: people heard in a reaction (a few club members .. a full arena). */
+  const crowdPeople = () => Math.round(6 + 60 * venue.crowd.level);
+
+  /** Generates one stereo variant of a reaction kind. */
+  function makeCrowd(kind) {
+    const sr = ctx.sampleRate;
+    const lv = venue.crowd.level;
+    const voices = Math.round(4 + 26 * lv);
+    switch (kind) {
+      case 'applause': return genApplause(sr, rng, { level: 0.6 + 0.4 * lv, people: crowdPeople(), dur: 2.6 + 1.6 * lv });
+      case 'ooh': return genCrowdVowel(sr, rng, { kind: 'ooh', voices, dur: 1.5 });
+      case 'aah': return genCrowdVowel(sr, rng, { kind: 'aah', voices, dur: 1.6 });
+      case 'groan': return genCrowdVowel(sr, rng, { kind: 'groan', voices, dur: 1.5 });
+      case 'cheer': return genCheer(sr, rng, { level: 0.35 + 0.4 * lv });
+      case 'roar': return genCheer(sr, rng, { level: 0.6 + 0.4 * lv });
+      default: return null;
+    }
+  }
+
+  function crowdVariant(kind, { generate = true } = {}) {
+    const key = `${venue.id}:${kind}`;
+    const list = crowdCache.get(key) || [];
+    if (!list.length && generate) {
+      const v = makeCrowd(kind);
+      if (v) list.push(v);
+      crowdCache.set(key, list);
+    }
+    return list.length ? list[Math.floor(rng() * list.length)] : null;
+  }
+
+  /** Builds two variants of every reaction for this venue off the hot path (idle timeouts). */
+  function prewarmCrowd(delay = 500) {
+    if (offline || !ctx) return;
+    const v = venue.id;
+    const kinds = ['applause', 'ooh', 'groan', 'cheer', 'roar', 'aah', 'applause', 'ooh', 'cheer', 'groan'];
+    kinds.forEach((kind, i) => setTimeout(() => {
+      if (disposed || venue.id !== v) return;
+      const key = `${v}:${kind}`;
+      const list = crowdCache.get(key) || [];
+      if (list.length >= 2) return;
+      const x = makeCrowd(kind);
+      if (x) list.push(x);
+      crowdCache.set(key, list);
+    }, delay + i * 700));
   }
 
   // ---- public API ------------------------------------------------------------------------
@@ -1059,7 +1031,7 @@ export function createAudio(opts = {}) {
     /** Ball off the racket. speed: racket (sweet-spot) speed m/s; quality 0..1; offCenter 0..1 optional. */
     racket(pos, { speed = 15, quality = 1, offCenter = null } = {}) {
       if (!running()) return;
-      play(genRacket(ctx.sampleRate, rng, { speed, quality, offCenter }), posOf(pos), { reverb: 0.2 });
+      play(genPock(ctx.sampleRate, rng, { speed, quality, offCenter }), posOf(pos), { reverb: 0.2 });
     },
 
     /** Floor bounce. surface: 'turf' | 'outsideFloor' | 'ceiling'. speed: normal impact speed m/s. */
@@ -1071,8 +1043,11 @@ export function createAudio(opts = {}) {
     /** Wall hit. surface: 'glass' | 'mesh'. speed: normal impact speed m/s. */
     wall(pos, surface = 'glass', speed = 10) {
       if (!running() || !(speed > 0.3)) return;
-      const gen = surface === 'mesh' ? genMesh : genGlass;
-      play(gen(ctx.sampleRate, rng, { speed }), posOf(pos), { reverb: 0.24 });
+      const p = posOf(pos);
+      const data = surface === 'mesh'
+        ? genMesh(ctx.sampleRate, rng, { speed })
+        : genGlassPane(ctx.sampleRate, rng, { speed, panel: p ? glassPanelAt(p) : null });
+      play(data, p, { reverb: 0.24 });
     },
 
     net(pos, speed = 8) {
@@ -1096,9 +1071,13 @@ export function createAudio(opts = {}) {
       play(genFootstep(ctx.sampleRate, rng, { speed }), posOf(pos), { reverb: 0.08 });
     },
 
-    /** Crowd swell for big points, level 0..1. Non-spatial (the gallery surrounds the court). */
+    /** Crowd swell for big points, level 0..1. In a venue with a crowd it comes from the stands. */
     cheer(level = 1) {
       if (!running()) return;
+      if (venue.id !== 'club') {
+        api.crowd(level >= 0.8 ? 'roar' : 'cheer', level);
+        return;
+      }
       const lv = clamp(level, 0, 1);
       const key = Math.max(1, Math.round(lv * 3));
       const cached = cheerCache.get(key) || [];
@@ -1119,6 +1098,166 @@ export function createAudio(opts = {}) {
       play(genUi(ctx.sampleRate, rng, { kind }), null, { bus: 'ui', reverb: 0.05, gain: 0.55 });
     },
 
+    /**
+     * Racket whoosh from the tracker's 'player:swing' { t, phase: 'start'|'peak'|'end', speed (m/s),
+     * pos }. 'start' opens a live band-passed noise voice at the racket that rises with the swing,
+     * 'peak' sets its loudness and pitch from the speed (smash: lower and bigger) and lets it sweep
+     * down (the face passing the ear), 'end' closes it. A lone 'peak' plays a pre-rendered whoosh.
+     */
+    swing(evt = {}) {
+      if (!running() || !evt) return;
+      const phase = evt.phase || 'peak';
+      const speed = Number.isFinite(evt.speed) ? evt.speed : 12;
+      const pos = posOf(evt.pos) || { x: listener.pos.x + 0.35, y: listener.pos.y - 0.4, z: listener.pos.z - 0.3 };
+      const smash = speed > 17 && pos.y > listener.pos.y + 0.1;
+      const t = ctx.currentTime;
+      const f0 = (smash ? 260 : 330) + Math.min(40, speed) * (smash ? 34 : 42);
+      // Live voice: band-passed white noise sits ~8 dB under the pre-rendered whoosh at equal gain.
+      const amp = Math.min(0.5, (0.03 + 0.42 * Math.max(0, (speed - 4) / 22) ** 1.6) * (smash ? 1.25 : 1));
+      if (phase === 'start') {
+        if (liveWhoosh) liveWhoosh.stop(t);
+        const src = ctx.createBufferSource();
+        src.buffer = whiteNoise();
+        src.loop = true;
+        const bp = ctx.createBiquadFilter();
+        bp.type = 'bandpass';
+        bp.Q.value = 1.2;
+        bp.frequency.setValueAtTime(f0 * 0.55, t);
+        const g = ctx.createGain();
+        g.gain.setValueAtTime(0, t);
+        g.gain.linearRampToValueAtTime(amp * 0.25, t + 0.09);
+        const p = makePanner(pos);
+        src.connect(bp).connect(g).connect(p).connect(n.sfx);
+        src.start(t, rng() * 0.9);
+        const rec = {
+          src, bp, g, p, peaked: false, f0,
+          stop(at) {
+            try {
+              g.gain.cancelScheduledValues(at);
+              g.gain.setTargetAtTime(0, at, 0.02);
+              src.stop(at + 0.15);
+            } catch { /* already stopped */ }
+          },
+        };
+        src.onended = () => {
+          for (const x of [src, bp, g, p]) x.disconnect();
+          if (liveWhoosh === rec) liveWhoosh = null;
+        };
+        // Safety: a swing that never peaks fades out.
+        g.gain.setTargetAtTime(0, t + 0.6, 0.06);
+        src.stop(t + 1.0);
+        liveWhoosh = rec;
+        return;
+      }
+      if (phase === 'peak') {
+        const w = liveWhoosh;
+        if (w && !w.peaked) {
+          w.peaked = true;
+          const f = w.bp.frequency, g = w.g.gain;
+          f.cancelScheduledValues(t);
+          f.setValueAtTime(f.value, t);
+          f.linearRampToValueAtTime(f0 * 1.25, t + 0.02);
+          f.setTargetAtTime(f0 * 0.6, t + 0.03, 0.06);
+          g.cancelScheduledValues(t);
+          g.setValueAtTime(g.value, t);
+          g.linearRampToValueAtTime(amp, t + 0.02);
+          g.setTargetAtTime(0, t + 0.04, smash ? 0.09 : 0.06);
+          try { w.src.stop(t + 0.6); } catch { /* ignore */ }
+          return;
+        }
+        // No live voice: the pre-rendered whoosh, started so its loudest point lands now.
+        play(genWhoosh(ctx.sampleRate, rng, { speed, smash }), pos, { reverb: 0.06, offset: (smash ? 0.11 : WHOOSH_PEAK_S) * 0.7 });
+        return;
+      }
+      if (phase === 'end' && liveWhoosh && !liveWhoosh.peaked) liveWhoosh.stop(t);
+    },
+
+    /**
+     * Crowd reaction, heard from the venue's stands (venue.crowd.sources), scaled by the venue's
+     * crowd level: 'applause' | 'cheer' | 'roar' | 'ooh' | 'aah' | 'groan'; 'hush' quiets the arena
+     * murmur before a serve, 'murmur' brings it back. level 0..1.
+     */
+    crowd(kind, level = 1) {
+      if (!running()) return;
+      const lv = clamp(level, 0, 1);
+      if (kind === 'hush' || kind === 'murmur') {
+        const target = kind === 'hush' ? 0.35 : 1;
+        if (crowdBed) {
+          crowdBed.level = target;
+          for (const l of crowdBed.loops) l.g.gain.setTargetAtTime(l.gain * target, ctx.currentTime, kind === 'hush' ? 0.5 : 1.2);
+        }
+        return;
+      }
+      const data = crowdVariant(kind, { generate: offline || venue.crowd.level < 0.5 });
+      if (!data) {
+        if (!offline) prewarmCrowd(50);
+        return;
+      }
+      const vol = lv * (0.35 + 0.65 * venue.crowd.level);
+      const src = venue.crowd.sources;
+      const nSrc = Math.max(1, Math.min(src.length, Math.round(1 + lv * src.length)));
+      const start = Math.floor(rng() * src.length);
+      for (let i = 0; i < nSrc; i++) {
+        const p = src[(start + i) % src.length];
+        const v = i === 0 ? data : crowdVariant(kind, { generate: false }) || data;
+        // A stand is a large distributed source: it does not fall off like a point.
+        play([v[0].slice(), v[1].slice()], p, {
+          bus: 'crowd', gain: (vol * 1.4) / Math.sqrt(nSrc), reverb: 0.35, when: ctx.currentTime + rng() * 0.12, offset: rng() * 0.05,
+          refDistance: 9,
+        });
+      }
+    },
+
+    /** Lowers the crowd and ambience under speech (0 = none, 1 = full duck). */
+    duck(amount = 1) {
+      duckAmt = clamp(Number(amount) || 0, 0, 1);
+      if (!n) return;
+      const k = 1 - 0.5 * duckAmt;
+      setParam(n.ambBus.gain, vol.ambience * k, ctx, 0.08);
+      setParam(n.crowdBus.gain, crowdGain() * k, ctx, 0.08);
+    },
+
+    /** The venue's acoustics and ambience (metadata from src/render/venues/meta.js, or an id). */
+    setVenue(meta) {
+      const next = typeof meta === 'string' ? venueMeta(meta) : meta && meta.acoustics ? meta : venueMeta('club');
+      if (next.id === venue.id && n) return;
+      venue = next;
+      if (!n) return;
+      // Swap the reverb (crossfade), the ambience bed and prewarm this venue's crowd.
+      const t = ctx.currentTime;
+      const old = n.verb;
+      const verb = makeVerb(venue.acoustics);
+      const newWet = ctx.createGain();
+      newWet.gain.setValueAtTime(0, t);
+      newWet.gain.linearRampToValueAtTime(1, t + 0.4);
+      verb.connect(newWet);
+      newWet.connect(n.master);
+      n.sfxVerb.connect(verb);
+      n.ambVerb.connect(verb);
+      n.wet.gain.setTargetAtTime(0, t, 0.1);
+      const oldWet = n.wet;
+      setTimeout(() => {
+        try {
+          n.sfxVerb.disconnect(old);
+          n.ambVerb.disconnect(old);
+          old.disconnect();
+          oldWet.disconnect();
+        } catch { /* ignore */ }
+      }, offline ? 0 : 900);
+      n.verb = verb;
+      n.wet = newWet;
+      if (amb) {
+        stopAmbience();
+        if (wantAmbience) startAmbience();
+      }
+      prewarmCrowd(600);
+    },
+
+    /** The current venue metadata. */
+    get venue() {
+      return venue;
+    },
+
     /** Indoor-club bed: HVAC, faint chatter and rallies on the neighbouring courts. */
     ambience(on = true) {
       wantAmbience = !!on;
@@ -1128,17 +1267,19 @@ export function createAudio(opts = {}) {
       return Promise.resolve();
     },
 
-    /** Linear gains 0..1 (any subset). */
-    setVolume({ master, sfx, ambience } = {}) {
+    /** Linear gains 0..1 (any subset): master, sfx, ambience, crowd. */
+    setVolume({ master, sfx, ambience, crowd } = {}) {
       if (Number.isFinite(master)) vol.master = clamp(master, 0, 1.5);
       if (Number.isFinite(sfx)) vol.sfx = clamp(sfx, 0, 1.5);
       if (Number.isFinite(ambience)) vol.ambience = clamp(ambience, 0, 1.5);
+      if (Number.isFinite(crowd)) vol.crowd = clamp(crowd, 0, 1.5);
       if (!n) return;
       setParam(n.master.gain, vol.master, ctx, 0.05);
       setParam(n.sfx.gain, vol.sfx, ctx, 0.05);
       setParam(n.ui.gain, vol.sfx, ctx, 0.05);
       setParam(n.sfxVerb.gain, vol.sfx, ctx, 0.05);
-      setParam(n.ambBus.gain, vol.ambience, ctx, 0.05);
+      setParam(n.ambBus.gain, vol.ambience * (1 - 0.5 * duckAmt), ctx, 0.05);
+      setParam(n.crowdBus.gain, crowdGain() * (1 - 0.5 * duckAmt), ctx, 0.05);
       setParam(n.ambVerb.gain, vol.ambience, ctx, 0.05);
     },
 
@@ -1181,6 +1322,7 @@ export function createAudio(opts = {}) {
         bus.on('player:step', ({ pos, speed } = {}) => {
           if (pos) api.footstep(pos, speed ?? 2);
         }),
+        bus.on('player:swing', (e) => api.swing(e)),
         bus.on('rally:outcome', ({ reason } = {}) => {
           const lv = cheerFor[reason];
           if (lv) api.cheer(lv);
@@ -1191,6 +1333,7 @@ export function createAudio(opts = {}) {
 
     dispose() {
       stopAmbience();
+      if (liveWhoosh && ctx) liveWhoosh.stop(ctx.currentTime);
       disposed = true;
       for (const v of active.splice(0)) {
         try {

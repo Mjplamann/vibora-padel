@@ -54,6 +54,8 @@ async function darkFraction(page, png) {
 
 async function openApp(browser, port, query) {
   const page = await browser.newPage({ viewport: { width: W, height: H } });
+  // QA r5: the stock 30 s screenshot / wait timeouts failed this stage on a loaded machine.
+  page.setDefaultTimeout(300000);
   const errors = [];
   page.on('console', (m) => { if (m.type() === 'error') errors.push(m.text()); });
   page.on('pageerror', (e) => errors.push(e.message));
@@ -85,7 +87,7 @@ async function probe(browser, port, where) {
     m.scale.set(1, 0, 1);
   }, where);
   await page.waitForTimeout(3000);
-  const png = await page.screenshot({ path: join(OUT, `blackscreen-probe-${where}.png`) });
+  const png = await page.screenshot({ path: join(OUT, `blackscreen-probe-${where}.png`), timeout: 300000 });
   const dark = await darkFraction(page, png);
   const safety = await page.evaluate(() => window.__vibora.stage.safety);
   await page.close();
@@ -117,9 +119,9 @@ async function turning(browser, port) {
   const at = [1.0, 1.6, 2.3, 6.0, 6.6, 7.3];
   for (const dt of at) {
     await page.evaluate((t) => window.__vibora.freezeAt(t), T0 + dt);
-    await page.waitForFunction((t) => window.__vibora.world.time >= t - 0.01, T0 + dt, { timeout: 120000 });
+    await page.waitForFunction((t) => window.__vibora.world.time >= t - 0.01, T0 + dt, { timeout: 300000 });
     await page.waitForTimeout(1200);
-    const png = await page.screenshot({ path: join(OUT, `blackscreen-turn-${dt.toFixed(1)}.png`) });
+    const png = await page.screenshot({ path: join(OUT, `blackscreen-turn-${dt.toFixed(1)}.png`), timeout: 300000 });
     worst = Math.max(worst, await darkFraction(page, png));
     const ok = await page.evaluate(() => {
       const c = window.__vibora.stage.app.camera;

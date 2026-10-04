@@ -189,9 +189,27 @@ export function createRearView(app) {
     return true;
   }
 
+  /**
+   * Compiles the inset's composite program up front (it draws to the canvas: sRGB output, a variant
+   * the scene warm-up, bound to the linear scene target, never builds). QA r5: it compiled on the
+   * first ball behind the player, mid-rally, the one program built after ready.
+   */
+  function warm() {
+    const prev = renderer.getRenderTarget();
+    try {
+      renderer.setRenderTarget(null);
+      renderer.compile(quadScene, quadCam);
+    } catch {
+      /* best effort */
+    } finally {
+      renderer.setRenderTarget(prev);
+    }
+  }
+
   return {
     update,
     render,
+    warm,
     rect,
     camera,
     stats,

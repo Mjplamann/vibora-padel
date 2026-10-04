@@ -29,7 +29,69 @@ leaves the device (MediaPipe's built-in usage logging to Google is blocked local
 - **VITURE glasses mode** (experimental): true-scale view, compact HUD, head tracking from the glasses
   in Chrome, optional 3D side-by-side
 - **Instant replay** (R) in slow motion from the broadcast camera, with your tracked racket path
+- **You have a body**: on a TV, your full-body shadow falls on the court in front of you as you step
+  and swing. With the VITURE glasses' head tracking you can look down at your torso, legs and shoes
+  stepping with you (upper body from the camera, so standing close to the TV works; split-steps as
+  the ball is struck). The replays show your whole body.
+- **Lifelike players**: skinned athletes with varied kits, skin tones and hair, real padel strokes,
+  split-steps, planted-foot footwork, celebrations and partner high fives; the instant replay shows you too
+- **Stand close or far**: close (1.3–2.2 m, head, shoulders and arms in the picture: a small room works)
+  or full body (2.2–3.5 m); the tracker switches by itself
+- **Smooth swings**: the racket you see is drawn at the screen's refresh rate between camera frames,
+  steady at rest, with a faint motion trail on fast swings and a follow-through that carries on
+- **Three venues**: the indoor club at night, **Costa Sunset Courts** (outdoor, golden-hour sun with
+  long shadows, palms and the sea) and the **Arena Central** stadium (3,300 spectators who applaud, ooh,
+  groan, roar on a *por tres* and start waves, LED boards, umpire chair, ball kids)
+- **Sound of the game**: a modelled padel *pock* (sweet spot vs frame), glass thunks tuned to each
+  panel, mesh rattle, swing whoosh, venue acoustics, a chair umpire calling the score in Spanish or
+  English, and your partner's *¡Mía!* / *¡Tuya!* / *¡Pared!*
+- **Circuito Víbora career**: eight tournaments from the Club Open to the Pro Tour Finals (1–3 knockout
+  matches each) against named AI pairs whose personalities change how they play — the lobber, the big
+  hitter, the wall master, the net rusher, the chiquita artist, the all-rounder — at the three venues.
+  Pick your partner (each has a personality and calls the ball). Matches save after every point and
+  resume exactly where you left them.
+- **Arcade**: 60–90 s scored challenges with combos (×2…×5), *Perfect timing!* bonuses and local
+  leaderboards against the circuit's players — **Por Tres Party**, **Glass Breaker** (glowing targets on
+  the far glass: bounce first, then shatter them), **Rally Marathon** (three lives, the coach speeds up),
+  **Volley Wall** — and a **Daily Challenge** with a twist, the same for everyone on that date.
+- **Progression**: XP and levels, trophies, 24 achievements, five rackets with real trade-offs (power,
+  control, sweet-spot size, spin — the racket changes the impact physics and the timing hits) and six
+  outfits to unlock; a workout recap (active minutes, swings, kcal) and a daily streak.
+- **Automatic slow-motion replays** of the great moments (por tres, winners, 15-shot rallies, streaks of
+  perfect timing, a shattered target) from broadcast angles — any key or a raised racket skips them.
 - Voice coach (English / Spanish), spatial sound, hand-cursor menus usable from 3 m away
+
+### What's new
+
+- **Close mode for small rooms.** Stand 1.3–2.2 m from the camera with only your head, shoulders and
+  arms in the picture. Overheads (bandeja, víbora, smash, serve) still register when your hand goes
+  above the top of the picture: the tracker rebuilds the arm from the shoulder and elbow. If it keeps
+  happening, a hint tells you to step back or tilt the camera up.
+- **The camera's tilt is learned.** A MacBook lid tilted back (or a camera aimed up or down) no longer
+  skews your height and steps. The play-area calibration step measures the tilt and the camera height
+  and shows them. You can also set the tilt by hand in Settings → Movement & view → *Camera tilt*.
+- **Smooth swings, and the racket stays on screen.** The racket is drawn at the screen's refresh rate
+  and holds steady at rest (a noisy webcam picture still makes it shimmer a little). In the last
+  0.4 s before a contact, a faint cyan **racket ghost** marks where your racket will meet the ball.
+  For low balls the view dips slightly so your racket is in the picture as it comes through. Turn the
+  ghost off in Settings → Ball & aids. Forearms close to your eyes are cut off cleanly instead of
+  fading into a see-through disc.
+- **Three venues**: the club at night, Costa Sunset Courts and the Arena Central stadium. On a TV, a
+  light behind you casts your **full-body shadow forward onto the court**, so you can see yourself move.
+- **The career adapts to you.** Opponents get stronger as you win and ease off as you lose, within each
+  event's range. The event card shows the current level (*Rivals: Club−*). If you are stuck, the next
+  event opens after three tries, and a lost tournament still earns XP.
+- **Arcade**: in *Glass Breaker* the brightest target is your aim. A drive hit on time flies at it; early
+  pulls the ball cross-court and late sends it down the line. Targets start big and shrink as your combo
+  grows.
+- **Fewer, better replays.** In matches you get at most one automatic replay per game, only for points
+  you won (a winner, a smash, a *por tres*, a rally of 20+ shots), and never within 45 s of the last
+  one. In rally mode they are at least 2 minutes apart. The first replay shows where to turn them off.
+- **First hits are guided.** Until your first five hits, the HUD tells you when to swing: as the ring
+  around the ball turns green.
+- **Spacing feedback** on the shot card (*stretched 25 cm, step closer*; *cramped, give it room*), a
+  clearer *Volley too soft — punch forward* miss reason, and a workout recap that counts one swing per
+  stroke.
 
 ---
 
@@ -87,13 +149,21 @@ own window without browser bars; press **F** (or ⌃⌘F) for full screen. While
 
 ### Place the camera
 
-The camera must see you from **head to ankles**. Put it **just under, on top of or in front of the TV, at
-about chest height**, pointing straight at you, and stand **2.5–3 m** back with about 3 × 3 m of clear
-floor. The calibration screen tells you when the framing and distance are right.
+Two ways to stand. **Close (1.3–2.2 m):** the camera only needs your head, shoulders and arms. Put it at
+chest height (about 1.2–1.4 m: a MacBook on a shelf or a stack of books, screen upright) and stand an
+arm's length or two away; the game boosts your movement so a smaller room still covers the court. For
+overheads, your hand raised high above your head should still be in the picture. The calibration's
+*Play area* step warns you if it isn't. Standing 1.7–2 m away, rather than
+1.3 m, keeps it in frame. If the camera points up or down (a MacBook lid tilted back), calibration
+measures the angle. Otherwise set it in Settings → Movement & view → *Camera tilt*.
+**Full body (2.2–3.5 m):** head to ankles in the picture, about 3 × 3 m of floor. The tracker switches
+between the two by itself (it watches whether your legs are really in view), and the calibration screen
+shows which one it is using. Point the camera straight at you, just under, on top of or in front of the
+TV.
 
 - **MacBook built-in camera:** lid open, the Mac **under or in front of the TV at chest height** (on a
-  stool, shelf or TV stand) with its screen facing you. It sits lower than the TV, so step back until
-  your ankles are in frame.
+  stool, shelf or TV stand) with its screen facing you. Stand about 1.5–2 m away for close mode, or step
+  back until your ankles are in frame for full body.
 - **iPhone (Continuity Camera, best):** macOS 13+ / iOS 16+, same Apple ID, Wi‑Fi and Bluetooth on.
   **Mount the iPhone on the TV** (a MagSafe or clip mount) in landscape with the **rear camera facing
   you**, screen locked. It shows up as "iPhone Camera". In **Control Centre → Video Effects** turn
@@ -108,7 +178,9 @@ Plug VITURE XR glasses (Beast, Luma, Pro, One) into the Mac's USB‑C port and t
 **Settings → VITURE glasses** turn on **Glasses mode**: the view switches to true scale (33° × 50°:
 things appear their real size), and the HUD becomes compact. In **Chrome or Edge**, **Connect glasses**
 reads the glasses' motion sensor over WebHID: turn your head to look around the court, including back
-to the glass. Safari has no WebHID, so you get the true-scale view without head tracking.
+to the glass, or look down at your own body and feet (on a TV the view can't look down that far, so
+there you see your shadow on the court instead). Safari has no WebHID, so you get the true-scale view
+without head tracking.
 
 1. On the glasses use the standard, head-locked display: turn off their own 3DoF / anchored screen and
    **Smooth Follow**. Víbora turns the view itself.
@@ -154,21 +226,26 @@ Allow camera access when the browser asks.
 
 ### Calibration (2 minutes, saved for next time)
 
-1. **Full body** — move until head, shoulders, hips, knees and ankles are ticked and the distance meter
-   is in the green (2.2–3.5 m).
+1. **In frame** — the head and shoulders ticks (close mode) or all five (full body) turn on and the
+   distance marker sits in the band for that mode: *Close* 1.3–2.2 m or *Full body* 2.2–3.5 m. The
+   *Tracking* line says which mode the tracker is using.
 2. **Your spot** — stand still in a ready position for 2 s. This becomes your home position on court.
 3. **Profile** — racket hand and height (sets eye height, reach and your forehand side).
 4. **Latency test** (optional, recommended; marked *recommended* in Safari, which doesn't report when
    the camera captured each frame) — swing your racket hand **down** on each of 6 flashes. The measured
    delay is used to rewind time when judging your hits.
-5. **Play area** — take one step left, right, forward and back and watch the live readout.
+5. **Play area** — take one step left, right, forward and back and watch the live readout (close mode
+   asks for smaller steps, 20 cm, and shows the boosted movement gains). While you step, the game
+   learns the camera's **tilt and height** from how your body moves in the picture and shows them
+   (*Camera tilted ~9° up · corrected*). It also asks you to raise your racket hand high above your
+   head, as for a smash: if it leaves the top of the picture, step back a little or tilt the camera up.
 
 ### Controls
 
 | Action | How |
 |---|---|
 | Hit | Swing your real arm as the ball comes. Your hand is the racket grip; the face follows your palm (palm side = forehand face). On Club and Rookie a swing **on time** hits (the ring around the ball turns green: swing now); on Pro the racket must meet the ball. |
-| Move on court | Step sideways (×2.6) and toward / away from the TV (×2.2). Toward the TV = toward the net. A living room only allows about ±0.6 m of steps, so the game moves your court spot for the big moves (a short ball at your feet, a lob over your head; in rally and match it follows padel tactics and keeps you at the net after a volley, lob or serve) and your own steps do the rest. If the camera loses your head, hips or feet, the HUD tells you to step back. |
+| Move on court | Step sideways (×2.6) and toward / away from the TV (×2.2). Toward the TV = toward the net. A living room only allows about ±0.6 m of steps, so the game moves your court spot for the big moves (a short ball at your feet, a lob over your head; in rally and match it follows padel tactics and keeps you at the net after a volley, lob or serve) and your own steps do the rest. If the camera loses your head or shoulders, the HUD tells you to step back (your legs may be out of the picture: close mode). |
 | Menus | Raise a hand: a cursor appears; hover 1 s to click. Or arrows + Enter, or the mouse. On the title screen the hand works as soon as the camera is on (straight away if the browser already allows the camera). |
 | Start a drill | "Start drill", or raise your racket hand above your head for a moment |
 | Pause | Both hands above your head for 2 s (not while a ball is live), or Esc / P |
@@ -196,6 +273,10 @@ Allow camera access when the browser asks.
 Ideal contact for groundstrokes: 0.25–0.75 m in front of your hips, 0.5–0.9 m to the side, 0.6–1.3 m
 high. The shot card tells you if you were *early / late* and *cramped / stretched*.
 
+The racket you see is drawn at the screen's refresh rate between camera frames and kept steady at rest;
+a fast swing leaves a faint motion trail, and the follow-through carries on smoothly when the camera's
+view of your wrist blurs. Hits are judged from the camera's own frames, not from this drawn racket.
+
 ## 3. Drills
 
 | Drill | Skill | What you practise |
@@ -222,6 +303,42 @@ the ball must bounce on the far side before touching a wall; touching your own w
 point; exits after the bounce are *por tres* / *por cuatro*). The machine never fires while your ball is
 still in play: the next feed comes about a second after the ruling (the drill's interval is the
 minimum). Stars and personal bests are saved in the browser.
+
+## 3b. Career, Arcade and progress
+
+The hub has five tiles: **Career**, **Arcade**, **Drills** (the training curriculum), **Rally** and
+**Match** (free play: pick the opponent level, the venue and, for a match, its length), plus Trophies,
+Settings, Recalibrate and Help.
+
+| | |
+|---|---|
+| Career | 8 events: Club Open, Liga Social (club) · Torneo Atardecer, Regional Open, Copa Costa (sunset) · National Championship, Víbora Masters, Pro Tour Finals (stadium). Rookie → Club → Pro opponents; one set first to 2–6 games, golden point. Win an event to open the next, or play it three times (the card says *opened after 3 tries*). Losing a round ends the run (finalist / semifinalist trophies count, and every tournament played earns XP). Leaving a match saves it point by point. **Opponents adapt to your form**: each event has a range of rival strength. Points and matches you win move it up, losses move it down, and the event card shows the current level (*Rivals: Club−*, recommended player level). |
+| Opponents | Lobber (high deep lobs, pushes you off the net) · Big hitter (flat 15 % faster drives and smashes, more errors) · Wall master (plays to your glass, rarely misses off its own) · Net rusher (follows attacking shots in, angled volleys) · Chiquita artist (soft dipping balls at your feet) · All-rounder. Each pair wears its own kit; players celebrate a won point and hang their heads after a lost one. The event intro shows each card and a tip. |
+| Partner | Lucía (wall master), Nico (net rusher) or Pablo (lobber): plays the left side, covers the middle and calls the ball (*¡Mía!*, *¡Tuya!*, *¡Pared!*, *¡Vamos!*): a chip on the left of the picture, and spoken in Spanish by their own voice. |
+| Umpire | In matches a chair umpire calls the score after every point (*Quince – nada*, *Iguales. Punto de oro*, *Juego, Víbora*; or in English), in the language set under Settings → Game & venue → *Umpire*. |
+| Arcade | Combos: 3 good shots in a row ×2, 6 ×3, 10 ×4, 15 ×5; a miss resets it. Perfect timing (within 50 ms of the ideal moment, or a sweet-spot hit on time) adds 50 %. Leaderboards are kept on this Mac. |
+| Rackets | Víbora Fang (teardrop, balanced) · Orbit Round (control, biggest sweet spot and a wider timing window, level 3) · Grit 3D Spin (rough face, spin, level 6) · Cobra Diamond (power, small sweet spot, more scatter; win the Regional Open) · Mamba Pro 18K (tour racket; win the National Championship). The racket changes both contact hits (Pro) and timing hits (pace, scatter, spin, timing tolerance). |
+| Outfits | Six kits (Club navy, Court blue, Sunset coral, Optic, Tour white, Finals black): your sleeves, wristbands, shirt and shorts in first person, in your shadow and in replays. |
+| Replays | Played only once the ball is dead (between points / reps), never mid-rally. Drills: at most one per 45 s (por tres, perfect-timing streaks). Arcade runs: one or two (por cuatro, a shattered target, a long rally). Matches: at most one per game and 45 s apart, only for a point you won (*por tres*, smash winner, winner, a rally of 20+ shots). Rally mode: at most one every 2 minutes. The first one shows a hint; turn them off in Settings → Game & venue → *Replays of great moments*. Not with the autopilot (`?autoreplay=1` forces them). |
+
+### Venues
+
+| Venue | What it is |
+|---|---|
+| **Víbora Padel Club** (indoor, night) | The training hall: LED fixtures, a lounge bar behind the far court, a dozen spectators, neighbouring courts. |
+| **Costa Sunset Courts** (outdoor) | Golden hour: a physically based sky with a low sun casting long shadows (the glass and wire mesh too), palms, the sea with sun glitter, warm colour grade, dusty turf, sea breeze and birds. |
+| **Arena Central** (stadium, *Víbora Tour Finals*) | A show court with ~3,300 spectators, animated LED boards (original graphics only), camera towers, an umpire chair, ball kids and benches; the crowd hushes for the serve, oohs off the glass, roars on a *por tres* and starts waves. Big-hall reverb. |
+
+Free play and the arcade use the venue picked in the Match / Rally setup (or Settings → Game & venue);
+career events have their own. The 3D court behind the menus shows the venue you are choosing.
+
+### Sound
+
+Every sound is synthesised: the racket *pock* (bright at the sweet spot, dull off the frame), the glass
+thunk at each panel's resonance, mesh rattle, turf bounce, the swing whoosh (bigger for smashes), and the
+venue's acoustics (club hall, open air, arena). The crowd reacts to the play (crowd volume in Settings →
+Game & venue) and ducks under speech; one speech queue carries the voice coach, the umpire and the
+players' calls, so nothing talks over anything else. *Voice coach: off* silences the coach only.
 
 ## 4. Settings
 
@@ -261,6 +378,9 @@ minimum). Stars and personal bests are saved in the browser.
     to 0.7× around the glass rebound so you can read it.
   - **Timing tick**: a short tick 0.15 s before the moment to swing on every ball (glass balls always
     get the *now!* cue).
+  - **Racket ghost** (on by default): a faint cyan racket at the planned contact in the last 0.4 s
+    before you hit, so you can see where the racket will meet the ball even while your real racket is
+    still out of the picture.
   - **Landing marker** (predicted first bounce, Rookie/Club), **ideal contact ghost**, **ball halo**.
 - **Copy diagnostics** (Pause, Settings, or D on the pause screen) copies a compact report of your
   setup (browser, display, camera, tracker, calibration, settings) and your last 40 swings (speed,
@@ -290,11 +410,16 @@ minimum). Stars and personal bests are saved in the browser.
 - **Camera timing**: Chrome reports when each camera frame was captured; Safari doesn't, so the app
   subtracts a typical capture delay for your camera preset (MacBook 50 ms, iPhone 120 ms, USB 70 ms)
   and the calibration recommends the latency test.
+- **Camera tilt** (Settings → Movement & view): *Auto* (learned in the calibration's play-area step) or a
+  fixed angle for a camera that points up or down. A wrong tilt makes you taller or shorter on court and
+  turns steps toward the TV into steps up or down.
 - **Off-axis arm correction** (experimental, off): when you stand well to one side of the camera,
   rotates the tracked arms back toward the camera's axis. Leave it off unless your racket face looks
   turned when you step sideways.
 - **VITURE glasses** (experimental): glasses mode, head tracking, 3D side-by-side, IPD, axis test and
   flips; see [Play with VITURE Beast glasses](#play-with-viture-beast-glasses-experimental).
+- **Game & venue**: free-play venue (Club / Sunset / Stadium), umpire language (Español / English /
+  off), crowd volume, partner callouts, automatic replays of great moments.
 - Handedness, height, skin tone, racket colour, graphics quality (Ultra / High / Balanced), voice coach
   (English / Español / off) and volumes. Everything is saved in this browser.
 
@@ -336,7 +461,9 @@ the same impact physics, then confirmed (or undone) by the lag-compensated detec
 | Hits feel late or early | Turn on the TV's Game Mode, then redo the latency test (Settings → Recalibrate). The timing meter and the miss reason tell you how early or late each swing was. |
 | You swing but never hit | Check the miss reason at the top of the picture. *No swing detected*: swing a little faster and fuller. *Too far / below*: take a step (or use Rookie, which reaches any ball). Use *Copy diagnostics* and send it if it keeps happening. |
 | The 3D view goes black when you turn sideways (HUD still visible) | Fixed in this version: bad tracking data can no longer reach the 3D view. If it ever happens, open `?debug=1` and copy the *safety* line (or *Copy diagnostics*) into a bug report. |
-| You move when standing still | Turn off Center Stage; make sure your whole body is in frame; recalibrate your spot. |
+| You move when standing still | Turn off Center Stage; keep your head and shoulders (close) or your whole body (full) in frame; recalibrate your spot. |
+| The room is too small to stand 2.5 m back | Stand 1.3–2.2 m from the camera with it at chest height (close mode): only your head, shoulders and arms need to be in the picture, and your steps are amplified a little more. The calibration's *Tracking* line says *Close · upper body*. |
+| "Head out of view" during play | You are too close for the camera's height: step back a little, or raise the camera to chest height. |
 | Racket jitters | More light on you; contrasting clothes; keep the camera still. |
 | Low frame rate | Settings → Graphics quality → Balanced. Close other tabs. Use Chrome. |
 | No sound / voice | Click or press a key once (browsers only start audio after a user gesture). Check the volume sliders. |
@@ -351,7 +478,7 @@ the same impact physics, then confirmed (or undone) by the lag-compensated detec
 
 ```
 npm start          # static server on http://localhost:5173
-npm test           # 446 unit / end-to-end tests (node --test), deterministic
+npm test           # 547 unit / end-to-end tests (node --test), deterministic
 npm run smoke      # headless Chromium (SwiftShader) smoke test + screenshots in tools/out/smoke-*.png
 node tools/precache.mjs [--write]   # check / regenerate the service worker's precache list in sw.js
 node tools/icons.mjs                # regenerate icons/*.svg and every PNG size (headless Chromium)
@@ -372,7 +499,11 @@ and *Restart* activates it (`--only=pwa` runs just that part). It ends with the 
 (`tools/blackscreen.mjs`: a degenerate mesh in view and the autopilot turning side-on to ±95° with
 hidden arms, label swaps and NaN / Infinity landmarks never black out the picture; `--only=blackscreen`)
 and the glasses checks (`dev/xr-shot.mjs`, `dev/xr-app-shot.mjs`: stereo eye order, a simulated head
-sweep driving the camera, the real app in 3D side-by-side; `--only=xr`).
+sweep driving the camera, the real app in 3D side-by-side; `--only=xr`). Round 4 adds close mode
+(`--only=close`: the human-like autopilot 1.7 m from a chest-height camera with its legs out of the
+picture plays the drill on the upper-body tracker), a stadium match (`--only=match`: four skinned
+players, the crowd venue), a close-mode calibration with a synthetic person at 1.7 m in the camera
+stage, and a first-person-body check in the autopilot stage.
 Software WebGL renders the full scene at only ~1–2 fps, so the smoke test freezes the simulation at
 chosen moments (`__vibora.freezeOn('contact' | 'hit')`) to take its screenshots.
 
@@ -385,8 +516,18 @@ camera; also the title-screen demo), `?drill=<id>`, `?mode=rally|match&level=roo
 capture-to-result delay, to test a realistic Mac pipeline), `?approfile=human` (the autopilot plays like
 a person: timing spread σ 90 ms, racket position error, partial steps, 5 % of balls with no swing),
 `?apjitter=` (extra random delivery delay of a 30 fps webcam-like feed) and `?apnoise=` (landmark noise,
-1 = a MacBook camera at 2.5 m), `?glasses=1` / `?stereo=1` / `?xrsim=1` (glasses mode), `?attract=0`, `?mute=1`, `?sw=0` (no
-service worker), `?source=app` (the installed app's start URL).
+1 = a MacBook camera at 2.5 m), `?apclose=1` (the autopilot stands 1.7 m from a camera at chest height
+with its legs out of the picture: close mode), `?glasses=1` / `?stereo=1` / `?xrsim=1` (glasses mode),
+`?attract=0`, `?mute=1`, `?sw=0` (no service worker), `?source=app` (the installed app's start URL).
+Round 4: `?venue=club|sunset|stadium`, `?challenge=<id>|daily`, `?career=<eventId>` (`&quick=1`: sets
+to one game — 2-0 or a tie-break at 1-1), `?autoreplay=1|0`, `?firsthits=1` (the first-time timing prompt), `?screen=career|arcade|trophies|training|freeplay|event-intro|settings`
+(with `&event=`, `&tab=`, `&fpmode=`).
+
+Round 4 developer pages and harnesses: `dev/calibrate.html` (the close-mode body check),
+`dev/humans.html` (skinned players, strokes, kits), `dev/venues.html` + `node dev/venues-shot.mjs` /
+`node dev/venues-app-shot.mjs` (the three venues), `dev/audio-venues.html` (venue sound, umpire),
+`dev/game-ui.html`, `node dev/game-shots.mjs` / `node dev/game-play-shots.mjs` (career, arcade, HUD,
+results), `dev/rackets.html` (the five racket models).
 
 **App packaging (PWA):** `manifest.webmanifest` (name, `start_url ./?source=app`, scope `./`, display
 `fullscreen` → `standalone`, icons), `sw.js` (versioned caches: the precache list from
@@ -398,10 +539,13 @@ Lock for Esc). Icons are original artwork generated by `tools/icons.mjs` (a pade
 a V, and a ball, on court blue).
 
 Code map: `src/physics` (ball, court, racket impact, prediction), `src/rules` (referee, scoring),
-`src/tracking` (camera, MediaPipe, body model, locomotion, racket track, strokes, synthetic camera,
-autopilot), `src/game` (world, human controller, machine, coach, drills, modes, session),
-`src/render` (three.js scene, hall, rackets, hands, humanoids, effects, rear-view mirror, render safety
-net), `src/xr` (glasses mode: WebHID driver, stereo renderer, panel), `src/audio`, `src/ui`, and
+`src/tracking` (camera, MediaPipe, body model with close mode, locomotion, racket track, strokes,
+synthetic camera, autopilot), `src/game` (world, human controller, drawn swing, machine, coach, drills,
+modes, session, career, arcade challenges, progression, achievements, callouts),
+`src/render` (three.js scene, court kit and venues (`render/venues`), crowd, rackets, hands, your own
+body, skinned humans and their animation (`render/animation`), effects, rear-view mirror, render
+safety net), `src/xr` (glasses mode: WebHID driver, stereo renderer, panel), `src/audio` (synthesis, venue sound,
+crowd, voices, umpire), `src/ui` (screens, HUD, calibration, career / arcade screens), and
 `src/main.js` + `src/app/*` (boot, loop, flow, wiring, replay). The contract between modules is
 `docs/SPEC.md`. Every runtime path is relative, so the site works from any sub-path (GitHub Pages).
 
@@ -415,5 +559,5 @@ Actions*. Installed apps pick the new version up as an *Update ready* notice.
 Víbora Padel is MIT licensed (`LICENSE`). It bundles three.js (MIT), MediaPipe Tasks Vision and the
 pose landmarker models (Apache-2.0), the WebXR Input Profiles generic hand models (MIT, © Amazon) and
 the Big Shoulders Display and Barlow Semi Condensed fonts (SIL OFL 1.1). Details and licence files:
-`THIRD_PARTY_NOTICES.md`. Everything else — the club, court, glass, rackets, ball, players, textures
-and all sounds — is generated procedurally. "VÍBORA" is a made-up club; no real brand is shown.
+`THIRD_PARTY_NOTICES.md`. Everything else — the club and the other venues, court, glass, crowd,
+rackets, ball, players, textures and all sounds — is generated procedurally (spoken lines use the system's voices). "VÍBORA" is a made-up club; no real brand is shown.

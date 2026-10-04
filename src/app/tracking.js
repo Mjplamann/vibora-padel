@@ -21,10 +21,14 @@ const PARTS = {
   ankles: [27, 28],
 };
 
-/** Which body parts are visible and inside the picture: { visible, bodyInFrame 0..1 }. */
+/**
+ * Which body parts are visible and inside the picture: { visible, bodyInFrame 0..1, upper, mode }.
+ * upper: head and shoulders in the picture (close mode tracks from them, tracking/body.js CLOSE);
+ * mode: 'full' (head to ankles), 'upper' (head and shoulders, legs not all in view) or 'none'.
+ */
 export function bodyVisibility(frame) {
   const p = frame && frame.people && frame.people[0];
-  if (!p) return { visible: { head: false, shoulders: false, hips: false, knees: false, ankles: false }, bodyInFrame: 0 };
+  if (!p) return { visible: { head: false, shoulders: false, hips: false, knees: false, ankles: false }, bodyInFrame: 0, upper: false, mode: 'none' };
   const lm = p.landmarks;
   const visible = {};
   let n = 0;
@@ -36,7 +40,9 @@ export function bodyVisibility(frame) {
     visible[part] = ok;
     if (ok) n++;
   }
-  return { visible, bodyInFrame: n / 5 };
+  const upper = visible.head && visible.shoulders;
+  const mode = n === 5 ? 'full' : upper ? 'upper' : 'none';
+  return { visible, bodyInFrame: n / 5, upper, mode };
 }
 
 /**
@@ -49,7 +55,9 @@ export function offAxisBearing(frame, hfovDeg) {
   const p = frame && frame.people && frame.people[0];
   const lm = p && p.landmarks;
   if (!lm || !lm[23] || !lm[24]) return null;
-  const u = 0.5 * (lm[23].x + lm[24].x);
+  // Close mode: hips below the picture are guesses; the shoulder centre gives the bearing.
+  const hipsIn = lm[23].y <= 1 && lm[24].y <= 1 && (lm[23].visibility ?? 1) > 0.3;
+  const u = hipsIn || !lm[11] || !lm[12] ? 0.5 * (lm[23].x + lm[24].x) : 0.5 * (lm[11].x + lm[12].x);
   const fn = 0.5 / Math.tan(((hfovDeg || 68) * Math.PI) / 360);
   return Math.atan((u - 0.5) / fn);
 }
@@ -78,34 +86,74 @@ export function correctOffAxisYaw(frame, hfovDeg) {
 
 /** Seconds a body part may be missing before the play HUD warns. */
 export const FRAME_WARN = Object.freeze({ body: 0.5, feet: 1.2 });
+/**
+ * Hands leaving the top of the picture (round 5, QA r5): an episode is a wrist at the top edge (or
+ * beyond it) for at least `min` s; `count` episodes within `window` s show the hint for `show` s,
+ * then it rests for `rest` s. Overheads are tracked from a rebuilt arm then (tracking/body.js
+ * ARM_OUT), less precisely than from a hand in the picture.
+ */
+export const HANDS_TOP = Object.freeze({ edge: 0.01, min: 0.1, count: 2, window: 40, show: 4, rest: 60 });
 
 /**
- * Out-of-frame watch for play: a PoseFrame stream -> the warning to show (or null). The
- * tracker needs head, shoulders and hips in the picture (distance, arms); feet out of view
- * make crouch / eye height unreliable. Times are the frames' ms timestamps.
+ * Out-of-frame watch for play: a PoseFrame stream -> the warning to show (or null). Times are the
+ * frames' ms timestamps.
+ * Default (round 3): the tracker needs head, shoulders and hips in the picture; feet out of view
+ * are reported ('feet').
+ * upperBody (round 4, close mode: tracking/body.js estimates from the head and shoulders when the
+ * legs are out of the picture): only head and shoulders are needed; the legs are never asked for.
+ * A head cut off at the top while the shoulders are seen gets its own hint ('head').
  */
-export function createFrameWatch() {
+export function createFrameWatch({ upperBody = false, handsTop = false } = {}) {
   let bodySince = null;
   let feetSince = null;
+  let headSince = null;
+  // Hands above the picture: the current episode's start, recent episode times, the hint window.
+  let topSince = null;
+  const episodes = [];
+  let topShowUntil = -Infinity, topRestUntil = -Infinity;
+  function handsTopHint(frame, t) {
+    const p = frame && frame.people && frame.people[0];
+    const lm = p && p.landmarks;
+    const out = !!lm && [15, 16].some((i) => lm[i] && Number.isFinite(lm[i].y) && lm[i].y <= HANDS_TOP.edge);
+    if (out) topSince = topSince ?? t;
+    else if (topSince !== null) {
+      if (t - topSince >= HANDS_TOP.min * 1000) episodes.push(t);
+      topSince = null;
+    }
+    while (episodes.length && t - episodes[0] > HANDS_TOP.window * 1000) episodes.shift();
+    if (episodes.length >= HANDS_TOP.count && t >= topRestUntil) {
+      topShowUntil = t + HANDS_TOP.show * 1000;
+      topRestUntil = t + HANDS_TOP.rest * 1000;
+      episodes.length = 0;
+    }
+    return t < topShowUntil
+      ? { kind: 'hands-top', text: 'Hands leave the top of the picture · step back or tilt the camera up', es: 'Las manos salen por arriba · retrocede o inclina la cámara hacia arriba' }
+      : null;
+  }
   return {
     update(frame) {
       const t = frame && Number.isFinite(frame.t) ? frame.t : 0;
       const v = bodyVisibility(frame).visible;
       const people = frame && frame.people ? frame.people.length : 0;
-      const bodyOk = people > 0 && v.head && v.shoulders && v.hips;
+      const top = handsTop ? handsTopHint(frame, t) : null;
+      headSince = upperBody && people > 0 && v.shoulders && !v.head ? headSince ?? t : null;
+      const bodyOk = people > 0 && (upperBody ? v.shoulders : v.head && v.shoulders && v.hips);
       bodySince = bodyOk ? null : bodySince ?? t;
-      feetSince = !bodyOk || v.ankles ? null : feetSince ?? t;
+      feetSince = upperBody || !bodyOk || v.ankles ? null : feetSince ?? t;
       if (bodySince !== null && t - bodySince >= FRAME_WARN.body * 1000) {
         return people
           ? { kind: 'body', text: 'Out of frame · step back into the camera view', es: 'Fuera de cámara · retrocede' }
           : { kind: 'none', text: 'Step in front of the camera', es: 'Ponte delante de la cámara' };
       }
+      if (headSince !== null && t - headSince >= FRAME_WARN.body * 1000) {
+        return { kind: 'head', text: 'Head out of view · step back or raise the camera', es: 'Cabeza fuera de cámara · retrocede o sube la cámara' };
+      }
       if (feetSince !== null && t - feetSince >= FRAME_WARN.feet * 1000) {
         return { kind: 'feet', text: 'Feet out of view · step back a little', es: 'Pies fuera de cámara · retrocede un poco' };
       }
-      return null;
+      return top;
     },
-    reset() { bodySince = null; feetSince = null; },
+    reset() { bodySince = null; feetSince = null; headSince = null; topSince = null; episodes.length = 0; topShowUntil = -Infinity; },
   };
 }
 

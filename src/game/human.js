@@ -10,16 +10,17 @@ import { Vec3 } from '../util/vec3.js';
 import { clamp } from '../util/math.js';
 import { PLAYER, ASSIST, DEFAULT_ASSIST, TRACKING } from '../config.js';
 import { createBodyTracker, JOINT_NAMES } from '../tracking/body.js';
-import { createLocomotion, defaultBounds } from '../tracking/locomotion.js';
+import { createLocomotion, defaultBounds, closeRangeBoost } from '../tracking/locomotion.js';
 import { createRacketTrack, createRacketPose, copyRacketPose, MAX_GAP } from '../tracking/racketTrack.js';
 import { sweptContact } from '../physics/racket.js';
 import { interceptCandidates } from '../physics/predict.js';
 import {
-  applyPlayerHit, applySpeculativeHit, revertSpeculative, emit, HIT_COOLDOWN, resolveSettings, predictFlight,
+  applyPlayerHit, applySpeculativeHit, revertSpeculative, emit, emitView, HIT_COOLDOWN, resolveSettings, predictFlight,
 } from './world.js';
 import { createSwingPredictor } from './swingPredict.js';
 import { playableCandidates, pickGlassContact, stanceBounds } from './intercept.js';
 import { createTimingJudge, timingConfig, flightKeyOf } from './swingAssist.js';
+import { createSwingView } from './swingView.js';
 
 const REF_HEIGHT = 1.75;
 
@@ -181,6 +182,8 @@ export function createHumanController({ settings = {} } = {}) {
   const predictor = createSwingPredictor({ racketTrack, posAt, contactOffsets: CONTACT_OFFSETS, futurePos, contactPlan: timingContact });
   // Timing-based hitting (swingAssist.js): swings -> hits / misses, auto-positioning, cues.
   const judge = createTimingJudge({ racketTrack, posAt, prepTimeBefore: (c) => prepTimeBefore(c) });
+  // What is drawn of the racket, arms and eye at render rate (swingView.js; never used for hits).
+  const view = createSwingView({ racketTrack, posAt });
   let lastTarget = null; // court target the follow spring tracks (own steps + auto-positioning)
   const specBallPrev = blank();
   let pendingMargin = null; // speculative contact inside the assist margin only, waiting for the face
@@ -310,6 +313,7 @@ export function createHumanController({ settings = {} } = {}) {
     uDirToCourt(hf.axis, pose.axis);
     uDirToCourt(hf.normal, pose.normal);
     racketTrack.push(simT, pose);
+    view.onSample(sample, simT);
     if (timingConfig(world)) {
       const fStart = world.flight.startT;
       for (const shot of judge.onFrame(world)) afterHit(world, shot, null, null, fStart);
@@ -388,8 +392,17 @@ export function createHumanController({ settings = {} } = {}) {
     checkHits(world);
   }
 
+  /**
+   * Stores the neutral spot (body.js calibrate). A close-mode calibration (upper body only) boosts
+   * the movement gains for the smaller play area (locomotion.closeRangeBoost).
+   */
   function calibrate() {
-    return bodyTracker.calibrate();
+    const ok = bodyTracker.calibrate();
+    if (ok) {
+      const cal = bodyTracker.calibration;
+      locomotion.setBoost(cal.mode === 'upper' ? closeRangeBoost(cal.d0) : null);
+    }
+    return ok;
   }
 
   /** Fallback movement target (court {x, z}) or null to return to camera control. */
@@ -504,10 +517,15 @@ export function createHumanController({ settings = {} } = {}) {
   function afterStep(world, dt) {
     const pose = predictor.update(world);
     const pl = world.player;
-    if (pose) {
+    // The racket drawn this frame: render-rate, smoothed, swing-aware (swingView.js). Mouse play
+    // draws the predictor's pose as before (the pointer is already smooth and must not lag).
+    const shown = world.input === 'fallback' || manualTarget ? pose : view.racket(world, predictor);
+    if (shown) {
       if (!pl.renderRacket) pl.renderRacket = createRacketPose();
-      copyRacketPose(pl.renderRacket, pose);
+      copyRacketPose(pl.renderRacket, shown);
     } else pl.renderRacket = null;
+    const evs = view.drainEvents();
+    if (evs) for (const e of evs) emitView(world, 'player:swing', e);
     const plan = predictor.plan;
     if (plan && !plan.dead) {
       planFamily.key = plan.key;
@@ -516,7 +534,15 @@ export function createHumanController({ settings = {} } = {}) {
     const b = world.ball;
     const timing = !!timingConfig(world);
     // Timing hits: the strike at t*, the magnetized racket, cues and the window are the judge's.
-    if (timing) judge.afterStep(world, { predictor, dt });
+    if (timing) {
+      judge.afterStep(world, { predictor, dt });
+      // The drawn racket continues its swing from the strike frame (swingView follow-through).
+      const M = world.timing && world.timing.magnet;
+      if (M && !M.handled && shown && shown === view.lastShown) {
+        view.onStrike(world, M.pose, predictor.plan);
+        M.handled = true;
+      }
+    }
     // Speculative contact: the shown racket (previous tick -> now) against the ball over the same tick.
     if (!timing && b && !world.spec && plan && !plan.struck && specPrevId === b.id) {
       const assist = ASSIST[world.settings.assist] || ASSIST[DEFAULT_ASSIST];
@@ -568,6 +594,14 @@ export function createHumanController({ settings = {} } = {}) {
 
   // ---- movement ---------------------------------------------------------------
 
+  /** A live ball the player may be playing (coming to them, or just struck by them). */
+  function playingBall(world) {
+    const b = world.ball;
+    if (!b || b.atRest || b.outside) return false;
+    if (world.flight.team !== 0 || world.flight.by === 'drop') return true;
+    return world.time - world.player.lastHitAt < 0.8;
+  }
+
   function updateMagnet(world) {
     const pl = world.player;
     const ball = world.ball;
@@ -598,6 +632,7 @@ export function createHumanController({ settings = {} } = {}) {
     // A gliding (tactical) home carries the player's own offset along; a new home snaps.
     if ((pl.home.x !== lh.x || pl.home.z !== lh.z) && !pl.snapToHome) locomotion.moveHome(pl.home);
     if (pl.snapToHome) {
+      view.reset(); // a teleport is no motion to smooth
       locomotion.setHome(pl.home);
       pl.pos.set(pl.home.x, 0, pl.home.z);
       pl.vel.set(0, 0, 0);
@@ -616,6 +651,8 @@ export function createHumanController({ settings = {} } = {}) {
       tgt = manualTarget || locomotion.target;
     }
     lastTarget = tgt;
+    // Pitch fit (body.js TILT) only from upright moments: no ball on its way to the player.
+    bodyTracker.setUpright(!playingBall(world));
     const k = PLAYER.followStiffness;
     let ax = k * k * (tgt.x - pl.pos.x) - 2 * k * pl.vel.x;
     let az = k * k * (tgt.z - pl.pos.z) - 2 * k * pl.vel.z;
@@ -639,10 +676,13 @@ export function createHumanController({ settings = {} } = {}) {
     pl.speed = Math.hypot(pl.vel.x, pl.vel.z);
     pushPos(world.time + dt, pl.pos.x, pl.pos.z);
 
-    // Eye and court-frame body (render), from the newest sample at the current position.
+    // Eye and court-frame body (render), from the newest sample at the current position: carried
+    // between camera frames and smoothed across them (swingView.js), so arms and view move at
+    // render rate.
     const latest = racketTrack.latest();
     if (lastSample && lastSample.valid && !manualTarget) {
-      pl.bodyCourt = buildBodyCourt(lastSample, pl.pos.x, pl.pos.z, pl.bodyCourt);
+      const sj = view.joints(world);
+      pl.bodyCourt = buildBodyCourt(sj && sj.joints.eyeL ? sj : lastSample, pl.pos.x, pl.pos.z, pl.bodyCourt);
       pl.eye.copy(pl.bodyCourt.eye);
       const hf = pl.bodyCourt.handFrames[lastSample.dominant];
       if (!pl.racket) pl.racket = createRacketPose();
@@ -688,6 +728,8 @@ export function createHumanController({ settings = {} } = {}) {
     get lastFrameAt() {
       return lastFrameAt;
     },
+    /** The render-rate racket / arm view (swingView.js): stats, shown speed. */
+    view,
   };
 }
 

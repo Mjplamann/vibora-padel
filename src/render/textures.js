@@ -824,6 +824,292 @@ export function softSpriteTexture({ size = 128, hardness = 0.0 } = {}) {
   });
 }
 
+// ---------------------------------------------------------------------------------------------
+// Glass smudges, LED board graphics, stone paving (venues, round 4)
+
+/**
+ * Smudges on a 2 x 3 m glass pane, two variants side by side (u 0..0.5, 0.5..1; v = height / 3 m).
+ * R = grease (finger and palm prints near the corners and doors, cleaning-cloth arcs, haze),
+ * G = ball felt marks (round, some smeared by the skid), B = water spots and drip streaks (outdoor).
+ * Data texture (NoColorSpace), linear filtered with mipmaps; shared (never disposed by a venue).
+ */
+export function glassSmudgeTexture({ width = 1024, height = 768, seed = 91 } = {}) {
+  return cached(`smudge:${width}:${seed}`, () => {
+    const W = width, H = height;
+    const PW = W / 2; // one pane: 2 m wide
+    const ppm = PW / 2; // pixels per metre
+    const rng = createRng(seed);
+    const layer = () => {
+      const c = makeCanvas(W, H);
+      const ctx = c.getContext('2d');
+      ctx.fillStyle = '#000';
+      ctx.fillRect(0, 0, W, H);
+      return { c, ctx };
+    };
+    const R = layer(), G = layer(), B = layer();
+    const Y = (m) => H - m * ppm; // canvas y of a height in metres
+    const blob = (ctx, x, y, rx, ry, a, rot = 0) => {
+      ctx.save();
+      ctx.translate(x, y);
+      ctx.rotate(rot);
+      ctx.scale(rx, ry);
+      const g = ctx.createRadialGradient(0, 0, 0, 0, 0, 1);
+      g.addColorStop(0, `rgba(255,255,255,${a})`);
+      g.addColorStop(0.55, `rgba(255,255,255,${a * 0.6})`);
+      g.addColorStop(1, 'rgba(255,255,255,0)');
+      ctx.fillStyle = g;
+      ctx.beginPath();
+      ctx.arc(0, 0, 1, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.restore();
+    };
+    for (let v = 0; v < 2; v++) {
+      const x0 = v * PW;
+      // Haze blotches.
+      for (let i = 0; i < 9; i++) blob(R.ctx, x0 + rng() * PW, Y(0.3 + rng() * 2.4), 40 + rng() * 90, 30 + rng() * 70, 0.05 + rng() * 0.08, rng() * 3);
+      // Hand / finger prints: near a vertical edge (the corners, the door) at 0.9–1.8 m.
+      const hands = 1 + Math.floor(rng() * 3);
+      for (let h = 0; h < hands; h++) {
+        const edge = rng() < 0.5 ? 0.12 + rng() * 0.35 : 2 - 0.12 - rng() * 0.35;
+        const hx = x0 + edge * ppm, hy = Y(0.95 + rng() * 0.85);
+        const rot = (rng() - 0.5) * 0.8;
+        const s = ppm * (0.9 + rng() * 0.2);
+        blob(R.ctx, hx, hy, 0.045 * s, 0.055 * s, 0.32, rot); // palm
+        for (let f = 0; f < 4; f++) {
+          const ang = rot - 0.45 + f * 0.3;
+          blob(R.ctx, hx + Math.sin(ang) * 0.09 * s, hy - Math.cos(ang) * 0.09 * s, 0.011 * s, 0.017 * s, 0.4, ang);
+        }
+        blob(R.ctx, hx + 0.07 * s * Math.cos(rot), hy + 0.02 * s, 0.012 * s, 0.018 * s, 0.35, rot + 1.1); // thumb
+        for (let k = 0; k < 5; k++) blob(R.ctx, hx + (rng() - 0.5) * 0.4 * ppm, hy + (rng() - 0.5) * 0.4 * ppm, 0.012 * ppm, 0.016 * ppm, 0.3, rng() * 3);
+      }
+      // Cleaning-cloth arcs.
+      R.ctx.lineCap = 'round';
+      for (let i = 0; i < 6; i++) {
+        const cx = x0 + rng() * PW, cy = Y(0.6 + rng() * 2.0), r = (0.25 + rng() * 0.5) * ppm;
+        const a0 = rng() * Math.PI * 2;
+        R.ctx.strokeStyle = `rgba(255,255,255,${0.05 + rng() * 0.07})`;
+        R.ctx.lineWidth = 0.08 * ppm + rng() * 0.08 * ppm;
+        R.ctx.beginPath();
+        R.ctx.arc(cx, cy, r, a0, a0 + 1.2 + rng() * 1.8);
+        R.ctx.stroke();
+      }
+      // Ball felt marks: where balls strike the glass (0.35–2.6 m), some smeared sideways.
+      const n = 12 + Math.floor(rng() * 16);
+      for (let i = 0; i < n; i++) {
+        const bx = x0 + (0.1 + rng() * 1.8) * ppm, by = Y(0.35 + rng() ** 1.3 * 2.25);
+        const smear = rng() < 0.35 ? 1.6 + rng() * 2 : 1;
+        blob(G.ctx, bx, by, 0.036 * ppm * smear, 0.034 * ppm, 0.25 + rng() * 0.35, (rng() - 0.5) * 0.5);
+        blob(G.ctx, bx, by, 0.018 * ppm, 0.018 * ppm, 0.25, 0);
+      }
+      // Water spots (rings) and drip streaks from the top rail.
+      for (let i = 0; i < 260; i++) {
+        const sx = x0 + rng() * PW, sy = Y(rng() ** 0.8 * 3);
+        const r = 1.5 + rng() * 4.5;
+        B.ctx.strokeStyle = `rgba(255,255,255,${0.2 + rng() * 0.35})`;
+        B.ctx.lineWidth = 0.8 + rng();
+        B.ctx.beginPath();
+        B.ctx.arc(sx, sy, r, 0, Math.PI * 2);
+        B.ctx.stroke();
+      }
+      for (let i = 0; i < 14; i++) {
+        const sx = x0 + rng() * PW, len = (0.3 + rng() * 1.4) * ppm;
+        const g = B.ctx.createLinearGradient(sx, Y(3), sx, Y(3) + len);
+        g.addColorStop(0, 'rgba(255,255,255,0.35)');
+        g.addColorStop(1, 'rgba(255,255,255,0)');
+        B.ctx.strokeStyle = g;
+        B.ctx.lineWidth = 2 + rng() * 3;
+        B.ctx.beginPath();
+        B.ctx.moveTo(sx, Y(3));
+        B.ctx.bezierCurveTo(sx + (rng() - 0.5) * 8, Y(3) + len * 0.3, sx + (rng() - 0.5) * 12, Y(3) + len * 0.7, sx + (rng() - 0.5) * 10, Y(3) + len);
+        B.ctx.stroke();
+      }
+    }
+    const out = new Uint8ClampedArray(W * H * 4);
+    const dr = R.ctx.getImageData(0, 0, W, H).data, dg = G.ctx.getImageData(0, 0, W, H).data, db = B.ctx.getImageData(0, 0, W, H).data;
+    for (let i = 0; i < W * H; i++) {
+      out[i * 4] = dr[i * 4];
+      out[i * 4 + 1] = dg[i * 4];
+      out[i * 4 + 2] = db[i * 4];
+      out[i * 4 + 3] = 255;
+    }
+    const tex = dataTextureFromRGBA(out, W, H, { repeat: false, aniso: 8 });
+    tex.wrapS = THREE.RepeatWrapping;
+    tex.userData.shared = true;
+    return tex;
+  });
+}
+
+/**
+ * LED board graphics: 8 banner rows (2048 x 128 each) of original artwork on transparent black,
+ * white / brand-coloured. The board shader scrolls a row and tints it. Rows:
+ * 0 VÍBORA TOUR wordmark, 1 ¡VAMOS!, 2 PUNTO DE ORO · GOLDEN POINT, 3 WORLD FINALS chevrons,
+ * 4 ¡PUNTO!, 5 POR TRES, 6 ball + snake icons, 7 MÍA · TUYA · ¡VAMOS!
+ */
+export function ledBannerTexture() {
+  return cached('led-banners', () => sharedTex(fontCanvasTexture(2048, 1024, (ctx, W) => {
+    ctx.clearRect(0, 0, W, 1024);
+    const RH = 128;
+    const row = (i, draw) => {
+      ctx.save();
+      ctx.translate(0, i * RH);
+      ctx.beginPath();
+      ctx.rect(0, 0, W, RH);
+      ctx.clip();
+      draw(ctx);
+      ctx.restore();
+    };
+    const snake = (c, x, y, r, col) => {
+      c.lineWidth = r * 0.16;
+      c.strokeStyle = '#ffffff';
+      c.beginPath();
+      c.arc(x, y, r, 0, Math.PI * 2);
+      c.stroke();
+      c.strokeStyle = col;
+      c.lineWidth = r * 0.2;
+      c.lineCap = 'round';
+      c.beginPath();
+      c.moveTo(x - r * 0.62, y - r * 0.55);
+      c.bezierCurveTo(x + r * 0.9, y - r * 0.75, x - r * 0.9, y + r * 0.75, x + r * 0.62, y + r * 0.55);
+      c.stroke();
+    };
+    const text = (c, s, x, size, color, weight = 900, font = DISPLAY_FONT) => {
+      c.font = `${weight} ${size}px ${font}`;
+      c.fillStyle = color;
+      c.textBaseline = 'middle';
+      c.fillText(s, x, RH / 2 + 4);
+      return c.measureText(s).width;
+    };
+    row(0, (c) => {
+      let x = 40;
+      for (let k = 0; k < 3; k++) {
+        snake(c, x + 50, RH / 2, 42, '#d9f03a');
+        x += 120;
+        x += text(c, 'VÍBORA', x, 104, '#ffffff') + 24;
+        x += text(c, 'TOUR', x, 104, '#d9f03a') + 110;
+      }
+    });
+    row(1, (c) => {
+      let x = 30;
+      for (let k = 0; k < 4; k++) x += text(c, '¡VAMOS!', x, 112, k % 2 ? '#5fd8ff' : '#ffffff') + 120;
+    });
+    row(2, (c) => {
+      let x = 30;
+      x += text(c, 'PUNTO DE ORO', x, 96, '#ffd84a') + 60;
+      x += text(c, '·', x, 96, '#ffffff') + 60;
+      x += text(c, 'GOLDEN POINT', x, 96, '#ffffff') + 120;
+      text(c, 'PUNTO DE ORO', x, 96, '#ffd84a');
+    });
+    row(3, (c) => {
+      let x = 20;
+      for (let k = 0; k < 2; k++) {
+        for (let j = 0; j < 4; j++) {
+          c.fillStyle = j % 2 ? '#5fd8ff' : '#d9f03a';
+          c.beginPath();
+          c.moveTo(x, 20); c.lineTo(x + 36, 20); c.lineTo(x + 76, RH / 2); c.lineTo(x + 36, RH - 20); c.lineTo(x, RH - 20); c.lineTo(x + 40, RH / 2);
+          c.fill();
+          x += 58;
+        }
+        x += 40;
+        x += text(c, 'WORLD FINALS', x, 100, '#ffffff') + 140;
+      }
+    });
+    row(4, (c) => {
+      let x = 40;
+      for (let k = 0; k < 4; k++) x += text(c, '¡PUNTO!', x, 112, '#ffffff') + 140;
+    });
+    row(5, (c) => {
+      let x = 40;
+      for (let k = 0; k < 3; k++) x += text(c, '¡POR TRES!', x, 112, k % 2 ? '#ff9a3c' : '#ffd84a') + 140;
+    });
+    row(6, (c) => {
+      for (let k = 0; k < 10; k++) {
+        const x = 100 + k * 200;
+        if (k % 2) snake(c, x, RH / 2, 44, '#5fd8ff');
+        else {
+          const g = c.createRadialGradient(x - 12, RH / 2 - 14, 4, x, RH / 2, 46);
+          g.addColorStop(0, '#f6ff9a');
+          g.addColorStop(1, '#c6e21a');
+          c.fillStyle = g;
+          c.beginPath();
+          c.arc(x, RH / 2, 44, 0, Math.PI * 2);
+          c.fill();
+          c.strokeStyle = 'rgba(255,255,255,0.9)';
+          c.lineWidth = 5;
+          c.beginPath();
+          c.arc(x - 60, RH / 2, 60, -0.75, 0.75);
+          c.stroke();
+          c.beginPath();
+          c.arc(x + 60, RH / 2, 60, Math.PI - 0.75, Math.PI + 0.75);
+          c.stroke();
+        }
+      }
+    });
+    row(7, (c) => {
+      let x = 40;
+      for (const [s, col] of [['¡MÍA!', '#ffffff'], ['¡TUYA!', '#5fd8ff'], ['¡VAMOS!', '#d9f03a'], ['¡MÍA!', '#ffffff'], ['¡TUYA!', '#5fd8ff']]) x += text(c, s, x, 104, col) + 110;
+    });
+  }, { srgb: true, repeat: true, aniso: 8 })));
+}
+
+/** Marks a cached texture as shared so a venue teardown never disposes it. */
+function sharedTex(t) {
+  t.userData.shared = true;
+  return t;
+}
+
+/**
+ * Warm limestone terrace tiles (60 x 40 cm, staggered) with grout, wear and dust. 2.4 m per repeat.
+ * userData: { normalMap, roughnessMap }.
+ */
+export const PAVING_TILE_M = 2.4;
+export function pavingTexture({ size = 1024 } = {}) {
+  return cached(`paving:${size}`, () => {
+    const S = size;
+    const ppm = S / PAVING_TILE_M;
+    const rng = createRng(71);
+    const mott = fbmGrid(S / 4, S / 4, { seed: 72, basePeriod: 4, octaves: 5, gain: 0.55 });
+    const col = new Uint8ClampedArray(S * S * 4);
+    const hgt = new Float32Array(S * S);
+    const rgh = new Uint8ClampedArray(S * S * 4);
+    const tw = 0.6 * ppm, th = 0.4 * ppm, grout = Math.max(2, 0.008 * ppm);
+    const tileTone = [];
+    for (let i = 0; i < 64; i++) tileTone.push(0.88 + rng() * 0.2);
+    for (let y = 0; y < S; y++) {
+      const ry = Math.floor(y / th);
+      const fy = y - ry * th;
+      const off = (ry % 2) * tw * 0.5;
+      for (let x = 0; x < S; x++) {
+        const xx = (x + off) % S;
+        const rx = Math.floor(xx / tw);
+        const fx = xx - rx * tw;
+        const edge = Math.min(fx, tw - fx, fy, th - fy);
+        const isGrout = edge < grout * 0.5;
+        const m = mott[((y >> 2) * (S >> 2)) + (x >> 2)];
+        const tone = tileTone[(rx * 7 + ry * 13) & 63];
+        const v = isGrout ? 0.55 : tone * (0.86 + (m - 0.5) * 0.4 + (rng() - 0.5) * 0.05);
+        const i = (y * S + x) * 4;
+        col[i] = 214 * v;
+        col[i + 1] = 196 * v;
+        col[i + 2] = 168 * v;
+        col[i + 3] = 255;
+        const bevel = Math.min(1, edge / (grout * 1.6));
+        hgt[y * S + x] = isGrout ? 0 : 0.5 + 0.5 * bevel + (m - 0.5) * 0.08;
+        rgh[i] = 0;
+        rgh[i + 1] = clamp(255 * (isGrout ? 0.95 : 0.62 + m * 0.25), 0, 255);
+        rgh[i + 2] = 0;
+        rgh[i + 3] = 255;
+      }
+    }
+    const map = dataTextureFromRGBA(col, S, S, { srgb: true });
+    map.userData.normalMap = dataTextureFromRGBA(heightToNormal(hgt, S, S, 1.4), S, S);
+    map.userData.roughnessMap = dataTextureFromRGBA(rgh, S, S);
+    map.userData.shared = true;
+    map.userData.normalMap.userData.shared = true;
+    map.userData.roughnessMap.userData.shared = true;
+    return map;
+  });
+}
+
 /** Frees every cached texture (for teardown in tests / hot reload). */
 export function disposeTextures() {
   for (const v of cache.values()) {

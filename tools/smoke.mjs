@@ -7,9 +7,16 @@
 //      frame and the results screen.
 //   1b. The same drill with a realistic Mac pipeline (?aplatency=0.11&apdelivery=0.15): the
 //      hit rate must match run 1 and no contact may be rejected as late.
+//   1c. Close mode (round 4): the human-like autopilot 1.7 m from a camera at chest height, legs out
+//      of the picture (?apclose=1&approfile=human, Mac latency): the tracker runs on the upper body
+//      and the drill is still played.
+//   1d. A 2 v 2 match in the stadium (?mode=match&venue=stadium): four skinned players on court,
+//      the crowd venue, a frozen first-person screenshot.
 //   2. ?fallback=1&drill=fh-drive&speed=2 — mouse / trackpad controls, pointer flicks + Space swings.
 //   3. Camera path with Chromium's fake camera (no person in the picture): title -> camera ->
-//      calibration screens with the real MediaPipe model.
+//      calibration screens with the real MediaPipe model; a synthetic person calibrates at 2.6 m
+//      (full body) and, on a second page, at 1.7 m from a chest-height camera (close mode: upper
+//      body only, the legs out of the picture).
 //   4. Installable app (PWA) from the GitHub Pages sub-path, in a real (non-incognito) profile:
 //      the manifest parses and Chrome reports no installability errors (DevTools Protocol), the
 //      service worker precaches the app, then OFFLINE: a relaunch boots with zero errors and a
@@ -21,7 +28,7 @@
 //   6. Glasses mode (dev/xr-shot.mjs --only=full, dev/xr-app-shot.mjs --only=stereo): stereo eye
 //      order and a simulated head sweep driving the camera, then the real app at 3840×1200 in
 //      3D side-by-side with simulated glasses (?xrsim=1&stereo=1) and the Mac-latency autopilot.
-// Usage: node tools/smoke.mjs [--only=autopilot|latency|fallback|camera|nocamera|subpath|pwa|blackscreen|xr] [--width=1280 --height=720]
+// Usage: node tools/smoke.mjs [--only=autopilot|latency|close|match|fallback|camera|nocamera|subpath|pwa|blackscreen|xr] [--width=1280 --height=720]
 import { spawn } from 'node:child_process';
 import { mkdir, mkdtemp, rm } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
@@ -64,6 +71,7 @@ async function launch(chromium, { fakeCamera = true } = {}) {
 
 async function openPage(browser, url, port) {
   const page = await browser.newPage({ viewport: { width: W, height: H } });
+  page.setDefaultTimeout(300000); // software GL under load (QA r5): clicks and screenshots wait for frames
   const errors = [];
   const logs = [];
   const external = [];
@@ -87,7 +95,9 @@ async function openPage(browser, url, port) {
 }
 
 const stats = (page) => page.evaluate(() => ({ ...window.__vibora.stats, screen: window.__vibora.screen }));
-const shot = (page, name) => page.screenshot({ path: join(OUT, `smoke-${name}.png`) });
+// Software GL under load renders the full app at ~0.3 fps: a screenshot waits for a frame.
+// QA r5: 120 s was still short on a loaded machine; a frame can take minutes there.
+const shot = (page, name) => page.screenshot({ path: join(OUT, `smoke-${name}.png`), timeout: 300000 });
 
 /** Freezes the sim on a rule ('contact' | 'hit'), waits for a few rendered frames, screenshots, resumes. */
 async function frozenShot(page, kind, offset, name, renderMs = 3500) {
@@ -135,8 +145,11 @@ async function runAutopilot(browser, port) {
   await page.waitForTimeout(3500);
   await shot(page, 'results');
   const rate = s.judgedShots ? s.inCourt / s.judgedShots : 0;
+  const presence = await page.evaluate(() => window.__vibora.stage.presence);
   console.log('stats', JSON.stringify(s));
+  console.log('presence', JSON.stringify(presence));
   check('autopilot: no console errors / failed requests', errors.length === 0, errors.slice(0, 5).join(' | '));
+  check('autopilot: first-person body drawn (render/fpBody.js)', presence.fpBody.frames > 0, `${presence.fpBody.frames} frames`);
   check('autopilot: no runtime errors', s.errors === 0);
   check('autopilot: >= 8 player hits', s.playerHits >= 8, `${s.playerHits} hits in ${(s.simTime - t0).toFixed(1)} s sim`);
   check('autopilot: >= 50% of judged shots land in the court', rate >= 0.5, `${s.inCourt}/${s.judgedShots}`);
@@ -163,6 +176,44 @@ async function runLatency(browser, port, base) {
   check('latency: judge margin covers the pipeline', s.judgeMargin >= 0.15 + 2 / 30 - 1e-6, `margin ${s.judgeMargin}`);
   check('latency: no contact rejected as late', s.lateHits === 0, `${s.lateHits} late`);
   check('latency: hit rate unchanged', !base || rate(s) >= rate(base) - 0.1, `${s.playerHits}/${s.feeds} vs ${base ? `${base.playerHits}/${base.feeds}` : '—'}`);
+  await page.close();
+}
+
+/** Close mode: the human-like autopilot 1.7 m from a chest-height camera, legs out of the picture. */
+async function runClose(browser, port) {
+  const url = 'index.html?autopilot=1&apclose=1&approfile=human&aplatency=0.11&apdelivery=0.15&drill=fh-drive&speed=3';
+  console.log(`\n— close mode: ${url}`);
+  const { page, errors } = await openPage(browser, url, port);
+  const t0 = await page.evaluate(() => window.__vibora.world.time);
+  const pre = await frozenShot(page, 'contact', -0.02, 'close-precontact');
+  for (;;) {
+    const s = await stats(page);
+    if (s.simTime - t0 >= SIM_SECONDS || s.finished || s.errors) break;
+    await page.waitForTimeout(1000);
+  }
+  const s = await stats(page);
+  const tr = s.tracker || {};
+  console.log('stats', JSON.stringify(s));
+  check('close: no console errors', errors.length === 0 && s.errors === 0, errors.slice(0, 3).join(' | '));
+  check('close: tracker in upper-body mode (legs out of the picture)', (tr.upperFrames || 0) > 0.8 * (tr.frames || 1), `${tr.upperFrames}/${tr.frames} upper frames`);
+  check('close: the drill is played (>= 6 player hits)', s.playerHits >= 6, `${s.playerHits}/${s.feeds} hits/feeds`);
+  check('close: froze before a contact for a screenshot', pre);
+  await page.close();
+}
+
+/** A 2 v 2 match in the stadium: skinned players, crowd venue, first-person screenshot. */
+async function runMatch(browser, port) {
+  const url = 'index.html?autopilot=1&mode=match&venue=stadium&speed=3';
+  console.log(`\n— match: ${url}`);
+  const { page, errors } = await openPage(browser, url, port);
+  await page.waitForFunction(() => window.__vibora.stats.rallies >= 1 || window.__vibora.stats.errors, null, { timeout: 240000 }).catch(() => {});
+  const pre = await frozenShot(page, 'contact', 0.05, 'match-stadium');
+  const info = await page.evaluate(() => ({ presence: window.__vibora.stage.presence, venue: window.__vibora.stage.env.venue.id, draws: window.__vibora.stats.drawCalls }));
+  const s = await stats(page);
+  console.log('match', JSON.stringify({ ...info, rallies: s.rallies, hits: s.playerHits }));
+  check('match: no console errors', errors.length === 0 && s.errors === 0, errors.slice(0, 3).join(' | '));
+  check('match: stadium venue with >= 3 skinned players besides you', info.venue === 'stadium' && info.presence.humans >= 3, `${info.venue}, ${info.presence.humans} humans`);
+  check('match: points are played', s.rallies >= 1 && pre, `${s.rallies} rallies`);
   await page.close();
 }
 
@@ -224,8 +275,8 @@ async function runCamera(browser, port) {
     const body = standingBody({ height: 1.75, room: { x: 0.1, d: 2.6 } });
     window.__smokeFeed = setInterval(() => window.__vibora.injectPoseFrame(cam.frame(performance.now(), [body])), 33);
   });
-  await page.waitForFunction(() => window.__vibora.calibration && window.__vibora.calibration.ok, null, { timeout: 90000 }).catch(() => {});
-  await page.waitForTimeout(4000);
+  await page.waitForFunction(() => window.__vibora.calibration && window.__vibora.calibration.ok && /Profile/.test(document.querySelector('.stepper li.current span')?.textContent || ''), null, { timeout: 90000 }).catch(() => {});
+  await page.waitForTimeout(1500);
   const cal = await page.evaluate(() => ({ cal: window.__vibora.calibration, step: document.querySelector('.stepper li.current span')?.textContent || '' }));
   await shot(page, 'calibrated');
   await page.evaluate(() => clearInterval(window.__smokeFeed));
@@ -236,6 +287,46 @@ async function runCamera(browser, port) {
   check('camera: no console errors / failed requests', filtered.length === 0, filtered.slice(0, 5).join(' | '));
   check('camera: reached calibration', s.screen === 'calibrate' && s.errors === 0, `screen ${s.screen}`);
   check('camera: no external network requests (MediaPipe telemetry blocked)', external.length === 0, external.slice(0, 3).join(' | '));
+  await page.close();
+  await runCameraClose(browser, port);
+}
+
+/**
+ * Close-mode calibration (round 4, ui/calibrate.js): a synthetic person 1.7 m from a camera at chest
+ * height, the legs below the picture (MediaPipe-style guesses). The body step must accept the upper
+ * body ("Close · upper body") and the spot step must calibrate.
+ */
+async function runCameraClose(browser, port) {
+  console.log('\n— camera path, close mode (synthetic person at 1.7 m, legs out of frame)');
+  const { page, errors } = await openPage(browser, 'index.html', port);
+  await page.waitForTimeout(3000);
+  await page.keyboard.press('Enter');
+  await page.waitForFunction(() => window.__vibora.screen === 'camera', null, { timeout: 20000 }).catch(() => {});
+  await page.waitForTimeout(15000);
+  await page.evaluate(() => document.querySelector('[data-action="to-calibrate"]')?.click());
+  await page.waitForTimeout(4000);
+  await page.evaluate(async () => {
+    const { createSyntheticCamera, standingBody } = await import('./src/tracking/synthetic.js');
+    const cam = createSyntheticCamera({ hfovDeg: window.__vibora.settings.hfovDeg, cameraHeight: 1.25, crop: { seed: 5 } });
+    const body = standingBody({ height: 1.75, room: { x: 0.05, d: 1.7 } });
+    window.__smokeFeed = setInterval(() => window.__vibora.injectPoseFrame(cam.frame(performance.now(), [body])), 33);
+  });
+  // The body step reads the close mode, then auto-advances to the spot step.
+  await page.waitForFunction(() => /Close/.test(document.querySelector('[data-k="mode"]')?.textContent || '') || /Your spot/.test(document.querySelector('.stepper li.current span')?.textContent || ''), null, { timeout: 60000 }).catch(() => {});
+  await page.waitForTimeout(1500);
+  const body = await page.evaluate(() => ({ mode: document.querySelector('[data-k="mode"]')?.textContent || null, msg: document.querySelector('[data-k="msg"]')?.textContent || null, dist: document.querySelector('[data-k="dist"]')?.textContent || null }));
+  await shot(page, 'calibrate-close');
+  // The spot step holds 2 s, saves the home position and moves on to the profile step.
+  await page.waitForFunction(() => window.__vibora.calibration && window.__vibora.calibration.ok && /Profile/.test(document.querySelector('.stepper li.current span')?.textContent || ''), null, { timeout: 90000 }).catch(() => {});
+  await page.waitForTimeout(1500);
+  const cal = await page.evaluate(() => ({ cal: window.__vibora.calibration, step: document.querySelector('.stepper li.current span')?.textContent || '', mode: window.__vibora.diagnostics().bodyTracker }));
+  await shot(page, 'calibrated-close');
+  await page.evaluate(() => clearInterval(window.__smokeFeed));
+  console.log('close calibration', JSON.stringify({ body, cal: cal.cal, step: cal.step, tracker: cal.mode && cal.mode.mode }));
+  check('camera close: body step accepts the upper body', (body.mode && /Close/.test(body.mode)) || /spot|Profile/i.test(cal.step), `${body.mode} · ${body.dist} · ${body.msg}`);
+  check('camera close: calibrates in close mode (spot saved, upper-body tracker)', !!(cal.cal && cal.cal.ok) && /Profile/.test(cal.step) && cal.mode && cal.mode.mode === 'upper', `${cal.step} · ${cal.mode && cal.mode.mode}`);
+  const filtered = errors.filter((e) => !/Camera did not deliver frames/.test(e));
+  check('camera close: no console errors', filtered.length === 0, filtered.slice(0, 3).join(' | '));
   await page.close();
 }
 
@@ -347,6 +438,7 @@ async function runPwa(chromium, port) {
   ctx.on('request', (r) => { if (!r.url().startsWith(host.base) && !/^(data|blob):/.test(r.url())) external.push(r.url()); });
   try {
     const page = ctx.pages()[0] || (await ctx.newPage());
+    page.setDefaultTimeout(300000);
     const errors = [];
     page.on('pageerror', (e) => errors.push(`[pageerror] ${e.message}`));
     page.on('console', (m) => { if (m.type() === 'error') errors.push(m.text()); });
@@ -428,7 +520,7 @@ async function runPwa(chromium, port) {
     await shot(page, 'pwa-update');
     const shown = await page.evaluate(() => !document.querySelector('.vp-update').hidden);
     const nav = page.waitForNavigation({ timeout: 60000 }).catch(() => null);
-    if (shown) await page.click('[data-update-restart]');
+    if (shown) await page.click('[data-update-restart]', { timeout: 300000 });
     await nav;
     await ready();
     await page.waitForFunction(() => navigator.serviceWorker.controller, null, { timeout: 60000 }).catch(() => {});
@@ -457,6 +549,8 @@ function runScript(name, script, scriptArgs = [], timeoutMs = 900000) {
       const fails = lines.filter((l) => /FAIL/.test(l));
       const summary = lines.find((l) => /\d+\/\d+ (checks )?passed/.test(l)) || `${lines.filter((l) => /^\s*ok$/.test(l)).length} cases ok`;
       check(name, code === 0, `${summary.trim()}, ${((Date.now() - t0) / 1000).toFixed(0)} s${fails.length ? ` · ${fails.slice(0, 3).join(' | ')}` : ''}`);
+      // A child that failed without a single PASS / FAIL line (a crash, a Playwright timeout): show its output tail.
+      if (code !== 0 && !lines.length) console.log(out.split('\n').slice(-25).map((l) => `    | ${l}`).join('\n'));
       resolve(code === 0);
     });
   });
@@ -482,6 +576,8 @@ async function main() {
     let base = null;
     if (!only || only === 'autopilot') base = await runAutopilot(browser, port);
     if (!only || only === 'latency') await runLatency(browser, port, base);
+    if (!only || only === 'close') await runClose(browser, port);
+    if (!only || only === 'match') await runMatch(browser, port);
     if (!only || only === 'fallback') await runFallback(browser, port);
     if (!only || only === 'camera') await runCamera(browser, port);
     if (!only || only === 'nocamera') await runNoCamera(chromium, port);

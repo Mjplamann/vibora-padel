@@ -18,6 +18,8 @@ const TAIL_SECONDS = 1.5;
 const REF_REAL_SPEED = 0.5;
 const MIN_MOVE_SCALE = 0.6;
 const MAX_MOVE_SCALE = 1.25;
+/** Fastest plausible racket speed at a swing peak (m/s, ~180 km/h); faster peaks are glitches. */
+export const MAX_SWING_SPEED = 50;
 
 function finiteOr(v, d) {
   return typeof v === 'number' && Number.isFinite(v) ? v : d;
@@ -50,6 +52,11 @@ export function createSession({ storage = null, weightKg = 70, met = 7.0, now = 
   let activeSeconds = 0; // from tick()
   let moveDistance = 0; // real meters walked while in play, from tick()
   let moveSeconds = 0; // in-play seconds that carried a realSpeed sample
+  let swings = 0; // swings seen by the camera (bus 'player:swing' peaks), or hits when none
+  let swingSpeedSum = 0;
+  let swingSpeedN = 0;
+  let peakSwing = 0; // m/s
+  let sessionSeconds = 0; // all ticked time (ball in play or not)
   const bestCache = new Map();
 
   function strokeAgg(stroke) {
@@ -133,12 +140,46 @@ export function createSession({ storage = null, weightKg = 70, met = 7.0, now = 
    * { inPlay: ball currently in play, realSpeed: user's real-world body speed m/s }.
    */
   function tick(dt, { inPlay = true, realSpeed = null } = {}) {
+    if (dt > 0) sessionSeconds += dt;
     if (!(dt > 0) || !inPlay) return;
     activeSeconds += dt;
     if (typeof realSpeed === 'number' && Number.isFinite(realSpeed)) {
       moveDistance += Math.max(0, realSpeed) * dt;
       moveSeconds += dt;
     }
+  }
+
+  /**
+   * One swing of the player's racket (speed in m/s, the tracked peak); fitness recap. A peak above
+   * MAX_SWING_SPEED (a tracking jump or a re-centred racket, not a stroke: the fastest smashes are
+   * about 45 m/s at the sweet spot) still counts as a swing but not toward the speeds.
+   */
+  let lastSwingSpeed = null;
+  function swing(speed = null) {
+    swings++;
+    lastSwingSpeed = null;
+    if (Number.isFinite(speed) && speed > 0 && speed <= MAX_SWING_SPEED) {
+      swingSpeedSum += speed;
+      swingSpeedN++;
+      lastSwingSpeed = speed;
+      if (speed > peakSwing) peakSwing = speed;
+    }
+  }
+
+  /** A faster peak of the swing just counted (app/game.js groups a stroke's peaks): raises its speed. */
+  function swingUpdate(speed = null) {
+    if (!swings) return swing(speed);
+    if (!(Number.isFinite(speed) && speed > 0 && speed <= MAX_SWING_SPEED)) return undefined;
+    if (lastSwingSpeed === null) {
+      swingSpeedSum += speed;
+      swingSpeedN++;
+      lastSwingSpeed = speed;
+    } else if (speed > lastSwingSpeed) {
+      swingSpeedSum += speed - lastSwingSpeed;
+      lastSwingSpeed = speed;
+    }
+    if (speed > peakSwing) peakSwing = speed;
+    return undefined;
   }
 
   /** Ball-in-play time estimated from shot timestamps (used when tick() was never fed). */
@@ -191,6 +232,11 @@ export function createSession({ storage = null, weightKg = 70, met = 7.0, now = 
       activeSeconds: active,
       movementScale: moveScale,
       kcal: met * weightKg * (active / 3600) * moveScale,
+      // Fitness recap: swings (camera swing events, else strokes), swing speed, session length.
+      swings: swings || log.length,
+      avgSwingKmh: swingSpeedN ? (swingSpeedSum / swingSpeedN) * 3.6 : null,
+      peakSwingKmh: peakSwing > 0 ? peakSwing * 3.6 : null,
+      sessionSeconds,
     };
   }
 
@@ -247,12 +293,15 @@ export function createSession({ storage = null, weightKg = 70, met = 7.0, now = 
     streak = longestStreak = bestRally = totalPoints = successes = 0;
     reactionSum = reactionN = prepOn = prepN = 0;
     activeSeconds = moveDistance = moveSeconds = 0;
+    swings = swingSpeedSum = swingSpeedN = peakSwing = sessionSeconds = 0;
   }
 
   return {
     record,
     rallyEnded,
     tick,
+    swing,
+    swingUpdate,
     summary,
     bests,
     saveBest,

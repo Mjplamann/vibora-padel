@@ -38,6 +38,46 @@ export const TWIST_DEG_AT_RIM = 5;
 export const TIP_TILT_DEG_AT_RIM = 2.5;
 const TWIST_REF_SPEED = 30;
 
+// ---------------------------------------------------------------------------
+// Racket profiles (game/progression.js RACKETS): shape, foam and face change the apparent COR
+// (power), how fast it falls off away from the sweet spot (sweet-spot size), the minimum COR at
+// the frame and the face friction (spin). racketImpact takes them as defaults for its opts; the
+// active profile is set per session (app/game.js) and starts as the config racket.
+
+const BASE_PROFILE = Object.freeze({
+  id: 'base', apparentCOR: RACKET.apparentCOR, corFalloff: RACKET.corFalloff, minCOR: RACKET.minCOR, mu: RACKET.mu,
+  timing: Object.freeze({ pace: 1, scatter: 1, window: 1, spin: 1 }),
+});
+let activeProfile = BASE_PROFILE;
+
+/** Validated profile: physics numbers within physical bounds, unknown fields ignored. */
+export function makeRacketProfile(p = {}) {
+  const ph = p.physics || p;
+  const num = (v, lo, hi, d) => (Number.isFinite(v) ? clamp(v, lo, hi) : d);
+  const t = p.timing || {};
+  return Object.freeze({
+    id: p.id || 'custom',
+    apparentCOR: num(ph.apparentCOR, 0.3, 0.55, RACKET.apparentCOR),
+    corFalloff: num(ph.corFalloff, 0.2, 0.95, RACKET.corFalloff),
+    minCOR: num(ph.minCOR, 0.1, 0.3, RACKET.minCOR),
+    mu: num(ph.mu, 0.3, 0.7, RACKET.mu),
+    timing: Object.freeze({
+      pace: num(t.pace, 0.8, 1.2, 1), scatter: num(t.scatter, 0.5, 1.5, 1), window: num(t.window, 0.8, 1.2, 1), spin: num(t.spin, 0.7, 1.4, 1),
+    }),
+  });
+}
+
+/** Sets the racket used by racketImpact's defaults (null = the config racket). Returns it. */
+export function setRacketProfile(p) {
+  activeProfile = p ? (p.apparentCOR && p.timing && Object.isFrozen(p) ? p : makeRacketProfile(p)) : BASE_PROFILE;
+  return activeProfile;
+}
+
+/** The racket profile in use ({ id, apparentCOR, corFalloff, minCOR, mu, timing: { pace, scatter, window, spin } }). */
+export function racketProfile() {
+  return activeProfile;
+}
+
 /** Sub-samples per swept test are chosen so relative travel per sample is <= this. */
 const SAMPLE_SPACING = 0.02;
 const MIN_SAMPLES = 12;
@@ -352,17 +392,19 @@ const imTmp = new Vec3();
  *   margin  (m, default 0): assist forgiveness — the effective impact point is pulled this
  *           far toward the sweet spot before computing e_A and twist (offCenter/quality
  *           still report the real point).
- *   cor, corFalloff, minCOR, mu: override RACKET values.
+ *   cor, corFalloff, minCOR, mu: override the active racket profile (setRacketProfile; default
+ *           the RACKET config values).
  *   twist   (default true): off-centre face twist (see TWIST_DEG_AT_RIM).
  *
  * @returns ImpactInfo { speedIn, speedOut, racketSpeed, offCenter, eA, spinRpm: {top, side, total},
  *   quality, face, normal: Vec3, approachSpeed, hit: boolean }
  */
 export function racketImpact(ball, poseAtContact, contact, opts = {}) {
-  const cor = opts.cor ?? RACKET.apparentCOR;
-  const falloff = opts.corFalloff ?? RACKET.corFalloff;
-  const minCOR = opts.minCOR ?? RACKET.minCOR;
-  const mu = opts.mu ?? RACKET.mu;
+  const prof = opts.profile || activeProfile;
+  const cor = opts.cor ?? prof.apparentCOR;
+  const falloff = opts.corFalloff ?? prof.corFalloff;
+  const minCOR = opts.minCOR ?? prof.minCOR;
+  const mu = opts.mu ?? prof.mu;
   const margin = Math.max(0, opts.margin ?? 0);
   const useTwist = opts.twist !== false;
 

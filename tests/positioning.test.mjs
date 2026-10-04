@@ -11,7 +11,7 @@ import { COURT, RACKET } from '../src/config.js';
 import { defaultBounds, ENCLOSURE_MARGIN } from '../src/tracking/locomotion.js';
 import { playableCandidates, pickGlassContact, stanceBounds, STANCE_Z_MAX, GLASS_CLEAR } from '../src/game/intercept.js';
 import { createGaze, GAZE } from '../src/render/gaze.js';
-import { angularAlpha, ARM_FADE, ARM_RADIUS, segmentAlpha, stubStart, UPPER_STUB, stubRaiseFactor, besideEyeFactor } from '../src/render/armFade.js';
+import { angularAlpha, ARM_FADE, ARM_RADIUS, segmentAlpha, stubStart, UPPER_STUB, stubRaiseFactor, besideEyeFactor, nearCutAlpha, alongCutStart, alongCutHide, stubShown } from '../src/render/armFade.js';
 import { racketEnclosureShift } from '../src/render/viewClamp.js';
 import { createHandCursor, PAUSE_HOLD_MS } from '../src/ui/cursor.js';
 
@@ -182,7 +182,7 @@ function armCoverage(view, yaw, pitch, segs, vf = 74 * DEG, asp = 16 / 9) {
         if (Math.hypot(px - d.x * t, py - d.y * t, pz - d.z * t) < sg.r) hitT = Math.min(hitT, t);
       }
       if (hitT === Infinity) continue;
-      const a = sg.alpha * angularAlpha(sg.r, hitT * cosF);
+      const a = sg.alpha * nearCutAlpha(sg.r, hitT * cosF);
       cov = 1 - (1 - cov) * (1 - a);
     }
     n += cov;
@@ -198,6 +198,7 @@ describe('first-person arm coverage', () => {
     const gaze = createGaze();
     const fwd = { x: 0, y: 0, z: -1 };
     let frames = 0, over = 0, maxSeg = 0;
+    const stubOn = { L: false, R: false };
     while (w.time < 10 + 60) {
       let r;
       for (let k = 0; k < 6; k++) {
@@ -214,8 +215,12 @@ describe('first-person arm coverage', () => {
       for (const side of ['L', 'R']) {
         const Sh = bc.joints['shoulder' + side], E = bc.joints['elbow' + side], W = bc.joints['wrist' + side];
         const st = stubStart(Sh, E);
-        segs.push({ a: st, b: E, r: ARM_RADIUS.upper, alpha: segmentAlpha(ARM_RADIUS.upper, E, E, [e]) * stubRaiseFactor(Sh, E) * besideEyeFactor(st, E, e, fwd) });
-        segs.push({ a: E, b: W, r: ARM_RADIUS.fore, alpha: segmentAlpha(ARM_RADIUS.fore, W, W, [e]) * besideEyeFactor(E, W, e, fwd) });
+        // Round 5 (fpRig): the stub is solid or hidden; the forearm is drawn from its along-cut to the wrist.
+        const ed = Math.hypot(E.x - e.x, E.y - e.y, E.z - e.z);
+        stubOn[side] = stubShown(stubOn[side], ed, Math.sin(r.pitch), stubRaiseFactor(Sh, E) * segmentAlpha(ARM_RADIUS.upper, E, E, [e]) * besideEyeFactor(st, E, e, fwd));
+        if (stubOn[side]) segs.push({ a: st, b: E, r: ARM_RADIUS.upper, alpha: 1 });
+        const c = Math.max(0, alongCutHide(alongCutStart(stubOn[side], ed), segmentAlpha(ARM_RADIUS.fore, W, W, [e]) * besideEyeFactor(E, W, e, fwd)));
+        if (c < 1) segs.push({ a: { x: E.x + (W.x - E.x) * c, y: E.y + (W.y - E.y) * c, z: E.z + (W.z - E.z) * c }, b: W, r: ARM_RADIUS.fore, alpha: 1 });
       }
       frames++;
       if (armCoverage(view, r.yaw, r.pitch, segs) > 0.1) over++;

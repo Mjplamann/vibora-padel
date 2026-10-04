@@ -18,11 +18,22 @@
 //   ?apjitter=<s>       extra random capture -> result delay (uniform 0..apjitter) of a 30 fps
 //                       webcam-like feed (app/game.js installRealisticFeed)
 //   ?apnoise=<k>        landmark noise of that feed (1 = a MacBook camera at ~2.5 m)
+//   ?apclose=1          close-mode autopilot feed (app/closeFeed.js: 1.7 m from a camera at chest height, legs out of frame)
 //   (glasses mode reads its own flags in src/xr/boot.js: ?glasses=1, ?stereo=1, ?xrsim=1|legacy)
+// Round 4 (career, arcade, venues):
+//   ?venue=club|sunset|stadium   venue for this visit (free play; career events keep their own)
+//   ?challenge=<id>|daily|daily:<YYYY-MM-DD>   jump into an arcade challenge (game/challenges.js)
+//   ?career=<eventId>   jump into that career event's next match (game/career.js)
+//   ?quick=1            career sets of one game (2-0, or a tie-break at 1-1; tests / screenshots)
+//   ?autoreplay=1|0     automatic replays of great moments also with the autopilot (or never)
+//   ?firsthits=1        the first-time timing prompt (shown until 5 hits) even for a returning player / the autopilot
+//   ?screen=<name>      open a menu screen (hub, career, event-intro, trophies, arcade, freeplay,
+//                       settings, help); with ?event=<id>, ?tab=<trophies tab>, ?fpmode=rally|match
 
 const QUALITIES = ['ultra', 'high', 'balanced'];
 const LEVELS = ['rookie', 'club', 'pro'];
 const AP_PROFILES = ['precise', 'human'];
+const VENUES = ['club', 'sunset', 'stadium'];
 
 function num(v, lo, hi, fallback = null) {
   const n = Number(v);
@@ -56,6 +67,18 @@ export function parseParams(search = '') {
     apProfile: AP_PROFILES.includes(q.get('approfile')) ? q.get('approfile') : null,
     apJitter: num(q.get('apjitter'), 0, 0.2, null),
     apNoise: num(q.get('apnoise'), 0, 4, null),
+    apClose: q.get('apclose') === '1',
     noAudio: flag('mute'),
+    // Round 4.
+    venue: VENUES.includes(q.get('venue')) ? q.get('venue') : null,
+    challenge: q.get('challenge') || null,
+    career: q.get('career') || null,
+    quick: q.get('quick') === '1',
+    autoReplay: q.get('autoreplay') === '1' ? true : q.get('autoreplay') === '0' ? false : null,
+    firstHits: q.get('firsthits') === '1',
+    screen: q.get('screen') || null,
+    event: q.get('event') || null,
+    tab: q.get('tab') || null,
+    fpMode: q.get('fpmode') === 'match' ? 'match' : q.get('fpmode') === 'rally' ? 'rally' : null,
   };
 }

@@ -1,0 +1,82 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark">
+<title>Víbora Game UI Harness</title>
+<link rel="stylesheet" href="../styles/app.css">
+<style>
+  #backdrop { position: fixed; inset: 0; width: 100vw; height: 100vh; display: block; object-fit: cover; }
+  /* Freeze the transient juice for screenshots. */
+  .vp *, .vp *::before, .vp *::after { animation-duration: 1ms !important; animation-delay: 0ms !important; transition: none !important; }
+</style>
+</head>
+<body>
+<img id="backdrop" alt="">
+<div id="ui"></div>
+<script type="module">
+// Round-4 HUD and results states with real game data (no WebGL): dev/game-ui.html?view=
+//   hud-arcade | hud-match | results-arcade | results-career | results-drill
+import { createUI } from '../src/ui/ui.js';
+import { HUD, HUD_MATCH, SUMMARY, SHOT } from './ui-sample.js';
+import { ACHIEVEMENTS } from '../src/game/achievements.js';
+import { createLeaderboards } from '../src/game/challenges.js';
+import { levelOf, rankTitle, xpForSession, xpForLevel } from '../src/game/progression.js';
+import { matchSpec } from '../src/game/career.js';
+
+const qs = new URLSearchParams(location.search);
+const view = qs.get('view') || 'hud-arcade';
+document.getElementById('backdrop').src = view.startsWith('hud') ? './ui-assets/bg-play.png' : './ui-assets/bg-menu.png';
+const settings = { assist: 'club', latency: 0.11, height: 1.78, handed: 'right', gainLateral: 2.6, gainDepth: 2.2, fov: 72, gazeFollow: true, quality: 'high', voice: 'en', volumes: { master: 0.9, sfx: 1, ambience: 0.45, crowd: 0.7 }, skinTone: '#c58c6a', racketColor: '#e8572a', pip: true, skeleton: true, callouts: true };
+const ui = createUI(document.getElementById('ui'), { onSettings: () => {} });
+ui.settings(settings);
+const profile = (xp) => ({ ...levelOf(xp), xp, title: rankTitle(levelOf(xp).level) });
+const rewards = (kind, extra = {}) => {
+  const x = xpForSession({ kind, activeSeconds: 540, ...extra });
+  return { xp: x.xp + 300, parts: [...x.parts, { xp: 300, en: 'Achievements', es: 'Logros' }], levelUps: [8], unlocks: [{ kind: 'outfit', id: 'optic', name: 'Optic' }], achievements: [ACHIEVEMENTS[1], ACHIEVEMENTS[6]], profile: profile(xpForLevel(8) + 420) };
+};
+const fitness = { activeSeconds: 540, swings: 212, kcal: 74, peakSwingKmh: 61 };
+// A match summary as main.js showResults builds it (session strokes + scoreline + point stats).
+const MATCH_SUM = (eventId, mi, games, won) => {
+  const spec = matchSpec(eventId, mi, 'nico');
+  const { drill, targets, reps, tips, ...rest } = SUMMARY;
+  void drill; void targets; void reps; void tips;
+  return { ...rest, mode: 'match', points: games[0], stars: won ? 3 : 1, tips: [], newBest: false, best: null, successRate: 0.82, shots: 64,
+    scoreline: { names: spec.teamNames, games, sets: [games], won }, pointsWon: 41, pointsPlayed: 66, bestRally: 17, cleanGames: 2 };
+};
+
+if (view === 'hud-arcade') {
+  ui.show('play', { mode: 'challenge', hud: { ...HUD, title: 'Por Tres Party', subtitle: 'Arcade · Fiesta por tres', points: 18450, streak: 7, repIndex: null, repTotal: null, timer: 41, lastShot: { stroke: 'smash', speedKmh: 141, spinRpm: 320, topRpm: 300, netClearance: 0.62, quality: 0.93, timing: 'good', spacing: 'good', notes: ['¡Por tres!'] },
+    challenge: { id: 'por-tres-party', timeLeft: 41, duration: 75, combo: 7, mult: 3, lives: null, maxLives: null, perfectStreak: 3, lastAward: { points: 4500, base: 1000, mult: 3, perfect: true, at: 1, label: '¡Por tres!' } } } });
+  ui.perfect(3);
+  ui.achievement(ACHIEVEMENTS[1]);
+} else if (view === 'hud-marathon') {
+  ui.show('play', { mode: 'challenge', hud: { ...HUD, title: 'Rally Marathon', subtitle: 'Arcade · Maratón de peloteo', points: 2310, streak: 12, repIndex: null, repTotal: null, timer: 8, lastShot: null,
+    challenge: { id: 'rally-marathon', timeLeft: 8, duration: 90, combo: 12, mult: 4, lives: 2, maxLives: 3, perfectStreak: 0, lastAward: { points: 120, base: 30, mult: 4, perfect: false, at: 2 } } } });
+  ui.callout('Combo ×4', '10 seguidas', 'combo');
+} else if (view === 'hud-match') {
+  const spec = matchSpec('regional', 1, 'nico');
+  ui.show('play', { mode: 'match', hud: { ...HUD_MATCH, title: 'Regional Open', subtitle: 'Final · Pampa Power', score: { ...HUD_MATCH.score, names: spec.teamNames } } });
+  ui.partnerCall({ text: '¡Mía!', en: 'Mine!', who: 'Nico', kind: 'mine' });
+} else if (view === 'results-arcade') {
+  const lb = createLeaderboards({ storage: null });
+  lb.submit('por-tres-party', { score: 21400 });
+  const res = lb.submit('por-tres-party', { score: 33600, combo: 14, perfect: 9 });
+  ui.results({ mode: 'challenge', challengeId: 'por-tres-party', boardId: 'por-tres-party', name: 'Por Tres Party', es: 'Fiesta por tres', score: 33600, maxCombo: 14, perfect: 9, hits: 18, porTres: 11, leaderboard: res, rewards: rewards('challenge', { score: 33600, newBest: true }), fitness });
+} else if (view === 'results-career') {
+  ui.results({ ...MATCH_SUM('copa-costa', 1, [4, 2], true), title: 'Semifinal won', career: { eventName: 'Copa Costa', round: 'Semifinal' },
+    careerResult: { eventId: 'copa-costa', eventDone: false, round: 'Semifinal', nextRound: 'Final', nextPair: 'Zurdo & Diestro', nextMatch: {} },
+    rewards: rewards('match', { won: true, gamesWon: 4 }), fitness });
+} else if (view === 'results-trophy') {
+  ui.results({ ...MATCH_SUM('regional', 1, [5, 3], true), title: 'Final won', career: { eventName: 'Regional Open', round: 'Final' },
+    careerResult: { eventId: 'regional', eventDone: true, eventWon: true, place: 1, round: 'Final', eventName: 'Regional Open', unlockedName: 'Copa Costa' },
+    rewards: { ...rewards('match', { won: true, gamesWon: 4, career: { eventWon: true, tier: 4 } }), unlocks: [{ kind: 'racket', id: 'cobra', name: 'Cobra Diamond' }] }, fitness });
+} else if (view === 'results-drill') {
+  ui.results({ ...SUMMARY, rewards: rewards('drill', { stars: 3, points: 1560 }), fitness });
+}
+window.__ready = { view };
+void SHOT;
+</script>
+</body>
+</html>

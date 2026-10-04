@@ -163,7 +163,9 @@ export function createFirstPersonCamera(camera, settings = {}, { getXR = () => n
   function updateReplay(world, dt) {
     const ball = world.ball;
     if (replayView === 'side') {
-      toPos.set(COURT.halfWidth + 7.5, 3.2, ball ? THREE.MathUtils.clamp(ball.pos.z * 0.3, -4, 4) : 0);
+      // Merge pass (round 4 venues): 2.6 m outside the side wall, between it and the neighbouring
+      // court (x = 13 ± 5) and in front of the stadium's side stands (x ≥ 9.6), above the benches.
+      toPos.set(COURT.halfWidth + 2.6, 3.0, ball ? THREE.MathUtils.clamp(ball.pos.z * 0.3, -4, 4) : 0);
       lookFrom(toPos, look.set(0, 1, ball ? ball.pos.z * 0.5 : 0), toQuat);
     } else if (replayView === 'ball' && ball) {
       tmp.set(ball.vel?.x || 0, 0, ball.vel?.z || -1);
@@ -223,6 +225,9 @@ export function createFirstPersonCamera(camera, settings = {}, { getXR = () => n
     set mode(m) {
       if (m === mode || !['fp', 'replay', 'orbit'].includes(m)) return;
       beginBlend();
+      // Into and out of a replay is a cut, like television: a 0.6 s flight between the eye and the
+      // broadcast position crossed the back wall's mesh (dotted noise over the court).
+      if (m === 'replay' || mode === 'replay') blend = 1;
       mode = m;
       if (m === 'fp') gaze.reset(basePitch());
     },
@@ -230,6 +235,7 @@ export function createFirstPersonCamera(camera, settings = {}, { getXR = () => n
     setReplayView(kind) {
       if (kind === replayView) return;
       beginBlend();
+      if (mode === 'replay') blend = 1; // a cut between replay angles
       replayView = kind;
     },
     get replayView() { return replayView; },

@@ -18,13 +18,25 @@ const HANDLE_R = 0.0172;
 const HANDLE_BOTTOM = RACKET.buttY + 0.008;
 const HANDLE_TOP = RACKET.handleTopY;
 
-/** Teardrop point at angle th (0 = tip, PI = throat), grown by g meters. */
+/**
+ * Head shapes (game/progression.js RACKETS): teardrop (hybrid), round (control: wide, centred) and
+ * diamond (power: widest high up, straight shoulders to a flattened tip). up: widening toward the
+ * tip; down: narrowing toward the throat; sx / sy: width / length scale; point: tip pinch.
+ */
+export const RACKET_SHAPES = Object.freeze({
+  teardrop: Object.freeze({ up: 0.055, down: 0.1, sx: 1, sy: 1, point: 0 }),
+  round: Object.freeze({ up: 0.0, down: 0.035, sx: 1.04, sy: 0.955, point: 0 }),
+  diamond: Object.freeze({ up: 0.13, down: 0.17, sx: 0.98, sy: 1.025, point: 0.2 }),
+});
+let SHAPE = RACKET_SHAPES.teardrop;
+
+/** Head outline point at angle th (0 = tip, PI = throat), grown by g meters (current SHAPE). */
 function teardrop(th, g, out = new THREE.Vector2()) {
   const c = Math.cos(th), s = Math.sin(th);
   // Widest point sits above center; the lower half narrows toward the throat.
-  const widen = 1 + 0.055 * c - 0.1 * Math.max(0, -c) ** 1.6;
-  const x = (FACE_SX * widen + g) * s;
-  const y = FACE_CY + (FACE_SY + g) * c - 0.012 * Math.max(0, -c) ** 2;
+  const widen = (1 + SHAPE.up * c - SHAPE.down * Math.max(0, -c) ** 1.6) * (1 - SHAPE.point * Math.max(0, c) ** 3);
+  const x = (FACE_SX * SHAPE.sx * widen + g) * s;
+  const y = FACE_CY + (FACE_SY * SHAPE.sy + g) * c - 0.012 * Math.max(0, -c) ** 2;
   return out.set(x, y);
 }
 
@@ -113,7 +125,80 @@ function drawCarbon(ctx, w, h, cell, base = 18) {
   }
 }
 
-function drawFaceDesign(ctx, w, h, color, side, rough) {
+/**
+ * Face graphics per model (all original designs): the band motif and the printed names.
+ * motif: 'fang' (sweeping bands), 'orbit' (concentric rings), 'grit' (contour lines),
+ * 'cobra' (chevrons), 'mamba' (pinstripes).
+ */
+export const RACKET_MODELS = Object.freeze({
+  fang: Object.freeze({ shape: 'teardrop', style: 'carbon', motif: 'fang', word: 'VÍBORA', line: 'FANG 18K  ·  CONTROL CORE', back: 'EVA SOFT 30  ·  360 g', color: '#e8572a' }),
+  orbit: Object.freeze({ shape: 'round', style: 'white', motif: 'orbit', word: 'ORBIT', line: 'ROUND  ·  SOFT EVA  ·  355 g', back: 'CONTROL  ·  BIG SWEET SPOT', color: '#1f6fe0' }),
+  grit: Object.freeze({ shape: 'teardrop', style: 'matte', motif: 'grit', word: 'GRIT 3D', line: 'SANDED FACE  ·  SPIN', back: '3D GRIT  ·  365 g', color: '#13a89e' }),
+  cobra: Object.freeze({ shape: 'diamond', style: 'carbon', motif: 'cobra', word: 'COBRA', line: 'DIAMOND  ·  HARD EVA  ·  POWER', back: 'HIGH BALANCE  ·  370 g', color: '#d81b4f' }),
+  mamba: Object.freeze({ shape: 'teardrop', style: 'carbon', motif: 'mamba', word: 'MAMBA PRO', line: '18K CARBON  ·  TOUR', back: 'HARD CORE  ·  365 g', color: '#eceae4' }),
+});
+
+/** Motif bands for the non-default models (front face). */
+function drawMotif(ctx, w, h, motif, hex, dark, ink, rough) {
+  ctx.save();
+  switch (motif) {
+    case 'orbit':
+      ctx.lineWidth = w * 0.05;
+      for (let i = 0; i < 4; i++) {
+        ctx.strokeStyle = ink(i % 2 ? dark : hex);
+        ctx.beginPath();
+        ctx.ellipse(w * 0.5, h * 0.42, w * (0.18 + i * 0.1), h * (0.12 + i * 0.075), -0.25, 0, Math.PI * 2);
+        ctx.stroke();
+      }
+      break;
+    case 'grit':
+      ctx.lineWidth = w * 0.012;
+      for (let i = 0; i < 14; i++) {
+        ctx.strokeStyle = ink(i % 3 ? hex : '#f2f2f2');
+        ctx.beginPath();
+        for (let x = 0; x <= w; x += w / 40) {
+          const y = h * (0.08 + i * 0.06) + Math.sin(x / w * 7 + i * 0.9) * h * 0.02 + Math.sin(x / w * 17 + i) * h * 0.006;
+          if (x === 0) ctx.moveTo(x, y);
+          else ctx.lineTo(x, y);
+        }
+        ctx.stroke();
+      }
+      break;
+    case 'cobra':
+      for (let i = 0; i < 5; i++) {
+        ctx.fillStyle = ink(i % 2 ? dark : hex);
+        const y = h * (0.12 + i * 0.11);
+        ctx.beginPath();
+        ctx.moveTo(0, y + h * 0.1);
+        ctx.lineTo(w * 0.5, y);
+        ctx.lineTo(w, y + h * 0.1);
+        ctx.lineTo(w, y + h * 0.15);
+        ctx.lineTo(w * 0.5, y + h * 0.05);
+        ctx.lineTo(0, y + h * 0.15);
+        ctx.closePath();
+        ctx.fill();
+      }
+      break;
+    case 'mamba':
+      ctx.fillStyle = ink(hex);
+      ctx.fillRect(w * 0.08, 0, w * 0.035, h);
+      ctx.fillRect(w * 0.88, 0, w * 0.035, h);
+      ctx.fillStyle = ink(rough ? '#3c3c3c' : '#16181d');
+      ctx.fillRect(w * 0.13, 0, w * 0.012, h);
+      ctx.fillRect(w * 0.86, 0, w * 0.012, h);
+      break;
+    default:
+      break;
+  }
+  ctx.restore();
+}
+
+function drawFaceDesign(ctx, w, h, color, side, rough, modelId = 'fang') {
+  const model = RACKET_MODELS[modelId] || RACKET_MODELS.fang;
+  if (model.motif !== 'fang') {
+    drawModelFace(ctx, w, h, color, side, rough, model);
+    return;
+  }
   // side: 'front' | 'back'. Coordinates: x across face (0..w), y down from tip (0..h).
   const col = new THREE.Color(color);
   const hex = `#${col.getHexString()}`;
@@ -229,12 +314,69 @@ function drawFaceDesign(ctx, w, h, color, side, rough) {
   ctx.restore();
 }
 
+/** Face of the non-default models: motif, wordmark and spec line (front); name and spec (back). */
+function drawModelFace(ctx, w, h, color, side, rough, model) {
+  const col = new THREE.Color(color);
+  const hex = `#${col.getHexString()}`;
+  const dark = `#${col.clone().multiplyScalar(0.55).getHexString()}`;
+  const light = col.getHSL({ h: 0, s: 0, l: 0 }).l > 0.7;
+  if (rough) {
+    ctx.fillStyle = model.motif === 'grit' ? '#c4c4c4' : '#9a9a9a'; // the grit face is much rougher
+    ctx.fillRect(0, 0, w, h);
+  } else if (model.style === 'white') {
+    ctx.fillStyle = '#e9e8e4';
+    ctx.fillRect(0, 0, w, h);
+  } else {
+    drawCarbon(ctx, w, h, model.motif === 'mamba' ? 10 : 14);
+  }
+  const ink = (c) => (rough ? '#3c3c3c' : c);
+  const textInk = model.style === 'white' ? '#16181d' : light ? '#16181d' : '#f5f5f5';
+  if (side === 'front') {
+    drawMotif(ctx, w, h, model.motif, hex, dark, ink, rough);
+    ctx.save();
+    ctx.translate(w * 0.5, h * 0.72);
+    ctx.rotate(model.motif === 'cobra' ? 0 : -0.05);
+    ctx.fillStyle = ink(model.motif === 'mamba' ? hex : textInk);
+    ctx.font = `900 ${Math.round(h * (model.word.length > 7 ? 0.105 : 0.135))}px ${DISPLAY_FONT}`;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    if (!rough && model.style !== 'white') {
+      ctx.shadowColor = 'rgba(0,0,0,0.5)';
+      ctx.shadowBlur = 6;
+    }
+    ctx.fillText(model.word, 0, 0);
+    ctx.restore();
+    ctx.font = `700 ${Math.round(h * 0.03)}px ${UI_FONT}`;
+    ctx.textAlign = 'center';
+    ctx.fillStyle = ink(model.style === 'white' ? '#3a3d44' : '#d9d9d9');
+    ctx.fillText(model.line, w * 0.5, h * 0.81);
+  } else {
+    ctx.save();
+    ctx.globalAlpha = 0.85;
+    drawMotif(ctx, w, h, model.motif, hex, dark, ink, rough);
+    ctx.restore();
+    ctx.save();
+    ctx.translate(w * 0.27, h * 0.52);
+    ctx.rotate(-Math.PI / 2);
+    ctx.fillStyle = ink(textInk);
+    ctx.font = `900 ${Math.round(h * 0.1)}px ${DISPLAY_FONT}`;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(model.word, 0, 0);
+    ctx.restore();
+    ctx.font = `600 ${Math.round(h * 0.028)}px ${UI_FONT}`;
+    ctx.fillStyle = ink(model.style === 'white' ? '#3a3d44' : '#cfcfcf');
+    ctx.textAlign = 'center';
+    ctx.fillText(model.back, w * 0.62, h * 0.86);
+  }
+}
+
 const FACE_ATLAS_W = 0.27; // meters covered horizontally by the atlas
 const FACE_ATLAS_Y0 = FACE_CY - FACE_SY - 0.006;
 const FACE_ATLAS_H = 2 * FACE_SY + 0.012;
 
-function faceTextures(color) {
-  return cached(`racketFace:${color}`, () => {
+function faceTextures(color, modelId = 'fang') {
+  return cached(`racketFace:${modelId}:${color}`, () => {
     const q = actorQuality().tex;
     const W = 1024 * q, H = 2048 * q;
     const draw = (rough) => (ctx) => {
@@ -246,11 +388,11 @@ function faceTextures(color) {
     const drawAtlas = (ctx, rough) => {
       const W = 1024, H = 2048;
       ctx.save();
-      drawFaceDesign(ctx, W, H / 2, color, 'front', rough);
+      drawFaceDesign(ctx, W, H / 2, color, 'front', rough, modelId);
       ctx.restore();
       ctx.save();
       ctx.translate(0, H / 2);
-      drawFaceDesign(ctx, W, H / 2, color, 'back', rough);
+      drawFaceDesign(ctx, W, H / 2, color, 'back', rough, modelId);
       ctx.restore();
       if (rough) {
         // Sand grit noise on top of everything.
@@ -400,11 +542,31 @@ function remapFaceUVs(geo, depth) {
   uv.needsUpdate = true;
 }
 
-function buildHeadGeometries() {
-  return cached('racketHeadGeo', () => {
+function buildHeadGeometries(shapeId = 'teardrop') {
+  const shape = RACKET_SHAPES[shapeId] ? shapeId : 'teardrop';
+  return cached(shape === 'teardrop' ? 'racketHeadGeo' : `racketHeadGeo:${shape}`, () => {
+    const prev = SHAPE;
+    SHAPE = RACKET_SHAPES[shape];
+    try {
+      return buildHeadGeometriesNow();
+    } finally {
+      SHAPE = prev;
+    }
+  });
+}
+
+function buildHeadGeometriesNow() {
+  {
     // Hitting face with drilled holes.
     const faceShape = new THREE.Shape(facePath(0.0015));
+    // Holes stay well inside this shape's outline (diamond tips are narrower).
+    const inside = (p) => {
+      const th = Math.atan2(p.x, p.y - FACE_CY);
+      const edge = teardrop(th, -0.016);
+      return Math.hypot(p.x, p.y - FACE_CY) <= Math.hypot(edge.x, edge.y - FACE_CY);
+    };
     for (const p of racketHolePositions()) {
+      if (!inside(p)) continue;
       const hole = new THREE.Path();
       hole.absarc(p.x, p.y, HOLE_R, 0, Math.PI * 2, true);
       faceShape.holes.push(hole);
@@ -439,7 +601,7 @@ function buildHeadGeometries() {
     const smooth = mergeVertices(frame, 1e-5);
     smooth.computeVertexNormals();
     return { face, frame: smooth };
-  });
+  }
 }
 
 function handleGeometry() {
@@ -524,13 +686,17 @@ const STYLES = {
  * @returns {THREE.Group} origin = grip point, +Y handle->tip, +Z forehand face normal.
  *   userData: { cord: Mesh, face: Mesh, frame: Mesh, setColor(c), setHanded(h) }
  */
-export function buildRacket({ style = 'carbon', color = '#e8572a', gripColor = '#f1f1ee', handed = 'right', cord = true } = {}) {
+export function buildRacket({ style = null, color = '#e8572a', gripColor = '#f1f1ee', handed = 'right', cord = true, model = 'fang' } = {}) {
+  let modelId = RACKET_MODELS[model] ? model : 'fang';
+  let curColor = color;
+  const m0 = RACKET_MODELS[modelId];
+  style = style || m0.style;
   const st = STYLES[style] || STYLES.carbon;
   const group = new THREE.Group();
   group.name = 'racket';
-  const { face, frame } = buildHeadGeometries();
+  const { face, frame } = buildHeadGeometries(m0.shape);
 
-  const tex = faceTextures(color);
+  const tex = faceTextures(color, modelId);
   const faceMat = new THREE.MeshPhysicalMaterial({
     map: tex.map,
     roughnessMap: tex.rough,
@@ -602,7 +768,8 @@ export function buildRacket({ style = 'carbon', color = '#e8572a', gripColor = '
     setHanded,
     setCordVisible: (b) => { if (cordMesh) cordMesh.visible = b; },
     setColor: (c) => {
-      const t = faceTextures(c);
+      curColor = c;
+      const t = faceTextures(c, modelId);
       faceMat.map = t.map;
       faceMat.roughnessMap = t.rough;
       faceMat.needsUpdate = true;
@@ -612,6 +779,24 @@ export function buildRacket({ style = 'carbon', color = '#e8572a', gripColor = '
       capLogo.material.map = capLogoTexture(c);
       capLogo.material.needsUpdate = true;
     },
+    /** Switches the racket model (head shape, frame finish, face graphics); color optional. */
+    setModel: (id, c = null) => {
+      if (!RACKET_MODELS[id]) return;
+      const md = RACKET_MODELS[id];
+      modelId = id;
+      const geo = buildHeadGeometries(md.shape);
+      faceMesh.geometry = geo.face;
+      frameMesh.geometry = geo.frame;
+      const fs = STYLES[md.style] || STYLES.carbon;
+      capMat.color.set(fs.frame);
+      capMat.roughness = fs.frameRough;
+      capMat.map = md.style === 'white' ? null : carbonTileTexture();
+      capMat.needsUpdate = true;
+      sideMat.roughness = fs.frameRough;
+      group.userData.setColor(c || curColor);
+      group.userData.model = id;
+    },
+    model: modelId,
   };
   return group;
 }

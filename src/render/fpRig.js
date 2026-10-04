@@ -6,7 +6,11 @@ import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { clone as cloneSkinned } from 'three/addons/utils/SkeletonUtils.js';
 import { buildRacket } from './racket.js';
 import { RACKET } from '../config.js';
-import { ARM_FADE, ARM_RADIUS, segmentAlpha, stubStart, stubRaiseFactor, besideEyeFactor, sideOnAlpha } from './armFade.js';
+import {
+  ARM_RADIUS, ALONG_CUT, segmentAlpha, stubStart, stubRaiseFactor, besideEyeFactor, sideOnAlpha,
+  alongCutStart, alongCutHide, nearCutDepths, stubShown, FOREARM_MAX_RATIO,
+} from './armFade.js';
+import { createRacketTrail } from './racketTrail.js';
 import { racketEnclosureShift } from './viewClamp.js';
 import { isFiniteVec, frameOk, segmentOk } from './safeView.js';
 import { createSkinMaterial, createFabricMaterial, limbGeometry, quatFromYZ, canvasTexture, cached } from './actorKit.js';
@@ -152,7 +156,12 @@ function buildArm(skinMat, sleeveMat, bandMat, foreSkinMat = skinMat) {
   fore.add(foreSkin, band);
   group.add(upper, fore);
   group.traverse((o) => { if (o.isMesh) { o.castShadow = true; o.receiveShadow = true; } });
-  return { group, upper, upperSkin, sleeve, hem, fore, foreSkin, band, mats: { upper: [skinMat], fore: [foreSkinMat, bandMat] }, alpha: { upper: 1, fore: 1 } };
+  return {
+    group, upper, upperSkin, sleeve, hem, fore, foreSkin, band,
+    mats: { upper: [skinMat], fore: [foreSkinMat], band: [bandMat] }, alpha: { upper: 1, fore: 1, band: 1 },
+    // Round 5 cut state: the stub is drawn or not (hysteresis), the forearm's cut start eases.
+    stubOn: false, cut: NaN,
+  };
 }
 
 /** Per-segment opacity (materials are per arm segment; all are transparent for the near fade). */
@@ -168,24 +177,39 @@ function setSegmentAlpha(arm, key, a) {
 }
 
 /**
- * Per-fragment fade by view depth (QA2: limbs near the camera filled 20-25% of the picture): a limb
- * of `radius` is solid beyond radius / ARM_FADE.A0 from the camera plane and gone at radius /
- * ARM_FADE.A1, so the part of a forearm reaching toward the lens dissolves while the hand end
- * stays solid (VR style). Planar depth, so a limb in a corner of the wide frustum, drawn larger
- * than its visual angle, fades sooner.
+ * Per-fragment cut by view depth (QA2: limbs near the camera filled 20-25% of the picture; QA r5:
+ * the old wide smooth fade drew a translucent disc): a limb of `radius` is solid beyond
+ * armFade.nearCutDepths(radius).far from the camera plane and gone at .near, a 3 cm band, so the part
+ * of a forearm reaching toward the lens ends at a clean cut while the hand end stays solid (VR
+ * style). Planar depth, so a limb in a corner of the wide frustum, drawn larger than its visual
+ * angle, is cut sooner.
  */
-function addNearFade(m, radius) {
-  const near = (radius / ARM_FADE.A1).toFixed(4), far = (radius / ARM_FADE.A0).toFixed(4);
+function addNearFade(m, radius, { along = 0 } = {}) {
+  const cut = nearCutDepths(radius);
+  const near = cut.near.toFixed(4), far = cut.far.toFixed(4);
   const prev = m.onBeforeCompile;
+  // Along-the-limb cut (forearms): uAlong = cut start c (armFade.alongCutStart); t = -position.y /
+  // length (0 at the elbow end, 1 at the wrist) in the limb's own geometry units; alpha =
+  // smoothstep(c, c + ALONG_CUT.band, t). c = -band draws the whole forearm.
+  if (along > 0) m.userData.along = { value: -ALONG_CUT.band };
   m.onBeforeCompile = (shader, renderer) => {
     if (prev) prev.call(m, shader, renderer);
+    let alongCode = '';
+    if (along > 0) {
+      shader.uniforms.uAlong = m.userData.along;
+      shader.vertexShader = shader.vertexShader
+        .replace('#include <common>', '#include <common>\nvarying float vLimbT;')
+        .replace('#include <begin_vertex>', `#include <begin_vertex>\n\tvLimbT = clamp(-position.y / ${along.toFixed(4)}, 0.0, 1.0);`);
+      shader.fragmentShader = shader.fragmentShader.replace('#include <common>', '#include <common>\nvarying float vLimbT;\nuniform float uAlong;');
+      alongCode = `\n\tgl_FragColor.a *= smoothstep(uAlong, uAlong + ${ALONG_CUT.band.toFixed(3)}, vLimbT);`;
+    }
     shader.fragmentShader = shader.fragmentShader.replace(
       '#include <dithering_fragment>',
-      `#include <dithering_fragment>\n\tgl_FragColor.a *= smoothstep(${near}, ${far}, vViewPosition.z); // vViewPosition = -mvPosition: z is the depth`,
+      `#include <dithering_fragment>\n\tgl_FragColor.a *= smoothstep(${near}, ${far}, vViewPosition.z); // vViewPosition = -mvPosition: z is the depth${alongCode}`,
     );
   };
   const key = m.customProgramCacheKey ? m.customProgramCacheKey.call(m) : '';
-  m.customProgramCacheKey = () => `${key}|nearfade-${near}-${far}`;
+  m.customProgramCacheKey = () => `${key}|nearcut-${near}-${far}${along > 0 ? `|alongcut-${along}` : ''}`;
   m.transparent = true;
   return m;
 }
@@ -312,8 +336,13 @@ export function createFirstPersonRig({ handed = 'right', skinTone = '#c58c6a', s
     return m;
   };
 
-  const armSet = () => buildArm(addNearFade(armSkin(), ARM_RADIUS.upper), sleeveMat, addNearFade(bandMat.clone(), ARM_RADIUS.fore), addNearFade(armSkin(), ARM_RADIUS.fore));
+  const armSet = () => buildArm(addNearFade(armSkin(), ARM_RADIUS.upper), sleeveMat, addNearFade(bandMat.clone(), ARM_RADIUS.fore), addNearFade(armSkin(), ARM_RADIUS.fore, { along: FOREARM }));
   const arms = { L: armSet(), R: armSet() };
+  // Motion-blur ribbon behind the racket head (racketTrail.js).
+  const trail = createRacketTrail();
+  root.add(trail.mesh);
+  let trailT = NaN;
+  const trailGrip = new THREE.Vector3();
   // First person: the upper arm is only a stub from the elbow (VR style), so no sleeve.
   for (const a of [arms.L, arms.R]) a.sleeve.visible = a.hem.visible = false;
   root.add(arms.L.group, arms.R.group);
@@ -520,6 +549,22 @@ export function createFirstPersonRig({ handed = 'right', skinTone = '#c58c6a', s
         }
       }
       setRacketFade(fade);
+      // The ribbon ages with the racket's own (sim) time: a frozen or paused frame keeps the sweep it
+      // shows; a racket without a moving timestamp ages with the frame.
+      const rt = rp.t;
+      let tdt = dt;
+      if (Number.isFinite(rt) && rt < trailT - 1) trailT = NaN; // a new world / replay clock
+      if (Number.isFinite(rt) && Number.isFinite(trailT)) {
+        if (rt > trailT) tdt = Math.min(0.1, rt - trailT);
+        else if (rt < trailT) tdt = Math.min(dt, 1 / 60); // a pose from the past (the strike frame, a replay loop)
+        else if (vGrip.distanceToSquared(trailGrip) < 1e-12) tdt = 0;
+      }
+      if (Number.isFinite(rt)) trailT = Number.isFinite(trailT) ? Math.max(trailT, rt) : rt;
+      trailGrip.copy(vGrip);
+      if (tdt > 0) trail.update(tdt, vGrip, vAxis, player.pos, { eye: renderOpts.eye || null, fade: racketMesh.visible ? fade : 0 });
+    } else {
+      trail.clear();
+      trailT = NaN;
     }
 
     // --- joints (tracked, or synthesized for mouse/fallback control)
@@ -598,7 +643,15 @@ export function createFirstPersonRig({ handed = 'right', skinTone = '#c58c6a', s
       // Side-on play collapses the hidden arm (elbow on the wrist or the shoulder): a segment of
       // implausible length is not drawn (a squashed capsule reads as a disc in front of the eyes,
       // and a zero-length one blacked out the whole picture).
-      const foreOk = segmentOk(elbow, wristVis[side], FOREARM * scale) && placeSegment(arm.fore, elbow, wristVis[side], tmp, FOREARM, arm.foreSkin) > 0;
+      let foreOk = segmentOk(elbow, wristVis[side], FOREARM * scale);
+      // A stretched tracked forearm (the off hand reaching while the elbow lags) is drawn at most
+      // FOREARM_MAX_RATIO x its length from the wrist: never a long detached limb (QA r5).
+      if (foreOk) {
+        const maxLen = FOREARM * scale * FOREARM_MAX_RATIO;
+        const len = elbow.distanceTo(wristVis[side]);
+        if (len > maxLen) elbow.sub(wristVis[side]).multiplyScalar(maxLen / len).add(wristVis[side]);
+      }
+      foreOk = foreOk && placeSegment(arm.fore, elbow, wristVis[side], tmp, FOREARM, arm.foreSkin) > 0;
       // Sweatband at the wrist end (unscaled), slightly overlapping the hand.
       const foreLen = foreOk ? elbow.distanceTo(wristVis[side]) : FOREARM * scale;
       arm.band.position.y = -(foreLen - 0.05);
@@ -607,35 +660,44 @@ export function createFirstPersonRig({ handed = 'right', skinTone = '#c58c6a', s
       stubStart(shoulder, elbow, scale, stubA);
       const upperOk = segmentOk(shoulder, elbow, UPPER_ARM * scale) && placeSegment(arm.upper, stubA, elbow, tmp2, UPPER_ARM, arm.upperSkin) > 0;
       if (!foreOk || !upperOk) stats.segmentsHidden++;
-      // Fade by angular size from the nearer of the camera and the tracked eye (QA2: sleeves and
-      // forearms filled 20-25% of the picture).
       eyes[0] = renderOpts.eye || null;
       eyes[1] = renderOpts.eye2 || null;
-      // Whole-segment factors: the angular size of the segment's distal end (elbow / wrist) from the
-      // tracked eye (a hand right at the eyes takes its forearm with it), beside / behind the eyes,
-      // raised elbow. The rest of the limb fades per fragment by view depth (addNearFade), so a
-      // forearm reaching toward the lens keeps its wrist end.
+      // Round 5 (QA r5 "ghost bulb"): nothing is drawn half transparent over a wide area. Each factor
+      // below decides WHERE a limb is cut (armFade.js ALONG_CUT / NEAR_CUT), never a global opacity:
+      // - the stub is drawn solid or not at all (stubShown: elbow well away from the eye, the view
+      //   not pitched down at the body, the elbow not raised / beside the eye / side-on);
+      // - the forearm keeps its elbow cap only while the stub is drawn; otherwise the cut hides the
+      //   cap, slides toward the wrist as the elbow comes to the eye (a cuff at the hand) and on past
+      //   the wrist as the wrist itself comes to the eye, beside it or folds across the chest.
       const trueEye = eyes[1] || eyes[0];
-      let aU = stubRaiseFactor(shoulder, elbow, scale);
-      let aF = 1;
+      let fU = stubRaiseFactor(shoulder, elbow, scale);
+      let fF = 1;
       if (trueEye) {
-        aU *= segmentAlpha(ARM_RADIUS.upper * scale, elbow, elbow, [trueEye]) * besideEyeFactor(stubA, elbow, trueEye, fwd);
-        aF *= segmentAlpha(ARM_RADIUS.fore * scale, wristVis[side], wristVis[side], [trueEye]) * besideEyeFactor(elbow, wristVis[side], trueEye, fwd);
-        // Side-on (torso turned > SIDE_ON_FADE from the TV): the near arm folds across the chest a
-        // hand's width below the eyes and its elbow end filled the bottom of the picture. Then
-        // the whole segment fades by its nearest point, not only by its distal end.
+        fU *= segmentAlpha(ARM_RADIUS.upper * scale, elbow, elbow, [trueEye]) * besideEyeFactor(stubA, elbow, trueEye, fwd);
+        fF *= segmentAlpha(ARM_RADIUS.fore * scale, wristVis[side], wristVis[side], [trueEye]) * besideEyeFactor(elbow, wristVis[side], trueEye, fwd);
         if (sideOn) {
-          aU *= sideOnAlpha(stubA, elbow, trueEye);
-          aF *= sideOnAlpha(elbow, wristVis[side], trueEye);
+          fU *= sideOnAlpha(stubA, elbow, trueEye);
+          fF *= sideOnAlpha(elbow, wristVis[side], trueEye);
         }
       }
-      setSegmentAlpha(arm, 'upper', aU);
-      setSegmentAlpha(arm, 'fore', aF);
-      arm.upper.visible = upperOk && aU > 0.02;
-      arm.fore.visible = foreOk && aF > 0.02;
-      // A faded limb casting a full shadow on the glass reads as a ghost arm.
-      arm.upperSkin.castShadow = aU > 0.6;
-      arm.foreSkin.castShadow = arm.band.castShadow = aF > 0.6;
+      const elbowDist = trueEye ? elbow.distanceTo(trueEye) : 1;
+      const vdy = renderOpts.viewDir && Number.isFinite(renderOpts.viewDir.y) ? renderOpts.viewDir.y : 0;
+      arm.stubOn = upperOk && stubShown(arm.stubOn, elbowDist, vdy, fU);
+      const cutWant = alongCutHide(alongCutStart(arm.stubOn, elbowDist), fF);
+      // The cut eases (no pop when the stub appears / goes); a fresh rig or a big jump snaps.
+      arm.cut = !Number.isFinite(arm.cut) || !(dt > 0) ? cutWant : arm.cut + (cutWant - arm.cut) * (1 - Math.exp(-14 * Math.min(dt, 0.1)));
+      const am = arm.foreSkin.material;
+      if (am && am.userData.along) am.userData.along.value = arm.cut;
+      // The sweatband sits at the wrist end (t > 0.8): it goes with the cut once that passes it.
+      const bandA = 1 - THREE.MathUtils.smoothstep(arm.cut, 0.72, 0.9);
+      setSegmentAlpha(arm, 'upper', 1);
+      setSegmentAlpha(arm, 'band', bandA);
+      arm.upper.visible = arm.stubOn;
+      arm.fore.visible = foreOk && arm.cut < 1 + ALONG_CUT.band - 0.02;
+      arm.band.visible = bandA > 0.02;
+      // A cut limb casting a full shadow on the glass reads as a ghost arm.
+      arm.upperSkin.castShadow = arm.stubOn;
+      arm.foreSkin.castShadow = arm.band.castShadow = arm.cut < 0.3;
       // A forearm whose hand (and racket) has been culled reads as a stump: hide it too.
       if (side === dom && rp && !holders[dom].visible) arm.fore.visible = false;
     }
@@ -654,6 +716,8 @@ export function createFirstPersonRig({ handed = 'right', skinTone = '#c58c6a', s
     root,
     racketMesh,
     stats,
+    /** Motion-blur ribbon behind the racket head (racketTrail.js). */
+    trail,
     /** Current near-eye fade of the racket (1 = solid). */
     get racketFade() { return racketFade; },
     ready,
@@ -661,6 +725,23 @@ export function createFirstPersonRig({ handed = 'right', skinTone = '#c58c6a', s
     setHanded,
     setSkin(c) { for (const m of skinMats) m.color.set(c); },
     setSleeve(c) { sleeveMat.color.set(c); sleeveMat.sheenColor.set(c).lerp(new THREE.Color('#ffffff'), 0.45); },
+    /**
+     * Outfit (game/progression.js OUTFITS { shirt, sleeve, band }): the sleeves take the shirt / sleeve
+     * colour and both wristbands the band colour.
+     */
+    setOutfit(o = {}) {
+      const sl = o.sleeve || o.shirt;
+      if (sl) {
+        sleeveMat.color.set(sl);
+        sleeveMat.sheenColor.set(sl).lerp(new THREE.Color('#ffffff'), 0.45);
+      }
+      if (o.band) {
+        for (const side of ['L', 'R']) {
+          const m = arms[side] && arms[side].band && arms[side].band.material;
+          for (const mm of Array.isArray(m) ? m : m ? [m] : []) if (mm.color) mm.color.set(o.band);
+        }
+      }
+    },
     /** Debug: canonical wrist position in the racket frame. */
     wristInRacket() { return new THREE.Vector3().setFromMatrixPosition(handInRacket); },
     get usingGlb() { return usingGlb; },

@@ -21,20 +21,37 @@ import { createStage } from './app/stage.js';
 import { createGame, STEP } from './app/game.js';
 import { bindWorld } from './app/wiring.js';
 import { createAids } from './app/aids.js';
-import { createRecorder, createReplayPlayer } from './app/replay.js';
+import { createRecorder, createReplayPlayer, createReplayDirector } from './app/replay.js';
 import { createTracking, bodyVisibility, createMotionWatch, createFrameWatch } from './app/tracking.js';
 import { createDebugOverlay } from './app/debug.js';
 import { installPrivacyGuard } from './app/privacy.js';
 import { initPwa } from './app/pwa.js';
 import { buildDiagnostics, browserEnv } from './app/diagnostics.js';
 import { installGlasses } from './xr/boot.js';
+// Round 4: career, arcade, progression, achievements.
+import { createProgress, xpForSession, levelOf, rankTitle, RACKETS, OUTFITS, racketById, outfitById, unlockText } from './game/progression.js';
+import { createCareer, EVENT_BY_ID, PARTNERS, PAIRS, VENUES, venueById, playerCard, matchSpec, trophyName } from './game/career.js';
+import { CHALLENGES, CHALLENGE_BY_ID, createLeaderboards, dailyChallenge, dateKey } from './game/challenges.js';
+import { ACHIEVEMENTS, createAchievementTracker } from './game/achievements.js';
+import { createGlassTargets } from './render/glassTargets.js';
+import { createMatch } from './rules/scoring.js';
 
 installPrivacyGuard();
 
 const P = parseParams(location.search);
+// Round 4 URL flags (?challenge, ?career, ?quick, ?autoreplay, ?screen, ?venue...) are parsed with the
+// rest in app/params.js; P4 keeps the old name for them.
+const P4 = P;
 const storage = safeStorage();
 const store = createSettingsStore(storage);
 const S = store.value;
+const progress = createProgress({ storage });
+const career = createCareer({ storage });
+const boards = createLeaderboards({ storage });
+// The equipped racket / outfit live in the profile; the settings mirror them for the renderer.
+if (S.racketModel !== progress.data.racket) S.racketModel = progress.data.racket;
+if (S.outfit !== progress.data.outfit) S.outfit = progress.data.outfit;
+if (P4.venue) S.venue = P4.venue;
 // URL overrides apply to this visit only (not persisted unless changed in Settings).
 if (P.quality) S.quality = P.quality;
 if (P.assist) S.assist = P.assist;
@@ -63,10 +80,17 @@ let fallback = null;
 let debug = null;
 let pwa = null; // app packaging: service worker, install button, display mode
 let xrBoot = null; // glasses mode (src/xr/boot.js): app.xr, recentre keys, stereo HUD, panels
+let glassTargets = null; // Glass Breaker targets (render/glassTargets.js)
+let director = null; // automatic replays of special moments (app/replay.js)
+let tracker = null; // achievements of the session (game/achievements.js)
+let sessionAch = []; // achievements earned this session (results screen)
+let sessionStartLevel = 1; // level at the session start (level-ups shown on the results)
+let sessionUnlocks = []; // rackets / outfits unlocked by achievement XP during the session
 const recorder = createRecorder({ seconds: 6, hz: 60 });
 const aids = createAids();
 const motion = createMotionWatch();
-const frameWatch = createFrameWatch();
+// Close mode (round 4): only the head and shoulders must be in the picture; the legs are never asked for.
+const frameWatch = createFrameWatch({ upperBody: true, handsTop: true });
 let frameWarning = null; // out-of-frame warning for the play HUD (camera input)
 
 let inputMode = P.autopilot ? 'autopilot' : P.fallback ? 'fallback' : 'camera';
@@ -87,7 +111,11 @@ let lastPoseFrame = null;
 let lastSample = null;
 let trackingSeen = false;
 let replayBadge = null;
+let venueBinding = null; // the session's crowd / umpire / callouts (audio/venueAudio.js bindVenue via wiring.js)
 let hudAcc = 0;
+/** First-time timing prompt (startGame): { done } or null. */
+let firstHits = null;
+const FIRST_HITS = 5;
 let lastMs = performance.now();
 let audioUnlocked = false;
 
@@ -115,14 +143,56 @@ function applySettings(patch) {
     human.locomotion.config.gainDepth = S.gainDepth;
   }
   if (keys.includes('volumes') && audio) audio.setVolume(S.volumes);
+  if (keys.includes('volumes') && voice) voice.setVolume(S.volumes.master ?? 1);
   if (keys.includes('voice') && voice) {
-    voice.setEnabled(S.voice !== 'off');
+    // Voice coach off silences the coach only: the umpire and the players' calls have their own settings.
+    voice.setCoach(S.voice !== 'off');
     if (S.voice !== 'off') voice.setLang(S.voice);
   }
+  // Umpire language / partner callouts apply to the running session at once (audio/umpire.js).
+  if ((keys.includes('umpireLang') || keys.includes('callouts')) && venueBinding && venueBinding.umpire) {
+    const u = venueBinding.umpire;
+    u.setEnabled(S.umpireLang !== 'off');
+    if (S.umpireLang === 'en' || S.umpireLang === 'es') u.setLang(S.umpireLang);
+    u.setCallouts(S.callouts !== false);
+  }
   if (keys.includes('viewPitch')) FALLBACK.pitchDeg = S.viewPitch;
+  if (keys.includes('cameraTilt')) applyCameraTilt();
+  // Round 4: racket model (render/racket.js setModel) and outfit (first-person kit; presence engineer's rig API).
+  if (keys.includes('racketModel') && stage) applyRacketModel();
+  if (keys.includes('outfit') && stage) applyOutfit();
+  // Free-play venue: the menu scene behind the screens switches at once (a session keeps its own).
+  if (keys.includes('venue') && stage && (!game || game.attract)) setVenue(S.venue);
   if (keys.includes('gazeFollow') && stage) stage.setGaze(S.gazeFollow && inputMode !== 'fallback');
   if (game) game.syncSettings(S);
   if (ui) ui.settings(S);
+}
+
+function setVenue(venue) {
+  if (!stage) return;
+  try {
+    if (typeof stage.setVenue === 'function') stage.setVenue(venue);
+    else if (stage.env && typeof stage.env.setVenue === 'function') stage.env.setVenue(venue);
+    // The venue's acoustics, ambience bed and crowd (audio/engine.js setVenue; a no-op when unchanged).
+    if (audio && stage.env) audio.setVenue(stage.env.venue);
+  } catch (err) {
+    errors.push(`venue: ${String(err && err.message ? err.message : err)}`);
+  }
+}
+
+function applyRacketModel() {
+  const r = stage && stage.rig && stage.rig.racketMesh;
+  if (r && r.userData && r.userData.setModel) r.userData.setModel(S.racketModel, S.racketColor);
+}
+
+/** Outfit colours on the player's own bodies: first-person body, replay body, first-person rig sleeves. */
+function applyOutfit() {
+  const o = outfitById(S.outfit);
+  const kit = { shirt: o.shirt, trim: o.band, shorts: o.shorts, shortsTrim: o.band };
+  for (const body of [stage && stage.fpBody, stage && stage.self]) {
+    if (body && typeof body.setKit === 'function') body.setKit(kit);
+  }
+  if (stage && stage.rig && typeof stage.rig.setOutfit === 'function') stage.rig.setOutfit(o);
 }
 
 // ---------------------------------------------------------------------------------------
@@ -136,6 +206,7 @@ function nextSeed() {
 function endGame() {
   if (unbindGame) unbindGame();
   unbindGame = null;
+  venueBinding = null;
   if (game) game.dispose();
   game = null;
   results = null;
@@ -146,6 +217,9 @@ function endGame() {
     stage.effects.landingMarker(null);
     stage.effects.contactGhost(null);
   }
+  if (glassTargets) glassTargets.clear();
+  director = null;
+  tracker = null;
   if (!clock.running) clock.resume();
   clock.setRate(1);
 }
@@ -163,6 +237,9 @@ function startGame(spec, { attract = false } = {}) {
   endGame();
   replay = null;
   const input = attract ? 'autopilot' : inputMode;
+  // Venue of this session: render/environment.js env.setVenue(id) swaps the venue layer (a no-op when
+  // it is already up); a stage-level setVenue (lights, mirror, crowd wiring) is preferred when present.
+  setVenue(attract ? S.venue : spec.venue || S.venue || 'club');
   const g = createGame({
     spec,
     settings: S,
@@ -177,16 +254,47 @@ function startGame(spec, { attract = false } = {}) {
     apProfile: P.apProfile,
     apJitter: P.apJitter,
     apNoise: P.apNoise,
+    apClose: P.apClose,
     attract,
     onFrame: input === 'autopilot' && !attract ? (frame) => { lastPoseFrame = frame; ui.setSkeleton(frame); } : null,
   });
   game = g;
+  // Fun review r5 ("guided first rally", the cheap part): a player who has never finished a session
+  // gets a timing prompt on the HUD until their first FIRST_HITS hits (`?firsthits=1` forces it).
+  const life = progress.data && progress.data.lifetime;
+  firstHits = !attract && (input !== 'autopilot' || P.firstHits) && (P.firstHits || !(life && (life.sessions > 0 || life.shots > 0)))
+    ? { done: false } : null;
   recorder.clear();
-  unbindGame = bindWorld(g.world, {
+  sessionAch = [];
+  sessionUnlocks = [];
+  sessionStartLevel = progress.level.level;
+  tracker = attract ? null : createAchievementTracker({ has: (id) => !!progress.data.achievements[id], ctx: { kind: spec.kind } });
+  const autoReplay = P4.autoReplay ?? (S.autoReplay !== false && input !== 'autopilot');
+  // Drills replay only the rare moments (por tres, perfect-timing streaks), at most every 45 s;
+  // a timed arcade run keeps its flow: one or two highlights (a por tres is routine in Por Tres
+  // Party, so there only the rarer por cuatro); a match replays at most the best moment of each game
+  // (and 45 s apart), a rally one per 2 min (QA r5: one point in three was replayed).
+  director = attract || !autoReplay ? null : createReplayDirector(spec.kind === 'drill'
+    ? { minGap: 45, kinds: ['por-tres', 'por-cuatro', 'perfect'] }
+    : spec.kind === 'challenge'
+      ? { minGap: 40, kinds: String(spec.challengeId || '').includes('por-tres') ? ['por-cuatro', 'long-rally'] : ['por-tres', 'por-cuatro', 'target', 'long-rally'] }
+      : spec.kind === 'match' ? { minGap: 45, perGame: true } : { minGap: 120 });
+  const wctx = {
     audio, voice, stage, ui, recorder, quiet: attract,
+    // The umpire calls the player's pair "Víbora"; a career rival pair by its name.
+    umpireTeams: spec.career && spec.pairName ? [{ en: 'Víbora', es: 'Víbora' }, { en: spec.pairName, es: spec.pairName }] : null,
     onDrillEnd: (p) => scheduleResults(p),
     onMatchEnd: (p) => scheduleResults(p),
-  });
+    onChallengeEnd: (p) => scheduleResults(p),
+    onMatchPoint: (p) => { if (g.spec.career && !g.done) career.saveMidMatch(p.points); },
+    achievements: tracker,
+    onAchievement: (a) => earnAchievement(a),
+    director,
+    glassTargets,
+    arcade: spec.kind === 'challenge',
+  };
+  unbindGame = bindWorld(g.world, wctx);
+  venueBinding = wctx.venue || null;
   stage.effects.targets(g.drill ? g.drill.targets : null);
   if (attract) {
     stage.setView('orbit');
@@ -241,7 +349,11 @@ function showResults() {
   g.done = true;
   const ses = g.session ? g.session.summary() : {};
   const sum = g.mode.summary(g.world);
+  // Swings: the tracking's swing events, else the strokes (session log / player hits).
+  const swings = Math.max(ses.swings || 0, g.stats.playerHits || 0);
+  const fitness = { activeSeconds: ses.activeSeconds, swings, kcal: ses.kcal, peakSwingKmh: ses.peakSwingKmh };
   let data;
+  let xpIn = { kind: g.spec.kind, activeSeconds: ses.activeSeconds };
   if (g.spec.kind === 'drill') {
     const d = g.drill;
     const made = (sum.results || []).filter((r) => r.success).length;
@@ -263,6 +375,11 @@ function showResults() {
       nextDrill: nd ? { id: nd.id, name: nd.name, es: nd.es } : null,
       misses: sum.misses || null,
     };
+    xpIn = { ...xpIn, stars: sum.stars, points: sum.points };
+  } else if (g.spec.kind === 'challenge') {
+    const lb = boards.submit(sum.boardId, { score: sum.score, combo: sum.maxCombo, perfect: sum.perfect });
+    data = { ...ses, ...sum, mode: 'challenge', leaderboard: lb, title: sum.name };
+    xpIn = { ...xpIn, score: sum.score, daily: !!sum.daily, newBest: lb.isBest && lb.previousBest !== null };
   } else {
     const won = g.spec.kind === 'match' ? g.mode.match.winner === 0 : null;
     const sc = sum.score || null;
@@ -274,13 +391,170 @@ function showResults() {
       stars: g.spec.kind === 'match' ? (won ? 3 : 1) : 0,
       tips: [],
       misses: sum.misses || null,
+      // Match / rally header and stats (ui.js renderResults): scoreline, points won, best rally.
+      scoreline: sc ? { names: sum.teamNames || null, games: sc.games.slice(), sets: (sc.sets || []).map((x) => x.slice()), won } : null,
+      pointsWon: sc ? (sum.points || []).filter((q) => q.winner === 0).length : sum.won || 0,
+      pointsPlayed: sc ? (sum.points || []).length : (sum.won || 0) + (sum.lost || 0),
+      bestRally: sum.bestRally || ses.bestRally || 0,
+      cleanGames: sum.cleanGames || 0,
     };
+    xpIn = { ...xpIn, won, gamesWon: sc ? sc.games[0] : 0, bestRally: sum.bestRally || ses.bestRally || 0, playerHits: sum.playerHits || 0 };
+    if (g.spec.career) {
+      const res = career.recordMatch({ won: !!won, score: sc, pointsWon: data.pointsWon, pointsPlayed: data.pointsPlayed });
+      if (res) {
+        const ev = EVENT_BY_ID[res.eventId];
+        data.career = g.spec.career;
+        data.careerResult = {
+          ...res,
+          eventName: ev.name,
+          nextPair: res.nextMatch ? res.nextMatch.pairName : null,
+          unlockedName: res.unlockedEvent ? EVENT_BY_ID[res.unlockedEvent].name : null,
+        };
+        data.title = won ? `${g.spec.career.round} won` : `${g.spec.career.round} lost`;
+        if (res.eventDone) {
+          const tr = progress.awardTrophy(res.eventId, res.place);
+          data.careerResult.trophyUnlocks = tr.unlocks;
+          for (const a of tracker ? tracker.onCareer(res) : []) earnAchievement(a, { toast: false });
+        }
+        xpIn.career = { eventWon: res.eventWon, eventDone: res.eventDone, tier: ev.tier };
+        if (res.unlockedByAttempts) data.careerResult.unlockedName = EVENT_BY_ID[res.unlockedByAttempts].name;
+      }
+    }
   }
+  // Lifetime fitness, streak, achievements of the session, XP.
+  progress.recordSession({ activeSeconds: ses.activeSeconds, kcal: ses.kcal, swings, shots: g.stats.playerHits, bestRally: ses.bestRally, drillId: g.spec.kind === 'drill' ? g.drill.id : null });
+  if (tracker) for (const a of tracker.onSession(ses, progress.data, DRILLS.length)) earnAchievement(a, { toast: false });
+  // Achievement XP was added as each was earned (earnAchievement); the session's XP now.
+  const xp = xpForSession(xpIn);
+  const achXp = sessionAch.reduce((n, a) => n + a.xp, 0);
+  const lvl = progress.addXp(xp.xp);
+  const levelUps = [];
+  for (let l = sessionStartLevel + 1; l <= lvl.after; l++) levelUps.push(l);
+  const unlocks = [...sessionUnlocks, ...lvl.unlocks, ...((data.careerResult && data.careerResult.trophyUnlocks) || [])];
+  sessionUnlocks = [];
+  data.rewards = {
+    xp: lvl.gained + achXp, parts: achXp ? [...xp.parts, { xp: achXp, en: 'Achievements', es: 'Logros' }] : xp.parts,
+    levelUps, unlocks, achievements: sessionAch.slice(), profile: profileInfo(),
+  };
+  data.fitness = fitness;
   stage.setView('orbit');
   ui.banner('');
   ui.results(data);
   cursor.setEnabled(true);
   if (audio) audio.ui('success');
+  if (levelUps.length) ui.toast(`Level ${lvl.after}! · ¡Nivel ${lvl.after}!`);
+}
+
+/** Records an earned achievement (profile + toast); its XP is added with the session's. */
+function earnAchievement(a, { toast = true } = {}) {
+  if (!a || !progress.unlockAchievement(a.id)) return;
+  sessionAch.push(a);
+  // Its XP counts at once (kept even if the session is left before its results).
+  sessionUnlocks.push(...progress.addXp(a.xp).unlocks);
+  if (toast && ui) ui.achievement(a);
+  if (audio && audio.ui) audio.ui('success');
+}
+
+/** Profile summary for the hub, career and results. */
+function profileInfo() {
+  const p = progress.data;
+  const L = levelOf(p.xp);
+  return {
+    ...L, xp: p.xp, title: rankTitle(L.level), racket: racketById(p.racket), outfit: outfitById(p.outfit),
+    trophies: Object.values(p.trophies).filter((t) => t.place === 1).length,
+    achievements: Object.keys(p.achievements).length, achievementsTotal: ACHIEVEMENTS.length,
+    streak: p.streak.days, lifetime: { ...p.lifetime },
+    newUnlocks: RACKETS.filter((r) => progress.isNew('racket', r.id)).length + OUTFITS.filter((o) => progress.isNew('outfit', o.id)).length,
+  };
+}
+
+function roundLabel(e) {
+  if (!e || !e.matches) return '';
+  const m = e.matches[Math.min(e.matchIndex || 0, e.matches.length - 1)];
+  return `${m.round} vs ${PAIRS[m.pair].name}`;
+}
+
+function careerData() {
+  const evs = career.events().map((e) => ({ ...e, venueName: venueById(e.venue).name, roundLabel: e.status === 'in-progress' ? roundLabel(e) : '' }));
+  const cur = career.current();
+  return {
+    events: evs,
+    currentId: cur ? cur.id : null,
+    anyInProgress: evs.some((e) => e.status === 'in-progress'),
+    partner: career.partner,
+    partners: PARTNERS.map((id) => playerCard(id)),
+    profile: profileInfo(),
+  };
+}
+
+const TIPS = {
+  lobber: 'They lob a lot: stay ready to move back, play a bandeja and win the net back.',
+  'big-hitter': 'Big hitters miss: keep the ball deep and low, let the glass slow their drives.',
+  'wall-master': 'They return everything off the glass: go to their feet with chiquitas and volley.',
+  'net-rusher': 'They rush the net: lob over them and pass down the middle.',
+  chiquita: 'Soft balls at your feet: bend your knees, block the low volley deep.',
+  'all-rounder': 'No obvious weakness: be patient, play to the middle and wait for the short ball.',
+};
+
+function eventIntroData(eventId) {
+  const ev = EVENT_BY_ID[eventId];
+  if (!ev) return {};
+  const evs = career.events();
+  const e = evs.find((x) => x.id === eventId);
+  const act = career.active && career.active.eventId === eventId ? career.active : null;
+  const mi = act ? act.matchIndex : 0;
+  const spec = matchSpec(eventId, mi, career.partner, { resume: act && act.points.length ? { points: act.points } : null, form: career.form });
+  const opp = spec.opponents.map((o) => playerCard(o.id));
+  let resumeScore = null;
+  if (act && act.points.length) {
+    // The score the match will resume at (replayed through the real scoring).
+    const m = createMatch({ gamesPerSet: spec.games, setsToWin: 1, goldenPoint: true, tiebreakAt: spec.games, firstServer: { team: 1, player: 0 } });
+    for (const w of act.points) if (!m.isOver) m.pointWonBy(w);
+    const d = m.display();
+    resumeScore = `${d.games[0]}–${d.games[1]} · ${d.points[0] || '0'}–${d.points[1] || '0'}`;
+  }
+  const persona = opp.map((o) => o.personality);
+  return {
+    event: { ...ev, venueName: venueById(ev.venue).name },
+    spec, matchIndex: mi, opponents: opp, partner: playerCard(career.partner), pairName: spec.pairName,
+    resumeScore, canAbandon: !!act, racketName: racketById(progress.data.racket).name,
+    tip: TIPS[persona[0]] || TIPS['all-rounder'],
+    status: e ? e.status : 'open',
+  };
+}
+
+function trophiesData(tab = 'trophies') {
+  const p = progress.data;
+  const evs = career.events();
+  return {
+    tab,
+    profile: profileInfo(),
+    events: evs,
+    rackets: RACKETS.map((r) => ({
+      ...r, unlocked: progress.isUnlocked('racket', r.id), equipped: p.racket === r.id, isNew: progress.isNew('racket', r.id),
+      unlockText: unlockText(r.unlock, trophyName).en,
+    })),
+    outfits: OUTFITS.map((o) => ({
+      ...o, unlocked: progress.isUnlocked('outfit', o.id), equipped: p.outfit === o.id, isNew: progress.isNew('outfit', o.id),
+      unlockText: unlockText(o.unlock, trophyName).en,
+    })),
+    achievements: ACHIEVEMENTS.map((a) => ({ ...a, earned: !!p.achievements[a.id] })),
+    lifetime: { ...p.lifetime },
+    streak: { ...p.streak },
+  };
+}
+
+function arcadeData(selected = null) {
+  const d = dailyChallenge(dateKey());
+  const base = CHALLENGE_BY_ID[d.base];
+  const daily = {
+    ...base, ...d, id: d.id, isDaily: true, baseName: base.name, best: boards.best(d.id), desc: base.desc, rules: base.rules, duration: d.duration,
+  };
+  const challenges = CHALLENGES.map((c) => ({ ...c, best: boards.best(c.id) }));
+  const ids = [daily.id, ...challenges.map((c) => c.id)];
+  const out = {};
+  for (const id of ids) out[id] = boards.board(id, 8);
+  return { daily, challenges, boards: out, selected };
 }
 
 function hubData() {
@@ -292,7 +566,20 @@ function hubData() {
     if (p !== null) bests[d.id] = { points: p, stars: starsFor(d, p) };
   }
   const input = inputMode === 'fallback' ? 'Mouse controls' : inputMode === 'autopilot' ? 'Autopilot' : tracking && tracking.camera ? tracking.camera.label : null;
-  return { drills, bests, level: hubLevel, player: input };
+  const cur = career.current();
+  const evs = career.events();
+  const d = dailyChallenge(dateKey());
+  const earned = Object.values(bests).reduce((n, b) => n + (b.stars || 0), 0);
+  return {
+    drills, bests, level: hubLevel, player: input,
+    profile: profileInfo(),
+    career: {
+      current: cur ? { ...cur, roundLabel: cur.status === 'in-progress' ? roundLabel(cur) : `${cur.matches.length} ${cur.matches.length === 1 ? 'match' : 'matches'} · ${venueById(cur.venue).name}` } : null,
+      won: evs.filter((e) => e.status === 'won').length, total: evs.length,
+    },
+    daily: { ...d, baseName: CHALLENGE_BY_ID[d.base].name, best: boards.best(d.id) },
+    stars: { earned, total: drills.length * 3 },
+  };
 }
 
 function pause() {
@@ -323,27 +610,64 @@ function resume() {
 // ---------------------------------------------------------------------------------------
 // Instant replay
 
-function startReplay() {
+/**
+ * Instant replay. With a moment (app/replay.js director: por tres, winner, long rally, perfect streak,
+ * glass target), an automatic slow-motion highlight from cinematic angles, played once and skippable.
+ */
+function startReplay(moment = null) {
   const snap = recorder.snapshot();
   if (!snap || snap.t1 - snap.t0 < 0.5) {
-    ui.toast('Nothing to replay yet · aún no hay repetición');
-    return;
+    if (!moment) ui.toast('Nothing to replay yet · aún no hay repetición');
+    return false;
   }
   const returnTo = ui.screen === 'play' ? 'play' : ui.screen;
   if (returnTo === 'play' && game && !paused) {
     paused = true;
     clock.pause();
   }
-  const last = snap.hits.length ? snap.hits[snap.hits.length - 1].t : null;
-  const from = last !== null && last > snap.t0 ? Math.max(snap.t0, last - 2.0) : Math.max(snap.t0, snap.t1 - 4.5);
-  replay = { player: createReplayPlayer(snap, { rate: 0.4, from }), returnTo, view: 'broadcast' };
+  let player;
+  let view = 'broadcast';
+  if (moment && Number.isFinite(moment.t)) {
+    const lead = moment.kind === 'long-rally' ? 2.4 : 1.3;
+    const tail = moment.kind === 'por-tres' || moment.kind === 'por-cuatro' ? 2.6 : 2.0;
+    player = createReplayPlayer(snap, { rate: moment.rate || 0.45, from: Math.max(snap.t0, moment.t - lead), to: Math.min(snap.t1, moment.t + tail) });
+    view = (moment.views && moment.views[0]) || 'broadcast';
+  } else {
+    const last = snap.hits.length ? snap.hits[snap.hits.length - 1].t : null;
+    const from = last !== null && last > snap.t0 ? Math.max(snap.t0, last - 2.0) : Math.max(snap.t0, snap.t1 - 4.5);
+    player = createReplayPlayer(snap, { rate: 0.4, from });
+  }
+  replay = { player, returnTo, view, auto: moment, switched: false };
   stage.effects.landingMarker(null);
   stage.effects.contactGhost(null);
   stage.setView('replay');
-  stage.fpCam.setReplayView('broadcast');
+  stage.fpCam.setReplayView(view);
   uiRoot.classList.add('is-replay');
+  setReplayBadge(moment);
   replayBadge.hidden = false;
   if (ui.screen !== 'play') ui.show('play');
+  // The first automatic replay says how to turn them off (QA r5).
+  if (moment) {
+    try {
+      if (!storage.getItem('vibora.autoReplayHint.v1')) {
+        storage.setItem('vibora.autoReplayHint.v1', '1');
+        ui.toast('Auto-replays: On · change in Settings → Game & venue · repeticiones automáticas');
+      }
+    } catch {
+      /* private mode: no hint memory */
+    }
+  }
+  return true;
+}
+
+function setReplayBadge(moment) {
+  if (moment) {
+    replayBadge.innerHTML = `<b>Replay</b><span class="rb-moment"></span><span>${Math.round((moment.rate || 0.45) * 100) / 100}× · slow motion</span><button type="button" class="btn btn-sm rb-skip">Skip ›<span class="es">Saltar · any key</span></button><span class="rb-bar"><i></i></span>`;
+    replayBadge.querySelector('.rb-moment').textContent = moment.label || '';
+    replayBadge.querySelector('.rb-skip').addEventListener('click', () => stopReplay());
+  } else {
+    replayBadge.innerHTML = '<b>Instant replay</b><span>0.4× · cyan: your tracked racket path</span><small>V view · R / Esc exit</small><span class="rb-bar"><i></i></span>';
+  }
 }
 
 function cycleReplayView() {
@@ -475,6 +799,15 @@ function onPoseFrame(frame) {
       tracking: people ? 'ok' : trackingSeen ? 'lost' : 'searching',
       offset: cal && cal.ok && sample && sample.valid ? sample.offset : null,
       swingAt: m.swingAt,
+      // Close mode (ui/calibrate.js): the tracker's estimator, head + shoulders in view, camera tilt,
+      // and the movement-gain boost of a close calibration.
+      trackMode: sample && sample.valid ? sample.trackMode : null,
+      upper: vis.upper,
+      tiltDeg: human.bodyTracker.tilt ? human.bodyTracker.tilt.deg : 0,
+      // Round 5: the pitch fit of the play-area steps and the overhead check (ui.js area step).
+      tilt: human.bodyTracker.tilt ? { deg: human.bodyTracker.tilt.deg, confidence: human.bodyTracker.tilt.confidence, locked: human.bodyTracker.tilt.locked } : null,
+      overhead: overheadCheck(frame, sample),
+      boost: human.locomotion && human.locomotion.config ? human.locomotion.config.boost || null : null,
       // No capture timestamps from the browser (Safari): the latency step becomes recommended.
       needsLatencyTest: !!(tracking && tracking.needsLatencyTest),
     });
@@ -484,11 +817,34 @@ function onPoseFrame(frame) {
   cursor.setEnabled(menu && !replay);
   const cs = cursor.update(sample && sample.valid ? sample : null);
   if (cs && cs.visible && !audioUnlocked) tryUnlockAudio();
+  // A raised racket skips an automatic replay.
+  if (replay && replay.auto && m.raisedFor > 0.6) stopReplay();
   if (ui.screen === 'drill-intro' && introDrillId && m.raisedFor > 0.8) {
     const id = introDrillId;
     introDrillId = null;
     startGame({ kind: 'drill', drillId: id });
   }
+}
+
+/** Calibration overhead check: the racket hand raised above the head, and whether it leaves the picture. */
+function overheadCheck(frame, sample) {
+  const domR = S.handed !== 'left';
+  const p0 = frame && frame.people && frame.people[0];
+  const l = p0 && p0.landmarks && p0.landmarks[domR ? 16 : 15];
+  const w = sample && sample.valid ? sample.joints[domR ? 'wristR' : 'wristL'] : null;
+  return {
+    raised: !!(w && Number.isFinite(sample.eyeHeight) && w.y > sample.eyeHeight + 0.12),
+    out: !!(l && (l.y <= 0.01 || l.x <= 0.005 || l.x >= 0.995)),
+  };
+}
+
+/** Settings → Camera tilt: 'auto' (measured in calibration and play) or a fixed pitch in degrees. */
+function applyCameraTilt() {
+  if (!human) return;
+  const v = S.cameraTilt;
+  if (v === 'auto' || v === undefined) {
+    if (human.bodyTracker.tilt && human.bodyTracker.tilt.locked) human.bodyTracker.setTilt(null);
+  } else if (Number.isFinite(Number(v))) human.bodyTracker.setTilt(Number(v), { lock: true });
 }
 
 function onPoseStatus(s) {
@@ -512,6 +868,47 @@ const handlers = {
     hubLevel = level || hubLevel;
     requestStart({ kind: 'match', level: hubLevel });
   },
+  // ---- Round 4: career, arcade, free play, unlocks -------------------------------------------
+  onStartCareer(eventId) {
+    const spec = career.startEvent(eventId, { quick: P4.quick });
+    if (!spec) {
+      ui.toast('Win the previous event to unlock it · Gana el torneo anterior');
+      return;
+    }
+    requestStart(spec);
+  },
+  onAbandonEvent() {
+    career.abandon();
+    ui.show('career', careerData());
+  },
+  onCareerPartner(id) {
+    if (!career.setPartner(id)) return;
+    ui.show('career', careerData());
+  },
+  onStartChallenge(id) {
+    const isDaily = String(id).startsWith('daily');
+    const d = isDaily ? dailyChallenge(String(id).split(':')[1] || dateKey()) : null;
+    requestStart({ kind: 'challenge', challengeId: d ? d.base : id, daily: d, venue: d ? d.venue : S.venue });
+  },
+  onEquip(kind, id) {
+    if (!progress.equip(kind, id)) return;
+    if (kind === 'racket') applySettings({ racketModel: id, racketColor: racketById(id).color });
+    else applySettings({ outfit: id });
+    const tab = kind === 'racket' ? 'rackets' : 'outfits';
+    ui.show('trophies', trophiesData(tab));
+    ui.toast(kind === 'racket' ? `${racketById(id).name} equipped · pala elegida` : `${outfitById(id).name} · equipación`);
+    if (audio) audio.ui('confirm');
+  },
+  /** The 3D court behind the menus shows the venue being chosen. */
+  onPreviewVenue(venue) {
+    if (!game || game.attract) setVenue(venue);
+  },
+  onStartFree({ mode = 'rally', level = 'club', venue = null, games = 4 } = {}) {
+    hubLevel = level || hubLevel;
+    if (venue && venue !== S.venue) applySettings({ venue });
+    if (mode === 'match') requestStart({ kind: 'match', level: hubLevel, games: games || 4, venue: S.venue });
+    else requestStart({ kind: 'rally', level: hubLevel, venue: S.venue });
+  },
   onCalibrate() {
     const ok = human.calibrate();
     ui.toast(ok ? 'Home position saved · posición guardada' : 'Could not see you clearly. Stay in frame and try again.');
@@ -534,12 +931,22 @@ const handlers = {
   },
   onQuit() {
     replay = null;
+    // A career match left half-way is saved point by point: resume it from the career map.
+    if (game && !game.attract && !game.done && game.spec.career) ui.toast('Match saved · resume it from the career · partido guardado');
     endGame();
     stage.setView('orbit');
     cursor.setEnabled(true);
   },
   onRestart() {
-    if (lastSpec) startGame(lastSpec);
+    if (!lastSpec) return;
+    if (lastSpec.career && career.active && career.active.eventId === lastSpec.career.eventId) {
+      // Restart the career match from 0-0 (a finished match continues with the next round instead).
+      career.saveMidMatch([]);
+      const spec = career.startEvent(lastSpec.career.eventId, { quick: P4.quick });
+      if (spec) startGame(spec);
+      return;
+    }
+    startGame(lastSpec);
   },
   onReplay() {
     startReplay();
@@ -562,6 +969,8 @@ const handlers = {
   onScreen(name, data) {
     // Glasses panel in Settings and Help (idempotent; remounts after each re-render).
     if (xrBoot) xrBoot.onScreen(name);
+    // Calibration fits the camera pitch from the spot and play-area steps (tracking/body.js TILT_CAL).
+    if (human) human.bodyTracker.setCalibrating(name === 'calibrate');
     if (name !== 'title' && game && game.attract) stopAttract();
     switch (name) {
       case 'title':
@@ -573,6 +982,29 @@ const handlers = {
       case 'hub':
         ui.show('hub', hubData());
         if (pendingStart && (inputMode !== 'camera' || (tracking && tracking.running))) startGame(pendingStart);
+        break;
+      case 'training':
+        ui.show('training', hubData());
+        break;
+      case 'career':
+        ui.show('career', careerData());
+        break;
+      case 'event-intro': {
+        const id = data && data.eventId ? data.eventId : data && data.event ? data.event.id : null;
+        ui.show('event-intro', eventIntroData(id));
+        // The court behind the intro is the event's venue.
+        if (EVENT_BY_ID[id] && (!game || game.attract)) setVenue(EVENT_BY_ID[id].venue);
+        break;
+      }
+      case 'trophies':
+        ui.show('trophies', trophiesData(data && data.tab ? data.tab : 'trophies'));
+        progress.markSeen();
+        break;
+      case 'arcade':
+        ui.show('arcade', arcadeData(data && data.selected ? data.selected : null));
+        break;
+      case 'freeplay':
+        ui.show('freeplay', { mode: data && data.mode ? data.mode : 'rally', level: hubLevel, venue: S.venue, venues: VENUES });
         break;
       case 'drill-intro':
         introDrillId = data && data.drill ? data.drill.id : null;
@@ -677,11 +1109,33 @@ function stepGame(nowMs, dtReal) {
     h.live = g.inPlay();
     // Camera input: tell the player when the camera loses them (a living room is small).
     if (g.input === 'camera' && frameWarning && ui.screen === 'play') h.prompt = `${frameWarning.text}`;
+    if (firstHits && !firstHits.done && ui.screen === 'play' && !h.prompt) {
+      const n = g.stats.playerHits;
+      if (n < FIRST_HITS) {
+        h.prompt = n === 0
+          ? 'Swing as the ring around the ball turns green · golpea en el verde'
+          : `${n} of ${FIRST_HITS} · same again: swing on the green ring`;
+      } else {
+        firstHits.done = true;
+        ui.toast("That's the timing · ¡eso es! The ring turns green when it's time to swing");
+      }
+    }
     ui.hud(h);
     if (xrBoot) xrBoot.hud(h);
     g.emitHud(h);
     // Zone labels in the 3D scene keep out from under the HUD blocks.
     stage.effects.setLabelOccluders(hudRects());
+  }
+  // Automatic replay of a special moment once the ball is dead (point over / rep judged, before the
+  // next feed or serve), never with a live ball: the player is never pulled out of a rally. A
+  // moment whose point runs on for more than 5.5 s is dropped by the director (recorder window).
+  if (director && !replay && !results && !paused && !g.done && ui.screen === 'play' && director.pending) {
+    const ref = w.referee;
+    const dead = !w.ball || w.ball.atRest || w.ball.outside || (ref && ref.state && ref.state.phase === 'dead');
+    if (dead) {
+      const m = director.take(w);
+      if (m) startReplay(m);
+    }
   }
   if (results && performance.now() >= results.at) showResults();
 }
@@ -690,7 +1144,7 @@ function stepGame(nowMs, dtReal) {
 function hudRects() {
   const W = window.innerWidth || 1, H = window.innerHeight || 1;
   const out = [];
-  for (const el of uiRoot.querySelectorAll('.vp-hud .hud-tl, .vp-hud .hud-tr, .vp-hud .shotcard, .vp-hud .hud-prompt')) {
+  for (const el of uiRoot.querySelectorAll('.vp-hud .hud-tl, .vp-hud .hud-tr, .vp-hud .shotcard, .vp-hud .hud-prompt, .vp-hud .hud-timing, .vp-hud .hud-clock, .vp-hud .hud-partner')) {
     if (el.hidden || el.closest('[hidden]')) continue;
     const r = el.getBoundingClientRect();
     if (r.width < 2 || r.height < 2) continue;
@@ -701,12 +1155,20 @@ function hudRects() {
 
 function stepReplay(dtReal) {
   const r = replay;
-  const more = r.player.step(dtReal, 3);
+  const more = r.player.step(dtReal, r.auto ? 1 : 3);
   if (!more) {
     stopReplay();
     return;
   }
-  if (r.player.loops === 1 && r.view === 'broadcast' && !r.switched) {
+  if (r.auto) {
+    // Highlight: cut to the second angle at the moment itself.
+    const v2 = r.auto.views && r.auto.views[1];
+    if (!r.switched && v2 && r.player.t >= r.auto.t - 0.05) {
+      r.switched = true;
+      r.view = v2;
+      stage.fpCam.setReplayView(v2);
+    }
+  } else if (r.player.loops === 1 && r.view === 'broadcast' && !r.switched) {
     r.switched = true;
     r.view = 'side';
     stage.fpCam.setReplayView('side');
@@ -733,6 +1195,8 @@ function frame(nowMs) {
       const L = stage.listener();
       audio.setListener(L.pos, L.fwd, L.up);
     }
+    // Glass Breaker targets and shatters run on sim time (slow motion, pauses and freezes apply).
+    if (glassTargets) glassTargets.update(replay || paused || !clock.running ? 0 : dtReal * (clock.rate || 1) * (clock.speed || 1));
     stage.render(dtReal);
     if (debug) {
       debug.update(dtReal, {
@@ -757,7 +1221,7 @@ function onKey(e) {
   const k = e.key;
   if (replay) {
     if (k === 'v' || k === 'V') cycleReplayView();
-    else if (k === 'r' || k === 'R' || k === 'Enter' || k === ' ') stopReplay();
+    else if (replay.auto || k === 'r' || k === 'R' || k === 'Enter' || k === ' ') stopReplay();
     return;
   }
   if ((k === 'r' || k === 'R') && game && !game.attract && (ui.screen === 'play' || ui.screen === 'pause' || ui.screen === 'results')) {
@@ -812,6 +1276,9 @@ async function boot() {
     },
   });
   window.addEventListener('resize', () => stage.resize());
+  glassTargets = createGlassTargets(stage.app.scene);
+  if (S.racketModel && S.racketModel !== 'fang') applyRacketModel();
+  if (S.outfit && S.outfit !== 'club') applyOutfit();
   // Glasses mode (VITURE, experimental): settings under 'vibora.xr.v1', ?glasses=1 / ?stereo=1 / ?xrsim=1.
   try {
     xrBoot = installGlasses({ stage, settings: S, storage, uiRoot, toast: (t) => ui.toast(t) });
@@ -821,12 +1288,17 @@ async function boot() {
   }
 
   audio = P.noAudio ? null : createAudio();
-  if (audio) audio.setVolume(S.volumes);
+  if (audio) {
+    audio.setVolume(S.volumes);
+    if (stage.env) audio.setVenue(stage.env.venue);
+  }
   voice = createVoice({ lang: S.voice === 'es' ? 'es' : 'en' });
-  voice.setEnabled(S.voice !== 'off');
+  voice.setCoach(S.voice !== 'off');
+  voice.setVolume(S.volumes.master ?? 1);
   installGestureUnlock();
 
   human = createHumanController({ settings: S });
+  applyCameraTilt();
   tracking = createTracking({
     video, onFrame: onPoseFrame, onStatus: onPoseStatus, model: TRACKING.model,
     cameraPreset: S.cameraPreset, yawCorrection: !!S.offAxisYaw,
@@ -849,14 +1321,29 @@ async function boot() {
   });
 
   // Initial route.
-  const spec = P.mode ? { kind: P.mode, level: P.level } : { kind: 'drill', drillId: P.drill && getDrill(P.drill) ? P.drill : 'fh-drive' };
+  let spec = P.mode ? { kind: P.mode, level: P.level } : { kind: 'drill', drillId: P.drill && getDrill(P.drill) ? P.drill : 'fh-drive' };
+  if (P4.challenge) {
+    const d = P4.challenge === 'daily' || P4.challenge.startsWith('daily:') ? dailyChallenge(P4.challenge.split(':')[1] || dateKey()) : null;
+    spec = { kind: 'challenge', challengeId: d ? d.base : CHALLENGE_BY_ID[P4.challenge] ? P4.challenge : 'por-tres-party', daily: d, venue: d ? d.venue : S.venue };
+  } else if (P4.career && EVENT_BY_ID[P4.career]) {
+    spec = career.startEvent(P4.career, { quick: P4.quick }) || matchSpec(P4.career, 0, career.partner, { quick: P4.quick });
+  }
+  const direct = P.drill || P.mode || P4.challenge || P4.career;
+  if (P4.screen && !direct && inputMode !== 'autopilot') {
+    if (inputMode === 'fallback') ensureFallback();
+    ui.show('hub', hubData());
+    if (P4.screen === 'settings' || P4.screen === 'help') ui.show(P4.screen, P4.screen === 'settings' ? S : undefined);
+    else handlers.onScreen(P4.screen, P4.screen === 'event-intro' ? { eventId: P.event || career.current().id } : P4.screen === 'trophies' ? { tab: P.tab || 'trophies' } : P4.screen === 'freeplay' ? { mode: P.fpMode || 'rally' } : {});
+    markReady();
+    return;
+  }
   if (inputMode === 'autopilot') {
     startGame(spec);
   } else if (inputMode === 'fallback') {
     ensureFallback();
-    if (P.drill || P.mode) startGame(spec);
+    if (direct) startGame(spec);
     else ui.show('hub', hubData());
-  } else if (P.drill || P.mode) {
+  } else if (direct) {
     pendingStart = spec;
     ui.show('title');
     enterCamera();
@@ -865,7 +1352,17 @@ async function boot() {
     startAttract();
     warmCamera();
   }
-  vibora.ready = true;
+  markReady();
+}
+
+/**
+ * __vibora.ready once the first frame has rendered (its batch shader compile, render/scene.js warm-up,
+ * belongs to the start-up, not to play). Two animation frames: the loop's first frame runs in the second.
+ */
+function markReady() {
+  const done = () => { vibora.ready = true; };
+  requestAnimationFrame(() => requestAnimationFrame(done));
+  setTimeout(done, 60000); // no animation frames (hidden tab): never block the ready flag for long
 }
 
 // ---------------------------------------------------------------------------------------
@@ -908,6 +1405,8 @@ function diagnosticsData() {
     glasses: xrBoot ? xrBoot.diagnostics() : null,
     safety: stage ? stage.safety : null,
     robust: bt ? { stats: bt.stats, yawDeg: last ? last.yawDeg : null, sideOn: last ? last.sideOn : null } : null,
+    // Close mode: the estimator in use, the learned camera tilt and the tracker counters.
+    bodyTracker: bt ? { mode: bt.mode, tilt: bt.tilt, ...bt.stats } : null,
   });
 }
 
@@ -1023,6 +1522,19 @@ const vibora = {
     onPoseFrame(frame);
   },
   get calibration() { return human ? { ...human.bodyTracker.calibration } : null; },
+  // Round 4: progression, career, arcade boards, automatic replays (tests / screenshots).
+  get progress() { return progress; },
+  get career() { return career; },
+  get leaderboards() { return boards; },
+  get director() { return director; },
+  get glassTargets() { return glassTargets; },
+  handlers,
+  /** Plays an automatic highlight of the last player hit (screenshots of the replay badge). */
+  replayMoment(kind = 'winner') {
+    const snap = recorder.snapshot();
+    const t = snap && snap.hits.length ? snap.hits[snap.hits.length - 1].t : snap ? snap.t1 - 1 : 0;
+    return startReplay({ kind, t, label: kind === 'por-tres' ? '¡Por tres!' : 'Winner', views: ['broadcast', 'side'], rate: 0.45 });
+  },
   replayInfo() {
     if (!replay) return null;
     const f = replay.player.frame();

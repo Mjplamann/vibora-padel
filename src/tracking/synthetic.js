@@ -259,38 +259,123 @@ export function setHandTarget(body, side, gripTargetU, axisU, normalU, { pole = 
 // ---------------------------------------------------------------------------
 // Camera
 
+/** Leg landmarks MediaPipe guesses when they are out of the picture (knees, ankles, heels, feet). */
+const LEG_LANDMARKS = Object.freeze([25, 26, 27, 28, 29, 30, 31, 32]);
+const HAND_LANDMARKS = Object.freeze({ L: [15, 17, 19, 21], R: [16, 18, 20, 22] });
+
 /**
- * Pinhole camera at (0, cameraHeight) looking horizontally at the user; unmirrored image.
+ * MediaPipe's guess of a cropped leg (U, for a body of scale k): a straight standing leg under its
+ * hip, whatever the real pose (crouch, turn, step).
+ */
+function guessedLeg(body, i, out) {
+  const j = body.joints;
+  const k = bodyK(body);
+  const left = i % 2 === 1; // 25, 27, 29, 31 = left
+  const hip = j[left ? 'hipL' : 'hipR'];
+  const hx = hip.x * 1.15;
+  switch (i) {
+    case 25: case 26: return out.set(hx, hip.y - 0.43 * k, hip.z + 0.02 * k);
+    case 27: case 28: return out.set(hx * 1.05, hip.y - 0.85 * k, hip.z);
+    case 29: case 30: return out.set(hx * 1.05, hip.y - 0.9 * k, hip.z - 0.06 * k);
+    default: return out.set(hx * 1.08, hip.y - 0.91 * k, hip.z + 0.17 * k);
+  }
+}
+
+/**
+ * Pinhole camera at (0, cameraHeight) looking horizontally at the user (or pitched up by
+ * pitchDeg, world landmarks camera-aligned like MediaPipe's unless worldFrame = 'gravity');
+ * unmirrored image.
  * modelScale (real / MediaPipe-model size) simulates MediaPipe's body-size bias; a body's own
  * `modelScale` takes precedence. Optional seeded noise: { imagePx, worldM, seed }.
+ *
+ * crop (round 4, close mode): MediaPipe-like output for a player too close to be seen whole,
+ *   { seed = 11, edge = 0.06 }: every landmark beyond the frame gets a low visibility (U(0.3, 0.6)
+ *   within `edge` of the frame, U(0, 0.2) further out) and the legs beyond it a guessed straight
+ *   standing pose under the hips (crouch and turns ignored), projected into both the image and the
+ *   world landmarks. Landmarks in the picture are untouched.
+ * blur: { speed = 6, p = 0.5, lag = [0.2, 0.6], vis = 0.4, seed = 13 }: motion blur of a fast
+ *   swing at 30 fps; when a wrist moves faster than `speed` m/s, with probability p the hand's
+ *   landmarks are a stale smear (the previous frame's plus a `lag` share of the motion) with their
+ *   visibility scaled by `vis`.
+ * armOut (round 5, QA r5): a real detector's arm landmarks (elbows, wrists, hands) beyond the frame
+ *   are guesses, not the truth: { mode = 'drift', lag = 0.15, noise = 0.03, vis = [0, 0.3], seed = 17 }.
+ *   The image position is clamped to the frame edge and the visibility is U(vis); the world position
+ *   'drift's after the truth with a first-order lag of `lag` s plus `noise` m of wander, or with
+ *   mode 'clamp' stays where the landmark was last seen in the picture (the pessimistic case).
+ *   cam.stats.armOut counts such landmarks.
  */
-export function createSyntheticCamera({ hfovDeg, width = 1280, height = 720, cameraHeight = 1.0, modelScale = 1, noise = null } = {}) {
+export function createSyntheticCamera({
+  hfovDeg, width = 1280, height = 720, cameraHeight = 1.0, modelScale = 1, noise = null, crop = null, blur = null, pitchDeg = 0,
+  worldFrame = 'camera', armOut = null,
+} = {}) {
   const fn = focalNorm(hfovDeg);
   const aspect = width / height;
+  // Camera pitched up by pitchDeg (a MacBook lid tilted back). MediaPipe has no notion of gravity:
+  // its world landmarks are aligned with the camera, so a pitched camera sees an upright body
+  // leaning away from it by the pitch (worldFrame 'camera'; 'gravity' keeps them level).
+  const cp = Math.cos(pitchDeg * DEG), sp = Math.sin(pitchDeg * DEG);
+  const camWorld = pitchDeg !== 0 && worldFrame !== 'gravity';
   const rng = noise ? createRng(noise.seed ?? 7) : null;
+  const crng = crop ? createRng(crop.seed ?? 11) : null;
+  const brng = blur ? createRng(blur.seed ?? 13) : null;
+  const arng = armOut ? createRng(armOut.seed ?? 17) : null;
+  const armState = []; // per body: { t, seen: [33 world], out: [33 world] }
   const hc = new Vec3();
+  const g = new Vec3();
+  const prevByIndex = [];
+  const stats = { blurred: 0, cropped: 0, armOut: 0 };
 
-  function personFrom(body) {
+  function project(body, J, out) {
+    const Xc = -(body.room.x + J.x);
+    const H = J.y - cameraHeight; // height above the camera
+    const Zh = body.room.d - J.z; // horizontal depth
+    const Zc = Zh * cp + H * sp;
+    const Up = H * cp - Zh * sp;
+    out.u = 0.5 + (fn * Xc) / Zc;
+    out.v = 0.5 - (fn * aspect * Up) / Zc;
+    out.Zc = Zc;
+    return out;
+  }
+  const P = { u: 0, v: 0, Zc: 0 };
+
+  function personFrom(body, bi, t) {
     const ms = body.modelScale && body.modelScale !== 1 ? body.modelScale : modelScale;
     hipCenter(body, hc);
     const hipDepth = body.room.d - hc.z;
     const landmarks = new Array(33), world = new Array(33);
+    // Crop: are the legs (any of them) beyond the frame? Then MediaPipe guesses those.
     for (let i = 0; i < 33; i++) {
       const name = LANDMARK_NAMES[i];
-      const J = body.joints[name];
-      const Xc = -(body.room.x + J.x);
-      const Yc = cameraHeight - J.y;
-      const Zc = body.room.d - J.z;
-      let u = 0.5 + (fn * Xc) / Zc;
-      let v = 0.5 + (fn * aspect * Yc) / Zc;
+      let J = body.joints[name];
+      project(body, J, P);
+      let inView = P.Zc > 0.1 && P.u >= 0 && P.u <= 1 && P.v >= 0 && P.v <= 1;
+      let outBy = inView ? 0 : Math.max(-P.u, P.u - 1, -P.v, P.v - 1);
+      if (crop && !inView && LEG_LANDMARKS.includes(i)) {
+        J = guessedLeg(body, i, g);
+        project(body, J, P);
+        stats.cropped++;
+      }
+      let u = P.u, v = P.v;
+      const Zc = P.Zc;
       if (rng && noise.imagePx) {
         u += rng.normal(0, noise.imagePx) / width;
         v += rng.normal(0, noise.imagePx) / height;
       }
-      const inView = Zc > 0.1 && u >= 0 && u <= 1 && v >= 0 && v <= 1;
-      const visibility = body.visibility[name] ?? (inView ? 0.99 : 0.05);
+      inView = Zc > 0.1 && u >= 0 && u <= 1 && v >= 0 && v <= 1;
+      if (!inView && !outBy) outBy = Math.max(-u, u - 1, -v, v - 1, 0);
+      let visibility = body.visibility[name];
+      if (visibility === undefined) {
+        if (inView) visibility = 0.99;
+        else if (crop) visibility = outBy < (crop.edge ?? 0.06) ? crng.range(0.3, 0.6) : crng.range(0, 0.2);
+        else visibility = 0.05;
+      }
       landmarks[i] = { x: u, y: v, z: (fn * (Zc - hipDepth)) / hipDepth, visibility };
       let wx = -(J.x - hc.x) / ms, wy = -(J.y - hc.y) / ms, wz = -(J.z - hc.z) / ms;
+      if (camWorld) {
+        const y = wy * cp + wz * sp, z = -wy * sp + wz * cp;
+        wy = y;
+        wz = z;
+      }
       if (rng && noise.worldM) {
         wx += rng.normal(0, noise.worldM);
         wy += rng.normal(0, noise.worldM);
@@ -298,7 +383,70 @@ export function createSyntheticCamera({ hfovDeg, width = 1280, height = 720, cam
       }
       world[i] = { x: wx, y: wy, z: wz, visibility };
     }
+    if (blur) applyBlur(body, bi, t, landmarks, world);
+    if (armOut) applyArmOut(bi, t, landmarks, world);
     return { landmarks, world };
+  }
+
+  /** Out-of-frame arm landmarks as a detector reports them (see createSyntheticCamera's armOut). */
+  function applyArmOut(bi, t, landmarks, world) {
+    const st = armState[bi] || (armState[bi] = { t: null, seen: [], out: [] });
+    const dt = st.t === null ? 0 : Math.max(0, (t - st.t) / 1000);
+    st.t = t;
+    const k = 1 - Math.exp(-dt / Math.max(1e-3, armOut.lag ?? 0.15));
+    const vr = armOut.vis || [0, 0.3];
+    for (let i = 13; i <= 22; i++) {
+      const l = landmarks[i], w = world[i];
+      const inView = l.x >= 0 && l.x <= 1 && l.y >= 0 && l.y <= 1;
+      if (inView) {
+        st.seen[i] = { x: w.x, y: w.y, z: w.z };
+        st.out[i] = null;
+        continue;
+      }
+      stats.armOut++;
+      l.x = clamp(l.x, 0, 1);
+      l.y = clamp(l.y, 0, 1);
+      l.visibility = arng.range(vr[0], vr[1]);
+      w.visibility = l.visibility;
+      const seen = st.seen[i];
+      if (armOut.mode === 'clamp') {
+        if (seen) { w.x = seen.x; w.y = seen.y; w.z = seen.z; }
+        continue;
+      }
+      const prev = st.out[i] || seen || { x: w.x, y: w.y, z: w.z };
+      const n = armOut.noise ?? 0.03;
+      const o = {
+        x: prev.x + (w.x - prev.x) * k + arng.normal(0, n * Math.sqrt(Math.max(dt, 1e-3) / 0.033)) * 0.5,
+        y: prev.y + (w.y - prev.y) * k + arng.normal(0, n * Math.sqrt(Math.max(dt, 1e-3) / 0.033)) * 0.5,
+        z: prev.z + (w.z - prev.z) * k + arng.normal(0, n * Math.sqrt(Math.max(dt, 1e-3) / 0.033)) * 0.5,
+      };
+      st.out[i] = o;
+      w.x = o.x; w.y = o.y; w.z = o.z;
+    }
+  }
+
+  /** Motion blur: a fast hand is returned as a stale smear (see createSyntheticCamera's blur). */
+  function applyBlur(body, bi, t, landmarks, world) {
+    const prev = prevByIndex[bi];
+    const cur = { t, wrist: { L: body.joints.wristL.clone(), R: body.joints.wristR.clone() }, landmarks, world };
+    if (prev && t > prev.t) {
+      const dt = (t - prev.t) / 1000;
+      for (const side of ['L', 'R']) {
+        const sp = cur.wrist[side].distanceTo(prev.wrist[side]) / dt;
+        if (sp < (blur.speed ?? 6) || brng() >= (blur.p ?? 0.5)) continue;
+        const lag = blur.lag || [0.2, 0.6];
+        const a = brng.range(lag[0], lag[1]);
+        for (const i of HAND_LANDMARKS[side]) {
+          const pl = prev.landmarks[i], pw = prev.world[i], l = landmarks[i], w = world[i];
+          l.x = pl.x + (l.x - pl.x) * a; l.y = pl.y + (l.y - pl.y) * a;
+          w.x = pw.x + (w.x - pw.x) * a; w.y = pw.y + (w.y - pw.y) * a; w.z = pw.z + (w.z - pw.z) * a;
+          l.visibility *= blur.vis ?? 0.4;
+          w.visibility = l.visibility;
+        }
+        stats.blurred++;
+      }
+    }
+    prevByIndex[bi] = cur;
   }
 
   return {
@@ -306,9 +454,10 @@ export function createSyntheticCamera({ hfovDeg, width = 1280, height = 720, cam
     height,
     hfovDeg,
     cameraHeight,
+    stats,
     /** @returns PoseFrame */
     frame(t, bodies) {
-      return { t, width, height, people: bodies.map(personFrom) };
+      return { t, width, height, people: bodies.map((b, i) => personFrom(b, i, t)) };
     },
   };
 }

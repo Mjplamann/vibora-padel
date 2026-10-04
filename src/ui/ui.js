@@ -11,8 +11,14 @@ import { TRACKING, ASSIST } from '../config.js';
 import { clamp, createRng } from '../util/math.js';
 import { courtDiagram, landingMap, strokeBars, strokeName, drawSkeleton, escapeHtml as esc, fitCanvas } from './charts.js';
 import { buildDiagnostics, browserEnv, copyText } from '../app/diagnostics.js';
+import { createGameScreens } from './gameScreens.js';
+import { CAL_STEPS_CLOSE, bodyPanelHtml, updateBodyPanel, bodyCheck, spotCheck, areaReadout, areaStep } from './calibrate.js';
 
-export const SCREENS = Object.freeze(['loading', 'title', 'camera', 'calibrate', 'hub', 'drill-intro', 'play', 'pause', 'results', 'settings', 'help']);
+export const SCREENS = Object.freeze([
+  'loading', 'title', 'camera', 'calibrate', 'hub', 'drill-intro', 'play', 'pause', 'results', 'settings', 'help',
+  // Round 4: game modes.
+  'training', 'career', 'event-intro', 'trophies', 'arcade', 'freeplay',
+]);
 
 export const SKILLS = Object.freeze([
   { id: 'Groundstrokes', en: 'Groundstrokes', es: 'Fondo' },
@@ -27,30 +33,27 @@ export const SKILLS = Object.freeze([
 export const UI_DEFAULT_SETTINGS = Object.freeze({
   assist: 'club', latency: TRACKING.latencyDefault, height: 1.75, handed: 'right',
   gainLateral: TRACKING.gainLateral, gainDepth: TRACKING.gainDepth, fov: 70,
-  gazeFollow: true, landingMarker: true, contactGhost: false, halo: false,
-  quality: 'high', voice: 'en', volumes: Object.freeze({ master: 0.9, sfx: 1, ambience: 0.5 }),
+  gazeFollow: true, landingMarker: true, contactGhost: false, racketGhost: true, halo: false, cameraTilt: 'auto',
+  quality: 'high', voice: 'en', volumes: Object.freeze({ master: 0.9, sfx: 1, ambience: 0.5, crowd: 0.7 }),
   skinTone: '#c58c6a', racketColor: '#e8572a', pip: true, skeleton: true,
   cameraPreset: TRACKING.defaultCamera,
   // Round 3: ball visibility 'realistic' | 'enhanced' | 'max' (render/ballView.js BALL_VISIBILITY).
   ballVisibility: 'enhanced',
+  // Round 4 (game): free-play venue, umpire language, partner callouts, automatic replays of special
+  // moments, the equipped racket model and outfit (game/progression.js).
+  venue: 'club', umpireLang: 'es', callouts: true, autoReplay: true, racketModel: 'fang', outfit: 'club',
 });
+/** Crowd volume default (volumes.crowd), merged into volumes by the settings store. */
+export const DEFAULT_CROWD_VOLUME = 0.7;
 
-const CAL_STEPS = [
-  { id: 'body', en: 'Full body', es: 'Cuerpo entero' },
-  { id: 'spot', en: 'Your spot', es: 'Tu sitio' },
-  { id: 'profile', en: 'Profile', es: 'Perfil' },
-  { id: 'latency', en: 'Latency', es: 'Latencia', optional: true },
-  { id: 'area', en: 'Play area', es: 'Zona de juego' },
-];
-const DIST_IDEAL = [2.2, 3.5];
-const DIST_SCALE = [1.4, 4.6];
-const BODY_PARTS = [['head', 'Head', 'Cabeza'], ['shoulders', 'Shoulders', 'Hombros'], ['hips', 'Hips', 'Cadera'], ['knees', 'Knees', 'Rodillas'], ['ankles', 'Ankles', 'Tobillos']];
+// Calibration steps (round 4, ui/calibrate.js): the first step accepts the upper body (close mode,
+// 1.3–2.2 m) as well as the full body (2.2–3.5 m).
+const CAL_STEPS = CAL_STEPS_CLOSE;
 const LAT_BEAT_MS = 1100;
 const LAT_LEAD_BEATS = 3;
 const LAT_FLASHES = 6;
 const LAT_FLASH_MS = 170;
 const SPOT_HOLD_S = 2;
-const AREA_STEP_M = 0.3;
 
 const FOCUSABLE = 'button:not([disabled]):not([tabindex="-1"]), [role="slider"]:not([aria-disabled="true"]), [data-focus]';
 const PRESET_SHORT = { 'macbook-builtin': 'MacBook', 'iphone-continuity': 'iPhone', 'iphone-ultrawide': 'iPhone wide', 'usb-webcam': 'USB', 'usb-wide': 'USB wide' };
@@ -148,6 +151,7 @@ const SETTINGS_GROUPS = [
       { key: 'learningSlowmo', type: 'seg', en: 'Slow motion off the glass', es: 'Cámara lenta en el cristal', options: [['auto', 'Rookie'], ['on', 'On'], ['off', 'Off']] },
       { key: 'timingTick', type: 'switch', en: 'Timing tick on every ball', es: 'Tic en cada bola' },
       { key: 'landingMarker', type: 'switch', en: 'Landing marker', es: 'Marca de bote' },
+      { key: 'racketGhost', type: 'switch', en: 'Racket ghost at the contact', es: 'Pala fantasma en el impacto' },
       { key: 'contactGhost', type: 'switch', en: 'Ideal contact ghost', es: 'Punto de impacto ideal' },
       { key: 'halo', type: 'switch', en: 'Ball halo', es: 'Halo de la bola' },
     ],
@@ -161,6 +165,9 @@ const SETTINGS_GROUPS = [
       { key: 'glassView', type: 'seg', en: 'Balls behind you', es: 'Bolas detrás de ti', options: [['mirror', 'Mirror', 'Espejo retrovisor'], ['turn', 'Turn the view', 'Girar la vista'], ['fixed', 'Fixed', 'Fija']],
         hint: 'Mirror: the view stays on the net; a rear-view mirror shows the glass. Turn: the view turns smoothly toward the glass, up to 75°. Fixed: no mirror, no turn.' },
       { key: 'latency', type: 'range', en: 'Latency compensation', es: 'Latencia', min: 0, max: 0.3, step: 0.005, fmt: (v) => `${Math.round(v * 1000)} ms` },
+      // Round 5 (tracking/body.js TILT): measured in calibration; a tilted MacBook lid can be set here.
+      { key: 'cameraTilt', type: 'seg', en: 'Camera tilt', es: 'Inclinación de la cámara', options: [['auto', 'Auto', 'measured'], ['0', 'Level'], ['5', '5° up'], ['10', '10° up'], ['15', '15° up'], ['20', '20° up']],
+        hint: 'Auto measures it while you step forward and back in calibration. A MacBook lid tilted back is often 10–15° up.' },
       { key: 'offAxisYaw', type: 'switch', en: 'Off-axis arm correction (experimental)', es: 'Corrección fuera de eje (experimental)' },
     ],
   },
@@ -170,6 +177,15 @@ const SETTINGS_GROUPS = [
       { key: 'height', type: 'range', en: 'Height', es: 'Altura', min: 1.4, max: 2.1, step: 0.01, fmt: (v) => `${v.toFixed(2)} m` },
       { key: 'skinTone', type: 'swatch', en: 'Skin tone', es: 'Tono de piel', options: SKIN_TONES },
       { key: 'racketColor', type: 'swatch', en: 'Racket colour', es: 'Color de la pala', options: RACKET_COLORS },
+    ],
+  },
+  {
+    en: 'Game & venue', es: 'Juego y sede', items: [
+      { key: 'venue', type: 'seg', en: 'Free-play venue', es: 'Sede', options: [['club', 'Club', 'Indoor'], ['sunset', 'Sunset', 'Atardecer'], ['stadium', 'Stadium', 'Estadio']] },
+      { key: 'umpireLang', type: 'seg', en: 'Umpire', es: 'Árbitro', options: [['es', 'Español'], ['en', 'English'], ['off', 'Off']] },
+      { key: 'volumes.crowd', type: 'range', en: 'Crowd volume', es: 'Público', min: 0, max: 1, step: 0.05, fmt: pct },
+      { key: 'callouts', type: 'switch', en: 'Partner callouts', es: 'Avisos de la pareja' },
+      { key: 'autoReplay', type: 'switch', en: 'Replays of great moments', es: 'Repeticiones automáticas' },
     ],
   },
   {
@@ -232,7 +248,14 @@ export function createUI(root, handlers = {}) {
     loading: { p: 0, text: 'Warming up the court…' },
     ballInd: null,
     install: { kind: 'none', onInstall: null }, // app packaging (src/app/pwa.js)
+    // Round 4: arcade selection, trophies tab, free-play setup, external calibration screen.
+    arcadeSel: null,
+    trophiesTab: 'trophies',
+    free: { mode: 'rally', level: 'club', venue: null, games: 4 },
+    calibFactory: null,
+    hudKeyChallenge: null,
   };
+  const gs = createGameScreens({ esc, ICON, starsHtml, segHtml, fmtInt, courtDiagram });
 
   // ---- DOM scaffold ---------------------------------------------------------
   root.classList.add('vp');
@@ -244,7 +267,8 @@ export function createUI(root, handlers = {}) {
     <div class="vp-toasts" aria-live="polite"></div>
     <div class="vp-update" role="status" hidden><span class="vu-text">Update ready<small>Nueva versión lista</small></span><button type="button" class="btn btn-sm go" data-update-restart>Restart</button></div>
     <div class="vp-pausehold" hidden><svg viewBox="0 0 64 64" aria-hidden="true"><circle class="bg" cx="32" cy="32" r="27"/><circle class="fg" cx="32" cy="32" r="27"/></svg><span>Hold to pause<small>Mantén para pausar</small></span></div>
-    <div class="vp-cursor" hidden aria-hidden="true"><svg viewBox="0 0 80 80"><circle class="halo" cx="40" cy="40" r="30"/><circle class="track" cx="40" cy="40" r="30"/><circle class="ring" cx="40" cy="40" r="30"/></svg><span class="dot"></span></div>`;
+    <div class="vp-cursor" hidden aria-hidden="true"><svg viewBox="0 0 80 80"><circle class="halo" cx="40" cy="40" r="30"/><circle class="track" cx="40" cy="40" r="30"/><circle class="ring" cx="40" cy="40" r="30"/></svg><span class="dot"></span></div>
+    <div class="vp-achievements" aria-live="polite"></div>`;
   const $ = (sel, scope = root) => scope.querySelector(sel);
   const layerScreen = $('[data-layer="screen"]');
   const layerHud = $('[data-layer="hud"]');
@@ -252,6 +276,7 @@ export function createUI(root, handlers = {}) {
   const toastEl = $('.vp-toasts');
   const cursorEl = $('.vp-cursor');
   const pauseHoldEl = $('.vp-pausehold');
+  const achEl = $('.vp-achievements');
   const RING_C = 2 * Math.PI * 30;
   const HOLD_C = 2 * Math.PI * 27;
 
@@ -383,8 +408,10 @@ export function createUI(root, handlers = {}) {
       case 'settings': case 'help': goBack(); break;
       case 'camera': goto('title'); break;
       case 'calibrate': calBack(); break;
-      case 'drill-intro': goto('hub'); break;
+      case 'drill-intro': goto(state.data['drill-intro'] && state.data['drill-intro'].from === 'hub' ? 'hub' : 'training'); break;
       case 'results': goto('hub'); call('onQuit'); break;
+      case 'training': case 'career': case 'trophies': case 'arcade': case 'freeplay': goto('hub'); break;
+      case 'event-intro': goto('career'); break;
       default: break;
     }
   }
@@ -396,6 +423,12 @@ export function createUI(root, handlers = {}) {
     camera: renderCamera,
     calibrate: renderCalibrate,
     hub: renderHub,
+    training: renderTraining,
+    career: renderCareer,
+    'event-intro': renderEventIntro,
+    trophies: renderTrophies,
+    arcade: renderArcade,
+    freeplay: renderFreeplay,
     'drill-intro': renderDrillIntro,
     pause: renderPause,
     results: renderResults,
@@ -504,10 +537,58 @@ export function createUI(root, handlers = {}) {
       case 'start-drill': call('onStartDrill', d.drill); break;
       case 'rally': call('onStartRally', state.hubLevel); break;
       case 'match': call('onStartMatch', state.hubLevel); break;
+      // Round 4: game modes.
+      case 'training': goto('training'); break;
+      case 'career': goto('career'); break;
+      case 'trophies': goto('trophies', { ...(state.data.trophies || {}), tab: state.trophiesTab }); break;
+      case 'arcade': goto('arcade'); break;
+      case 'freeplay': {
+        state.free.mode = d.mode || state.free.mode;
+        goto('freeplay', { ...(state.data.freeplay || {}), mode: state.free.mode });
+        break;
+      }
+      case 'event': {
+        const ev = ((state.data.career || {}).events || []).find((x) => x.id === d.event);
+        if (ev && ev.status === 'locked') {
+          toast('Win the previous event to unlock it · Gana el torneo anterior');
+          break;
+        }
+        goto('event-intro', { eventId: d.event });
+        break;
+      }
+      case 'start-event': call('onStartCareer', d.event); break;
+      case 'abandon-event': call('onAbandonEvent', d.event); break;
+      case 'next-match': call('onStartCareer', d.event); break;
+      case 'partner': call('onCareerPartner', d.partner); break;
+      case 'tab': {
+        state.trophiesTab = d.tab;
+        show('trophies', { ...(state.data.trophies || {}), tab: d.tab });
+        call('onScreen', 'trophies', state.data.trophies);
+        break;
+      }
+      case 'equip': call('onEquip', d.kind, d.id); break;
+      case 'challenge-select': {
+        state.arcadeSel = d.challenge;
+        const keepFocus = d.challenge;
+        show('arcade', { ...(state.data.arcade || {}), selected: d.challenge });
+        const f = layerScreen.querySelector(`[data-focus-key="ch-${CSS.escape(keepFocus)}"]`);
+        if (f) f.focus({ preventScroll: true });
+        break;
+      }
+      case 'start-challenge': call('onStartChallenge', d.challenge); break;
+      case 'challenge-again': call('onStartChallenge', d.challenge); break;
+      case 'fp-venue': {
+        state.free.venue = d.venue;
+        layerScreen.querySelectorAll('.venue-card').forEach((x) => x.setAttribute('aria-checked', String(x.dataset.venue === d.venue)));
+        call('onPreviewVenue', d.venue);
+        break;
+      }
+      case 'free-start': call('onStartFree', { ...state.free, venue: state.free.venue || state.settings.venue || 'club' }); break;
       case 'resume': call('onResume'); break;
       case 'restart': call('onRestart'); break;
       case 'replay': call('onReplay'); break;
       case 'quit': call('onQuit'); goto('hub'); break;
+      case 'quit-to': call('onQuit'); goto(d.to || 'hub'); break;
       case 'next-drill': openDrill(d.drill); break;
       case 'pause-settings': state.returnTo.settings = 'pause'; goto('settings'); break;
       case 'pause-recal': state.returnTo.calibrate = 'pause'; goto('calibrate', { step: 'body' }); break;
@@ -668,7 +749,7 @@ export function createUI(root, handlers = {}) {
         <div class="load-bar" role="progressbar" aria-label="Loading" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><span class="load-fill"></span><span class="load-ball"></span></div>
         <p class="load-text"></p>
       </div>
-      <p class="load-foot">Best on a TV · Mac + camera at chest height, 2.5 m away</p>`;
+      <p class="load-foot">Best on a TV · Mac + camera at chest height, 1.5–3 m away</p>`;
     return { el, mount: () => applyLoading() };
   }
 
@@ -867,7 +948,27 @@ export function createUI(root, handlers = {}) {
     };
   }
 
+  /** Context handed to external screens (calibration hook, registerScreen). */
+  function screenCtx() {
+    return {
+      get settings() { return state.settings; },
+      changeSetting,
+      goto,
+      show,
+      back: () => calBack(),
+      finish: () => calFinish(),
+      call,
+      toast,
+      status: () => ({ ...state.calStatus }),
+      returnTo: state.returnTo,
+    };
+  }
+
   function renderCalibrate(data) {
+    if (state.calibFactory) {
+      const v = state.calibFactory(data || {}, screenCtx());
+      if (v && v.el) return v;
+    }
     if (!state.calib || data.step || data.reset) state.calib = newCalib(data.step || 'body');
     if (data.autoAdvance !== undefined) state.calib.auto = data.autoAdvance !== false;
     const el = document.createElement('section');
@@ -875,7 +976,7 @@ export function createUI(root, handlers = {}) {
     el.innerHTML = `
       <header class="screen-head">
         <button type="button" class="btn btn-ghost btn-back" data-action="cal-back" aria-label="Back">${ICON.back}<span>Back</span></button>
-        <div><p class="eyebrow">Step 2 of 2 · Calibración</p><h2 class="h-display">Calibrate<span class="es">Calibrar</span></h2></div>
+        <div><p class="eyebrow">Setup · Calibración</p><h2 class="h-display">Calibrate<span class="es">Calibrar</span></h2></div>
         <ol class="stepper" aria-label="Calibration steps">${CAL_STEPS.map((s, i) => `<li class="${i < stepIdx ? 'done' : i === stepIdx ? 'current' : ''}"${i === stepIdx ? ' aria-current="step"' : ''}><b>${i + 1}</b><span>${esc(s.en)}${s.optional ? ` <em data-k="${s.id}-tag">${esc(optTag(s.id))}</em>` : ''}<small>${esc(s.es)}</small></span></li>`).join('')}</ol>
       </header>
       <div class="cal-grid">
@@ -899,23 +1000,10 @@ export function createUI(root, handlers = {}) {
   function calPanelHtml(step) {
     const s = state.settings;
     switch (step) {
-      case 'body': return `
-        <h3 class="cal-title">Step into frame<span class="es">Entra en el encuadre</span></h3>
-        <p class="cal-lead">Stand 2.2–3.5 m from the TV so the camera sees you from head to ankles.</p>
-        <div class="parts" role="list">${BODY_PARTS.map(([id, en, es]) => `<span class="part" role="listitem" data-part="${id}"><i>${ICON.check}</i>${en}<small>${es}</small></span>`).join('')}</div>
-        <div class="meter-row"><span class="meter-label">Body in frame<span class="es">Cuerpo visible</span></span><span class="meter-val" data-k="bif">—</span></div>
-        <div class="bar-meter" data-k="bif-bar"><i></i></div>
-        <div class="meter-row"><span class="meter-label">Distance to camera<span class="es">Distancia</span></span><span class="meter-val" data-k="dist">—</span></div>
-        <div class="dist-meter" aria-hidden="true">
-          <span class="dm-ideal" style="left:${distPos(DIST_IDEAL[0]) * 100}%;width:${(distPos(DIST_IDEAL[1]) - distPos(DIST_IDEAL[0])) * 100}%"></span>
-          <span class="dm-mark" data-k="dist-mark"></span>
-          ${[1.5, 2.2, 3.5, 4.5].map((v) => `<span class="dm-tick" style="left:${distPos(v) * 100}%">${v.toFixed(1)}</span>`).join('')}
-        </div>
-        <p class="cal-msg" data-k="msg" aria-live="polite"></p>
-        <div class="btn-row"><button type="button" class="btn btn-lg" data-action="cal-next" data-k="next" data-autofocus data-focus-key="cal-next">Continue<span class="es">Seguir</span></button></div>`;
+      case 'body': return bodyPanelHtml({ esc, check: ICON.check });
       case 'spot': return `
         <h3 class="cal-title">Stand on your spot<span class="es">Ponte en tu sitio</span></h3>
-        <p class="cal-lead">Feet shoulder-width apart, ready position, stay still for two seconds. This becomes your home position on court.</p>
+        <p class="cal-lead">${state.calStatus && state.calStatus.trackMode === 'upper' ? 'Ready position, arms relaxed, stay still for two seconds.' : 'Feet shoulder-width apart, ready position, stay still for two seconds.'} This becomes your home position on court.</p>
         <div class="countdown" aria-live="polite"><svg viewBox="0 0 120 120" aria-hidden="true"><circle class="bg" cx="60" cy="60" r="52"/><circle class="fg" cx="60" cy="60" r="52"/></svg><b data-k="count">2.0</b><span>seconds · segundos</span></div>
         <div class="checks"><span class="chk" data-k="chk-frame"><i>${ICON.check}</i>In frame</span><span class="chk" data-k="chk-still"><i>${ICON.check}</i>Still · quieto</span></div>
         <p class="cal-msg" data-k="msg" aria-live="polite"></p>`;
@@ -935,7 +1023,7 @@ export function createUI(root, handlers = {}) {
         <div class="btn-row" data-k="lat-btns"></div>`;
       case 'area': return `
         <h3 class="cal-title">Check your play area<span class="es">Comprueba tu zona</span></h3>
-        <p class="cal-lead">Take one step left, right, toward the TV and back. On court each step is amplified ×${s.gainLateral.toFixed(1)} sideways and ×${s.gainDepth.toFixed(1)} forward.</p>
+        <p class="cal-lead">Take one step left, right, toward the TV and back. On court each step is amplified ×<span data-k="gain-lat">${s.gainLateral.toFixed(1)}</span> sideways and ×<span data-k="gain-dep">${s.gainDepth.toFixed(1)}</span> forward.</p>
         <div class="area-wrap">
           <div class="area-mat" aria-hidden="true">
             <span class="am-target" data-dir="fwd">TV</span><span class="am-target" data-dir="left">L</span><span class="am-target" data-dir="right">R</span><span class="am-target" data-dir="back">Back</span>
@@ -948,12 +1036,12 @@ export function createUI(root, handlers = {}) {
             <dt>Court depth · pista</dt><dd data-k="acz">—</dd>
           </dl>
         </div>
+        <p class="cal-msg cal-sub" data-k="tilt" aria-live="polite">Camera tilt: measuring as you step forward and back…</p>
+        <p class="cal-msg cal-sub" data-k="overhead" aria-live="polite">Then raise your racket hand high above your head, as for a smash.</p>
         <div class="btn-row"><button type="button" class="btn btn-lg" data-action="cal-done" data-k="done" data-autofocus data-focus-key="cal-done">Done<span class="es">Listo</span></button></div>`;
       default: return '';
     }
   }
-
-  const distPos = (d) => clamp((d - DIST_SCALE[0]) / (DIST_SCALE[1] - DIST_SCALE[0]), 0, 1);
 
   function calSetStep(step) {
     state.calib.step = step;
@@ -972,7 +1060,7 @@ export function createUI(root, handlers = {}) {
   }
 
   function calBack() {
-    const i = CAL_STEPS.findIndex((s) => s.id === state.calib.step);
+    const i = state.calib ? CAL_STEPS.findIndex((s) => s.id === state.calib.step) : -1;
     if (i <= 0) goto(state.returnTo.calibrate === 'pause' ? 'pause' : 'camera');
     else calSetStep(CAL_STEPS[i - 1].id);
   }
@@ -983,33 +1071,20 @@ export function createUI(root, handlers = {}) {
     goto(to);
   }
 
-  function bodyStatus() {
-    const st = state.calStatus || {};
-    const bif = Number.isFinite(st.bodyInFrame) ? st.bodyInFrame : null;
-    let vis = st.visible;
-    if (!vis && bif != null) {
-      const n = Math.round(bif * 5);
-      vis = Object.fromEntries(BODY_PARTS.map(([id], i) => [id, i < n]));
-    }
-    const dist = Number.isFinite(st.distance) ? st.distance : null;
-    const inFrame = bif != null && bif >= 0.9;
-    const distOk = dist != null && dist >= DIST_IDEAL[0] && dist <= DIST_IDEAL[1];
-    return { bif, vis: vis || {}, dist, inFrame, distOk, ok: inFrame && distOk, still: st.still !== false, tracking: st.tracking || (bif ? 'ok' : 'searching') };
-  }
-
   /** Live calibration: in-place DOM updates plus the step timers (called every frame while visible). */
   function calUpdate(dt = 0) {
     if (state.screen !== 'calibrate' || !state.calib) return;
     const scope = layerScreen;
     const q = (k) => scope.querySelector(`[data-k="${k}"]`);
     const c = state.calib;
-    const b = bodyStatus();
+    // Body check (ui/calibrate.js): close mode (head + shoulders, 1.3–2.2 m) or full body (2.2–3.5 m).
+    const b = bodyCheck(state.calStatus || {});
     const now = performance.now();
 
     const tt = scope.querySelector('.track-text');
     const td = scope.querySelector('.track-dot');
     if (tt) {
-      const label = b.tracking === 'lost' ? 'Tracking lost · buscando' : b.bif ? `Tracking · ${Math.round(b.bif * 100)}% visible` : 'Searching for you…';
+      const label = b.tracking === 'lost' ? 'Tracking lost · buscando' : b.mode === 'full' ? 'Tracking · full body' : b.mode === 'upper' ? 'Tracking · close (upper body)' : b.bif ? 'Tracking · step into frame' : 'Searching for you…';
       if (tt.textContent !== label) tt.textContent = label;
       td.dataset.state = b.ok ? 'ok' : b.bif ? 'warn' : 'off';
     }
@@ -1017,36 +1092,14 @@ export function createUI(root, handlers = {}) {
     if (guide) guide.classList.toggle('ok', b.ok);
 
     if (c.step === 'body') {
-      for (const [id] of BODY_PARTS) scope.querySelector(`[data-part="${id}"]`)?.classList.toggle('on', !!b.vis[id]);
-      const bv = q('bif');
-      if (bv) bv.textContent = b.bif == null ? '—' : pct(b.bif);
-      q('bif-bar')?.style.setProperty('--p', b.bif ?? 0);
-      q('bif-bar')?.classList.toggle('ok', b.inFrame);
-      const dv = q('dist');
-      if (dv) dv.textContent = b.dist == null ? '—' : `${b.dist.toFixed(1)} m`;
-      const mk = q('dist-mark');
-      if (mk) {
-        mk.style.left = `${distPos(b.dist ?? DIST_SCALE[0]) * 100}%`;
-        mk.hidden = b.dist == null;
-        mk.classList.toggle('ok', b.distOk);
+      updateBodyPanel(scope, state.calStatus || {}, c, now);
+      if (c.advance) {
+        c.advance = false;
+        calAdvance();
       }
-      let msg = 'Waiting for the camera to find you…';
-      if (b.bif != null && !b.inFrame) {
-        const miss = BODY_PARTS.filter(([id]) => !b.vis[id]).map(([, en]) => en.toLowerCase());
-        msg = miss.length ? `Can't see your ${miss.join(', ')}. ${miss.includes('ankles') || miss.includes('knees') ? 'Step back or tilt the camera down.' : 'Step back a little.'}` : 'Hold still…';
-      } else if (b.dist != null && b.dist < DIST_IDEAL[0]) msg = `Step back about ${Math.round((DIST_IDEAL[0] + 0.3 - b.dist) * 100)} cm · un paso atrás`;
-      else if (b.dist != null && b.dist > DIST_IDEAL[1]) msg = `Come closer about ${Math.round((b.dist - DIST_IDEAL[1] + 0.3) * 100)} cm · acércate`;
-      else if (b.ok) msg = 'Perfect. Hold it there… · ¡Perfecto!';
-      setText(q('msg'), msg);
-      q('msg')?.classList.toggle('ok', b.ok);
-      const nb = q('next');
-      if (nb) nb.classList.toggle('go', b.ok);
-      if (b.ok) {
-        if (c.okSince == null) c.okSince = now;
-        if (c.auto && now - c.okSince > 1500) calAdvance();
-      } else c.okSince = null;
     } else if (c.step === 'spot') {
-      const ok = b.bif != null ? b.bif >= 0.8 && b.still : false;
+      const sc = spotCheck(state.calStatus || {});
+      const ok = b.bif != null ? sc.ok : false;
       if (!c.spotDone) {
         c.spot = ok ? c.spot + dt : Math.max(0, c.spot - dt * 2);
         if (c.spot >= SPOT_HOLD_S) {
@@ -1063,15 +1116,18 @@ export function createUI(root, handlers = {}) {
       const fg = scope.querySelector('.countdown .fg');
       if (fg) fg.style.strokeDashoffset = String(2 * Math.PI * 52 * (1 - clamp(c.spot / SPOT_HOLD_S, 0, 1)));
       scope.querySelector('.countdown')?.classList.toggle('done', c.spotDone);
-      q('chk-frame')?.classList.toggle('on', b.bif != null && b.bif >= 0.8);
-      q('chk-still')?.classList.toggle('on', b.bif != null && b.still);
-      setText(q('msg'), c.spotDone ? 'Home position saved · guardado' : !b.bif ? 'Waiting for the camera to find you…' : !b.still ? 'Keep still for a moment' : 'Hold still… · quieto');
+      q('chk-frame')?.classList.toggle('on', b.bif != null && sc.inFrame);
+      q('chk-still')?.classList.toggle('on', b.bif != null && sc.still);
+      setText(q('msg'), c.spotDone ? 'Home position saved · guardado' : !b.bif ? 'Waiting for the camera to find you…' : !sc.inFrame ? 'Step back into the picture: head and shoulders' : !sc.still ? 'Keep still for a moment' : 'Hold still… · quieto');
       q('msg')?.classList.toggle('ok', c.spotDone || (ok && c.spot > 0));
     } else if (c.step === 'latency') {
       latTick(now);
     } else if (c.step === 'area') {
       const off = state.calStatus.offset;
       const a = c.area;
+      // Close mode: a smaller room (0.2 m steps) and the boosted gains (tracking/locomotion.js closeRangeBoost).
+      const step = areaStep(state.calStatus.trackMode === 'upper' ? 'upper' : 'full');
+      const rd = areaReadout(off, state.settings, state.calStatus.boost);
       const dot = q('area-dot');
       if (off && Number.isFinite(off.x) && Number.isFinite(off.d)) {
         a.left = Math.max(a.left, -off.x);
@@ -1083,20 +1139,45 @@ export function createUI(root, handlers = {}) {
           dot.style.left = `${50 + clamp(off.x / 0.6, -1, 1) * 42}%`;
           dot.style.top = `${50 + clamp(off.d / 0.6, -1, 1) * 42}%`;
         }
-        const s = state.settings;
-        const sgn = (v, d) => `${v >= 0 ? '+' : '−'}${Math.abs(v).toFixed(d)} m`;
-        setText(q('ax'), sgn(off.x, 2));
-        setText(q('ad'), sgn(off.d, 2));
-        setText(q('acx'), sgn(off.x * s.gainLateral, 1));
-        setText(q('acz'), sgn(off.d * s.gainDepth, 1));
+        if (rd) {
+          setText(q('ax'), rd.x);
+          setText(q('ad'), rd.d);
+          setText(q('acx'), rd.courtX);
+          setText(q('acz'), rd.courtZ);
+          setText(q('gain-lat'), rd.gains.lateral.toFixed(1));
+          setText(q('gain-dep'), rd.gains.depth.toFixed(1));
+        }
       } else if (dot) dot.hidden = true;
       let all = true;
       for (const dir of ['left', 'right', 'fwd', 'back']) {
-        const hit = a[dir] >= AREA_STEP_M;
+        const hit = a[dir] >= step;
         all = all && hit;
         scope.querySelector(`.am-target[data-dir="${dir}"]`)?.classList.toggle('on', hit);
       }
       q('done')?.classList.toggle('go', all);
+      // Camera tilt learned from these steps (tracking/body.js TILT_CAL) and the overhead check
+      // (QA r5: hands leaving the top of the picture at a smash's contact).
+      const tl = state.calStatus.tilt;
+      if (tl && tl.confidence >= 0.5) {
+        const dgr = Math.round(tl.deg);
+        setText(q('tilt'), tl.locked ? `Camera tilt: set to ${dgr}° in Settings` : Math.abs(dgr) < 2 ? 'Camera tilt: level ✓' : `Camera tilted ~${Math.abs(dgr)}° ${dgr > 0 ? 'up' : 'down'} · corrected ✓`);
+        q('tilt')?.classList.add('ok');
+      }
+      const oh = state.calStatus.overhead;
+      if (oh && oh.raised) {
+        if (oh.out) a.ohOut = (a.ohOut || 0) + dt;
+        else a.ohIn = (a.ohIn || 0) + dt;
+      }
+      const ohEl = q('overhead');
+      if (a.ohOut > 0.25 && !(a.ohIn > 0.6 && a.ohIn > a.ohOut * 3)) {
+        setText(ohEl, 'Your hand leaves the top of the picture: step back a little or tilt the camera up (overheads are tracked better)');
+        ohEl?.classList.remove('ok');
+        ohEl?.classList.add('warn');
+      } else if (a.ohIn > 0.4) {
+        setText(ohEl, 'Overhead: your racket hand stays in the picture ✓');
+        ohEl?.classList.add('ok');
+        ohEl?.classList.remove('warn');
+      }
     }
   }
 
@@ -1219,6 +1300,13 @@ export function createUI(root, handlers = {}) {
   }
 
   function calibration(status = {}) {
+    if (state.calibFactory) {
+      // External calibration screen: it gets every status (including swingAt) through onStatus.
+      state.calStatus = { ...state.calStatus, ...status };
+      delete state.calStatus.swingAt;
+      if (state.screen === 'calibrate' && mounted && mounted.onStatus) mounted.onStatus({ ...state.calStatus }, status);
+      return;
+    }
     const st = { ...state.calStatus, ...status };
     if (status.swingAt != null && state.calib && state.calib.lat.phase === 'run') state.calib.lat.swings.push(status.swingAt);
     delete st.swingAt;
@@ -1233,10 +1321,20 @@ export function createUI(root, handlers = {}) {
   }
 
   // ---- Hub ------------------------------------------------------------------------
+  // Round 4: mode tiles (Career, Arcade, Training, Rally, Match) over a profile / fitness strip;
+  // the drill grid moved to its own Training screen.
   function renderHub(data) {
-    const drills = data.drills || [];
-    const bests = data.bests || {};
     const s = state.settings;
+    const el = document.createElement('section');
+    el.innerHTML = gs.hubHtml(data || {}, s, (ASSIST[s.assist] || {}).label || s.assist);
+    return { el, mount: () => gs.mountHub(el), redraw: () => gs.mountHub(el) };
+  }
+
+  // ---- Training (drills) ------------------------------------------------------------
+  function renderTraining(data) {
+    const hub = state.data.hub || {};
+    const drills = (data && data.drills) || hub.drills || [];
+    const bests = (data && data.bests) || hub.bests || {};
     const el = document.createElement('section');
     const groups = SKILLS.map((sk) => ({ ...sk, drills: drills.filter((d) => d.skill === sk.id) })).filter((g) => g.drills.length);
     const other = drills.filter((d) => !SKILLS.some((sk) => sk.id === d.skill));
@@ -1247,62 +1345,77 @@ export function createUI(root, handlers = {}) {
         <canvas class="dc-diagram" data-diagram="${esc(d.id)}" aria-hidden="true"></canvas>
         <span class="dc-body">
           <span class="dc-name">${esc(d.name)}</span>
-          <span class="dc-es">${esc(d.es && d.es !== d.name ? d.es : ' ')}</span>
+          <span class="dc-es">${esc(d.es && d.es !== d.name ? d.es : ' ')}</span>
           <span class="dc-meta">${levelHtml(d.level)}${b ? starsHtml(b.stars || 0) : '<span class="dc-new">New</span>'}</span>
           ${b ? `<span class="dc-best">Best <b>${fmtInt(b.points)}</b></span>` : ''}
         </span>
       </button>`;
     };
     el.innerHTML = `
-      <header class="hub-head">
-        <div class="wordmark wordmark-sm" aria-label="Víbora Padel">VÍBORA<span class="wm-sub">PADEL</span></div>
-        <p class="hub-profile">${esc(s.handed === 'left' ? 'Left-handed · zurdo' : 'Right-handed · diestro')}<i></i>${s.height.toFixed(2)} m<i></i>Assist ${esc((ASSIST[s.assist] || {}).label || s.assist)}${data.player ? `<i></i>${esc(data.player)}` : ''}</p>
-        <nav class="hub-nav" aria-label="Menu">
-          <button type="button" class="btn btn-ghost" data-action="recalibrate" data-focus-key="recal">Recalibrate</button>
-          <button type="button" class="btn btn-ghost" data-action="settings" data-focus-key="settings">Settings</button>
-          <button type="button" class="btn btn-ghost" data-action="help" data-focus-key="help">Help</button>
-        </nav>
+      <header class="screen-head">
+        <button type="button" class="btn btn-ghost btn-back" data-action="hub" aria-label="Back" data-focus-key="back">${ICON.back}<span>Back</span></button>
+        <div><p class="eyebrow">Training · Entrenamiento</p><h2 class="h-display">Drills<span class="es">Ejercicios con la máquina</span></h2></div>
       </header>
-      <div class="hub-play">
-        <button type="button" class="play-tile" data-action="rally" data-focus-key="rally" data-autofocus>
-          <span class="pt-eyebrow">Live ball · Peloteo</span>
-          <span class="pt-title">Rally with Coach</span>
-          <span class="pt-desc">Open rally against an AI coach who mixes drives, lobs and balls off the glass.</span>
-          <svg class="pt-court" viewBox="0 0 200 100" aria-hidden="true"><rect x="2" y="2" width="196" height="96"/><path d="M100 0v100" class="net"/><path d="M30.5 2v96M169.5 2v96M30.5 50h139"/><circle cx="148" cy="34" r="3.2" class="ball"/></svg>
-        </button>
-        <button type="button" class="play-tile" data-action="match" data-focus-key="match">
-          <span class="pt-eyebrow">2 vs 2 · Partido</span>
-          <span class="pt-title">Match</span>
-          <span class="pt-desc">AI partner and two opponents. Golden point, real serves, one set.</span>
-          <span class="pt-score" aria-hidden="true"><b>40</b><i>·</i><b>40</b></span>
-        </button>
-        <div class="level-pick">
-          <p class="eyebrow">Opponent level · Nivel</p>
-          ${segHtml('hubLevel', [['rookie', 'Rookie', 'Iniciación'], ['club', 'Club', 'Club'], ['pro', 'Pro', 'Pro']], state.hubLevel, { label: 'Opponent level' })}
-        </div>
-      </div>
       <div class="hub-drills" style="--cols:${groups.length}">
         ${groups.map((g) => `<section class="skill-col" aria-label="${esc(g.en)}">
           <h3 class="skill-head">${esc(g.en)}<span class="es">${esc(g.es)}</span></h3>
           ${g.drills.map(card).join('')}
         </section>`).join('')}
       </div>`;
+    const first = el.querySelector('.drill-card');
+    if (first) first.setAttribute('data-autofocus', '');
+    const draw = () => {
+      el.querySelectorAll('[data-diagram]').forEach((cv) => {
+        const d = drills.find((x) => x.id === cv.dataset.diagram);
+        if (d) courtDiagram(cv, { view: 'far', targets: d.targets || [], compact: true });
+      });
+    };
+    return { el, mount: draw, redraw: draw };
+  }
+
+  // ---- Career, event intro, trophies, arcade, free play (round 4; gameScreens.js) -------------
+  function renderCareer(data) {
+    const el = document.createElement('section');
+    el.innerHTML = gs.careerHtml(data || {});
+    return { el };
+  }
+
+  function renderEventIntro(data) {
+    const el = document.createElement('section');
+    el.innerHTML = gs.eventIntroHtml(data || {});
+    return { el };
+  }
+
+  function renderTrophies(data) {
+    const el = document.createElement('section');
+    el.innerHTML = gs.trophiesHtml({ ...(data || {}), tab: (data && data.tab) || state.trophiesTab });
+    return { el };
+  }
+
+  function renderArcade(data) {
+    const el = document.createElement('section');
+    el.innerHTML = gs.arcadeHtml({ ...(data || {}), selected: (data && data.selected) || state.arcadeSel });
+    return { el };
+  }
+
+  function renderFreeplay(data) {
+    const d = data || {};
+    if (d.mode) state.free.mode = d.mode;
+    if (!state.free.venue) state.free.venue = state.settings.venue || 'club';
+    if (d.level && !state.free.levelSet) state.free.level = d.level;
+    const el = document.createElement('section');
+    el.innerHTML = gs.freeplayHtml({ ...d, mode: state.free.mode, level: state.free.level, venue: state.free.venue, games: state.free.games });
     return {
       el,
-      mount: () => {
-        el.querySelectorAll('[data-diagram]').forEach((cv) => {
-          const d = drills.find((x) => x.id === cv.dataset.diagram);
-          if (d) courtDiagram(cv, { view: 'far', targets: d.targets || [], compact: true });
-        });
-      },
-      redraw: () => {
-        el.querySelectorAll('[data-diagram]').forEach((cv) => {
-          const d = drills.find((x) => x.id === cv.dataset.diagram);
-          if (d) courtDiagram(cv, { view: 'far', targets: d.targets || [], compact: true });
-        });
-      },
       onControl: (key, value) => {
-        if (key === 'hubLevel') state.hubLevel = value;
+        if (key === 'fpMode') {
+          state.free.mode = value;
+          show('freeplay', { ...d, mode: value });
+        } else if (key === 'fpLevel') {
+          state.free.level = value;
+          state.free.levelSet = true;
+          state.hubLevel = value;
+        } else if (key === 'fpGames') state.free.games = Number(value);
       },
     };
   }
@@ -1336,7 +1449,7 @@ export function createUI(root, handlers = {}) {
     const sk = SKILLS.find((x) => x.id === d.skill);
     el.innerHTML = `
       <div class="intro-text">
-        <button type="button" class="btn btn-ghost btn-back" data-action="hub" aria-label="Back to drills" data-focus-key="back">${ICON.back}<span>Drills</span></button>
+        <button type="button" class="btn btn-ghost btn-back" data-action="training" aria-label="Back to drills" data-focus-key="back">${ICON.back}<span>Drills</span></button>
         <p class="eyebrow">${esc(sk ? `${sk.en} · ${sk.es}` : d.skill || 'Drill')}</p>
         <h2 class="intro-title">${esc(d.name || '')}</h2>
         ${d.es && d.es !== d.name ? `<p class="intro-es">${esc(d.es)}</p>` : ''}
@@ -1385,7 +1498,7 @@ export function createUI(root, handlers = {}) {
           <button type="button" class="btn" data-action="replay" data-focus-key="replay">Instant replay<span class="es">Repetición</span></button>
           <button type="button" class="btn" data-action="pause-settings" data-focus-key="settings">Settings<span class="es">Ajustes</span></button>
           <button type="button" class="btn" data-action="pause-recal" data-focus-key="recal">Recalibrate<span class="es">Calibrar</span></button>
-          <button type="button" class="btn" data-action="quit" data-focus-key="quit">Quit to drills<span class="es">Salir</span></button>
+          <button type="button" class="btn" data-action="quit" data-focus-key="quit">Quit to menu<span class="es">Salir al menú</span></button>
           <button type="button" class="btn btn-ghost" data-action="diagnostics" data-focus-key="diag">Copy diagnostics<span class="es">Copiar diagnóstico</span></button>
         </div>
         <p class="pause-hint">Both hands above your head for 2 s pauses play (between points) · Esc · D copies diagnostics</p>
@@ -1395,6 +1508,7 @@ export function createUI(root, handlers = {}) {
 
   // ---- Results ---------------------------------------------------------------------
   function renderResults(sum) {
+    if (sum && sum.mode === 'challenge') return renderChallengeResults(sum);
     const el = document.createElement('section');
     const drill = sum.drill || {};
     const stars = clamp(sum.stars || 0, 0, 3);
@@ -1408,44 +1522,68 @@ export function createUI(root, handlers = {}) {
       return n ? s / n : null;
     })();
     const next = sum.nextDrill || null;
+    // Rewards, workout and the career line: a row under the map and the stroke table.
+    const strip = sum.rewards || sum.fitness || sum.careerResult ? `${gs.careerLineHtml(sum.careerResult)}${gs.rewardsHtml(sum.rewards)}${gs.fitnessHtml(sum.fitness)}` : '';
     const stat = (v, en, es) => `<div class="stat"><b>${v}</b><span>${esc(en)}<small>${esc(es)}</small></span></div>`;
+    // Match and rally: a scoreline (or the best rally) instead of stars, and the stats of a point game.
+    const play = sum.mode === 'match' || sum.mode === 'rally';
+    const kmhTxt = avgKmh != null ? fmtInt(avgKmh) : '—';
+    const kcalTxt = Number.isFinite(sum.kcal) ? fmtInt(sum.kcal) : '—';
+    const inPlay = shots && Number.isFinite(sum.successRate) ? pct(sum.successRate) : '—';
+    const statsHtml = play
+      ? [
+        stat(inPlay, 'Shots in play', 'Bolas dentro'),
+        stat(fmtInt(shots), 'Shots', 'Golpes'),
+        stat(`${fmtInt(sum.pointsWon || 0)}<small>/ ${fmtInt(sum.pointsPlayed || 0)}</small>`, sum.mode === 'match' ? 'Points won' : 'Rallies won', sum.mode === 'match' ? 'Puntos ganados' : 'Peloteos ganados'),
+        stat(fmtInt(sum.bestRally || 0), 'Best rally', 'Mejor peloteo'),
+        stat(kmhTxt, 'Avg km/h', 'Velocidad media'),
+        stat(kcalTxt, 'kcal', 'Calorías'),
+      ].join('')
+      : [
+        stat(madeTxt, 'On target', 'Al objetivo'),
+        stat(fmtInt(shots), 'Shots', 'Golpes'),
+        stat(fmtInt(sum.longestStreak), 'Best streak', 'Mejor racha'),
+        stat(kmhTxt, 'Avg km/h', 'Velocidad media'),
+        stat(Number.isFinite(sum.avgReactionMs) ? `${fmtInt(sum.avgReactionMs)}<small>ms</small>` : '—', 'Reaction', 'Reacción'),
+        stat(kcalTxt, 'kcal', 'Calorías'),
+      ].join('');
+    const sl = sum.mode === 'match' && sum.scoreline ? sum.scoreline : null;
+    const slRow = (team) => {
+      const n = sl.names && sl.names[team] ? sl.names[team] : team ? ['Rivals', 'Rivales'] : ['You', 'Nosotros'];
+      const sets = (sl.sets || []).length > 1 ? sl.sets.map((x) => `<i>${fmtInt(x[team])}</i>`).join('') : '';
+      return `<div class="rsl-row${sl.won === (team === 0) ? ' is-win' : ''}"><span>${esc(n[0])}<small>${esc(n[1] || '')}</small></span>${sets}<b>${fmtInt(sl.games[team])}</b></div>`;
+    };
+    const scoreHtml = sl
+      ? `<div class="res-scoreline" aria-label="Final score">${slRow(0)}${slRow(1)}</div>`
+      : sum.mode === 'rally'
+        ? `<div class="res-points"><b>${fmtInt(sum.bestRally || 0)}</b><span>best rally · mejor peloteo</span></div>`
+        : `${starsHtml(stars, 3, 'stars-xl')}
+          <div class="res-points"><b>${fmtInt(points)}</b><span>points · puntos</span></div>
+          ${sum.newBest ? '<span class="new-best">New best · récord</span>' : Number.isFinite(sum.best) ? `<span class="prev-best">Best ${fmtInt(sum.best)}</span>` : ''}`;
     el.innerHTML = `
       <header class="res-head">
         <div>
-          <p class="eyebrow">${esc(sum.mode === 'rally' ? 'Rally with Coach · Peloteo' : sum.mode === 'match' ? 'Match · Partido' : 'Drill complete · Ejercicio terminado')}</p>
+          <p class="eyebrow">${esc(sum.career ? `${sum.career.eventName} · ${sum.career.round}` : sum.mode === 'rally' ? 'Rally with Coach · Peloteo' : sum.mode === 'match' ? 'Match · Partido' : 'Drill complete · Ejercicio terminado')}</p>
           <h2 class="h-display h-xl">${esc(sum.title || drill.name || 'Session')}${drill.es && drill.es !== drill.name ? `<span class="es">${esc(drill.es)}</span>` : ''}</h2>
         </div>
         <div class="res-score">
-          ${starsHtml(stars, 3, 'stars-xl')}
-          <div class="res-points"><b>${fmtInt(points)}</b><span>points · puntos</span></div>
-          ${sum.newBest ? '<span class="new-best">New best · récord</span>' : Number.isFinite(sum.best) ? `<span class="prev-best">Best ${fmtInt(sum.best)}</span>` : ''}
+          ${scoreHtml}
         </div>
       </header>
-      <div class="res-grid">
-        <div class="res-stats">
-          ${stat(madeTxt, 'On target', 'Al objetivo')}
-          ${stat(fmtInt(shots), 'Shots', 'Golpes')}
-          ${stat(fmtInt(sum.longestStreak), 'Best streak', 'Mejor racha')}
-          ${stat(avgKmh != null ? fmtInt(avgKmh) : '—', 'Avg km/h', 'Velocidad media')}
-          ${stat(Number.isFinite(sum.avgReactionMs) ? `${fmtInt(sum.avgReactionMs)}<small>ms</small>` : '—', 'Reaction', 'Reacción')}
-          ${stat(Number.isFinite(sum.kcal) ? fmtInt(sum.kcal) : '—', 'kcal', 'Calorías')}
-        </div>
+      <div class="res-grid${strip ? ' has-strip' : ''}">
+        <div class="res-stats">${statsHtml}</div>
         <figure class="res-map panel">
-          <figcaption><span class="eyebrow">Landings · Botes</span><span class="legend"><span><i class="lg-hit"></i>On target</span><span><i class="lg-miss"></i>Missed</span></span></figcaption>
+          <figcaption><span class="eyebrow">Landings · Botes</span><span class="legend"><span><i class="lg-hit"></i>${play ? 'In · dentro' : 'On target'}</span><span><i class="lg-miss"></i>${play ? 'Out · fuera' : 'Missed'}</span></span></figcaption>
           <canvas class="landing-canvas" aria-label="Landing map of your shots on the far court"></canvas>
         </figure>
         <div class="res-side">
           <div class="res-strokes"><p class="eyebrow">Strokes · Golpes</p><div class="sb" data-strokes></div></div>
-          <div class="res-tips"><p class="eyebrow">Coach's notes · Consejos</p><ol>${tips.map((t, i) => `<li><b>${i + 1}</b><span>${esc(typeof t === 'string' ? t : t.text)}${t && t.es ? `<small>${esc(t.es)}</small>` : ''}</span></li>`).join('')}</ol></div>
+          ${tips.length ? `<div class="res-tips"><p class="eyebrow">Coach's notes · Consejos</p><ol>${tips.map((t, i) => `<li><b>${i + 1}</b><span>${esc(typeof t === 'string' ? t : t.text)}${t && t.es ? `<small>${esc(t.es)}</small>` : ''}</span></li>`).join('')}</ol></div>` : ''}
           ${missesHtml(sum.misses)}
         </div>
+        ${strip ? `<div class="res-strip">${strip}</div>` : ''}
       </div>
-      <div class="btn-row res-btns">
-        <button type="button" class="btn ${next ? '' : 'go '}btn-lg" data-action="restart" data-focus-key="retry" ${next ? '' : 'data-autofocus'}>Retry<span class="es">Repetir</span></button>
-        ${next ? `<button type="button" class="btn go btn-lg" data-action="next-drill" data-drill="${esc(next.id)}" data-autofocus data-focus-key="next">Next: ${esc(next.name)}</button>` : ''}
-        <button type="button" class="btn" data-action="replay" data-focus-key="replay">Watch replay</button>
-        <button type="button" class="btn" data-action="quit" data-focus-key="hub">All drills<span class="es">Ejercicios</span></button>
-      </div>`;
+      <div class="btn-row res-btns">${resultButtons(sum, next)}</div>`;
     const draw = () => {
       landingMap(el.querySelector('.landing-canvas'), sum.landings || [], sum.targets || drill.targets || []);
     };
@@ -1457,6 +1595,56 @@ export function createUI(root, handlers = {}) {
       },
       redraw: draw,
     };
+  }
+
+  /** Results buttons by mode: drill (retry / next drill), career (next match / career), free play. */
+  function resultButtons(sum, next) {
+    const c = sum.careerResult;
+    if (c) {
+      const nextBtn = c.nextMatch
+        ? `<button type="button" class="btn go btn-lg" data-action="next-match" data-event="${esc(c.eventId)}" data-autofocus data-focus-key="next">Next: ${esc(c.nextRound)}<span class="es">Siguiente partido</span></button>`
+        : `<button type="button" class="btn go btn-lg" data-action="quit-to" data-to="career" data-autofocus data-focus-key="career">Career<span class="es">Carrera</span></button>`;
+      return `${nextBtn}
+        ${!c.eventWon && c.eventDone ? `<button type="button" class="btn btn-lg" data-action="next-match" data-event="${esc(c.eventId)}" data-focus-key="retry">Try again<span class="es">Reintentar</span></button>` : ''}
+        <button type="button" class="btn" data-action="replay" data-focus-key="replay">Watch replay</button>
+        <button type="button" class="btn" data-action="quit" data-focus-key="hub">Hub<span class="es">Inicio</span></button>`;
+    }
+    if (sum.mode !== 'drill') {
+      return `<button type="button" class="btn go btn-lg" data-action="restart" data-focus-key="retry" data-autofocus>Play again<span class="es">Otra vez</span></button>
+        <button type="button" class="btn" data-action="replay" data-focus-key="replay">Watch replay</button>
+        <button type="button" class="btn" data-action="quit" data-focus-key="hub">Hub<span class="es">Inicio</span></button>`;
+    }
+    return `<button type="button" class="btn ${next ? '' : 'go '}btn-lg" data-action="restart" data-focus-key="retry" ${next ? '' : 'data-autofocus'}>Retry<span class="es">Repetir</span></button>
+        ${next ? `<button type="button" class="btn go btn-lg" data-action="next-drill" data-drill="${esc(next.id)}" data-autofocus data-focus-key="next">Next: ${esc(next.name)}</button>` : ''}
+        <button type="button" class="btn" data-action="replay" data-focus-key="replay">Watch replay</button>
+        <button type="button" class="btn" data-action="quit-to" data-to="training" data-focus-key="hub">All drills<span class="es">Ejercicios</span></button>`;
+  }
+
+  /** Arcade results: score, rank on the leaderboard, combos, rewards and the workout. */
+  function renderChallengeResults(sum) {
+    const el = document.createElement('section');
+    el.classList.add('screen-cresults');
+    const lb = sum.leaderboard || {};
+    el.innerHTML = `
+      <header class="res-head">
+        <div>
+          <p class="eyebrow">${esc(sum.daily ? `Daily challenge · ${sum.daily.date}` : 'Arcade · Reto')}</p>
+          <h2 class="h-display h-xl">${esc(sum.name || 'Challenge')}<span class="es">${esc(sum.es || '')}</span></h2>
+        </div>
+        <div class="res-score">
+          ${lb.rank ? `<div class="cres-rank"><b>#${esc(lb.rank)}</b><span>rank · puesto</span></div>` : ''}
+          <div class="res-points"><b>${fmtInt(sum.score || 0)}</b><span>score · puntos</span></div>
+          ${lb.isBest ? '<span class="new-best">New best · récord</span>' : Number.isFinite(lb.previousBest) ? `<span class="prev-best">Best ${fmtInt(lb.previousBest)}</span>` : ''}
+        </div>
+      </header>
+      ${gs.challengeResultsHtml(sum)}
+      <div class="btn-row res-btns">
+        <button type="button" class="btn go btn-lg" data-action="challenge-again" data-challenge="${esc(sum.boardId || sum.challengeId)}" data-autofocus data-focus-key="again">Play again<span class="es">Otra vez</span></button>
+        <button type="button" class="btn" data-action="replay" data-focus-key="replay">Watch replay</button>
+        <button type="button" class="btn" data-action="quit-to" data-to="arcade" data-focus-key="arcade">Arcade<span class="es">Retos</span></button>
+        <button type="button" class="btn" data-action="quit" data-focus-key="hub">Hub<span class="es">Inicio</span></button>
+      </div>`;
+    return { el };
   }
 
   function results(summary) {
@@ -1571,7 +1759,7 @@ export function createUI(root, handlers = {}) {
           <ol class="help-steps">
             <li><b>1</b><span>Connect the Mac to the TV with HDMI. Mirror the display, set the TV to <em>Game mode</em> to cut lag.</span></li>
             <li><b>2</b><span>Put the camera on top of the TV, centred, at roughly chest height or tilted slightly down.</span></li>
-            <li><b>3</b><span>Stand 2.2–3.5 m back with light on you, not behind you. Clear a 2 × 1.5 m area.</span></li>
+            <li><b>3</b><span>Stand 1.3–2.2 m back (close: head, shoulders and arms in view; camera at chest height) or 2.2–3.5 m (head to ankles). Light on you, not behind you. Clear a 2 × 1.5 m area.</span></li>
             <li><b>4</b><span>Install it as an app (see <em>Use it like an app</em>) or open it in Chrome / Safari; full screen with F (or ⌃⌘F); allow camera access.</span></li>
           </ol>
         </section>
@@ -1612,11 +1800,16 @@ export function createUI(root, handlers = {}) {
       <div class="hud-tr">
         <div class="hud-points"><b>0</b><span class="hp-lbl">pts</span></div>
         <div class="hud-streak"><span class="hs-x"></span><span class="hs-lbl">streak · racha</span></div>
+        <div class="hud-combo" hidden><b class="hc-mult">×1</b><span class="hc-lbl">combo<small></small></span><span class="hc-lives" aria-label="Lives"></span></div>
+        <div class="hud-pop" aria-hidden="true"></div>
       </div>
+      <div class="hud-clock" hidden><b class="hcl-t">1:00</b><span class="hcl-bar"><i></i></span></div>
+      <div class="hud-callout" hidden aria-live="polite"><b></b><small></small></div>
+      <div class="hud-partner" hidden aria-live="polite"><span class="hpa-who"></span><b class="hpa-text"></b><small class="hpa-en"></small></div>
       <div class="hud-prompt" hidden><span class="hp-ring"></span><span class="hp-text"></span></div>
       <div class="hud-timing" hidden>
         <div class="htm-miss" hidden aria-live="polite"><span class="htm-text"></span><span class="htm-es"></span></div>
-        <div class="htm-meter" hidden aria-hidden="true"><span class="htm-l">Early</span><span class="htm-track"><i class="htm-win"></i><i class="htm-zero"></i><i class="htm-mark"></i></span><span class="htm-l">Late</span><b class="htm-val"></b></div>
+        <div class="htm-meter" hidden aria-hidden="true"><span class="htm-l">Early</span><span class="htm-track"><i class="htm-win"></i><i class="htm-good"></i><i class="htm-zero"></i><i class="htm-mark"></i></span><span class="htm-l">Late</span><b class="htm-val"></b></div>
       </div>
       <div class="hud-now" hidden aria-hidden="true">Now!<small>¡Ya!</small></div>
       <div class="shotcard" hidden aria-live="polite"></div>
@@ -1644,6 +1837,7 @@ export function createUI(root, handlers = {}) {
   function hud(h) {
     if (!h) return;
     state.hud = h;
+    if (achEl.childElementCount) placeAchievements();
     const q = (s) => layerHud.querySelector(s);
     setText(q('.ht-name'), h.title || '');
     setText(q('.ht-sub'), h.subtitle || '');
@@ -1716,6 +1910,120 @@ export function createUI(root, handlers = {}) {
     } else state.hudKeyBanner = null;
     if (h.ballIndicator !== undefined) ballIndicator(h.ballIndicator);
     timingHud(h.miss || null, h.meter || null);
+    challengeHud(h.challenge || null);
+  }
+
+  // ---- Arcade challenge HUD: clock, combo multiplier, lives, score pop (round 4) ------------------
+  function challengeHud(c) {
+    const clock = layerHud.querySelector('.hud-clock');
+    const combo = layerHud.querySelector('.hud-combo');
+    layerHud.classList.toggle('has-challenge', !!c);
+    if (!c) {
+      clock.hidden = true;
+      combo.hidden = true;
+      return;
+    }
+    clock.hidden = false;
+    const left = Math.max(0, c.timeLeft || 0);
+    setText(clock.querySelector('.hcl-t'), fmtTime(Math.ceil(left)));
+    clock.querySelector('.hcl-bar i').style.width = `${(c.duration ? left / c.duration : 0) * 100}%`;
+    clock.classList.toggle('low', left <= 10 && left > 0);
+    combo.hidden = false;
+    combo.dataset.mult = String(c.mult || 1);
+    setText(combo.querySelector('.hc-mult'), `×${c.mult || 1}`);
+    setText(combo.querySelector('.hc-lbl small'), c.combo ? `${c.combo} in a row · seguidas` : 'build a streak · haz racha');
+    const lives = combo.querySelector('.hc-lives');
+    if (c.maxLives) {
+      const html = Array.from({ length: c.maxLives }, (_, i) => `<i class="${i < (c.lives ?? 0) ? 'on' : ''}"></i>`).join('');
+      if (lives.innerHTML !== html) lives.innerHTML = html;
+      lives.hidden = false;
+    } else lives.hidden = true;
+    const a = c.lastAward;
+    const key = a ? `${a.at}|${a.points}` : null;
+    if (key && key !== state.hudKeyChallenge) {
+      state.hudKeyChallenge = key;
+      if (a.points > 0) scorePop(a);
+    }
+  }
+
+  function scorePop(a) {
+    const el = layerHud.querySelector('.hud-pop');
+    if (!el) return;
+    el.innerHTML = `<b>+${fmtInt(a.points)}</b>${a.mult > 1 ? `<i>×${esc(a.mult)}</i>` : ''}${a.perfect ? '<em>Perfect</em>' : ''}`;
+    el.classList.remove('go');
+    if (!reducedMotion()) void el.offsetWidth;
+    el.classList.add('go');
+  }
+
+  /** Big centre-top callout ("Perfect timing!", "Combo ×3"), never over the racket at the bottom. */
+  function callout(text, sub = '', kind = 'perfect') {
+    const el = layerHud.querySelector('.hud-callout');
+    if (!el) return;
+    setText(el.querySelector('b'), text);
+    setText(el.querySelector('small'), sub);
+    el.dataset.kind = kind;
+    el.hidden = false;
+    el.classList.remove('flash');
+    if (!reducedMotion()) void el.offsetWidth;
+    el.classList.add('flash');
+    clearTimeout(el._t);
+    el._t = setTimeout(() => { el.hidden = true; }, 1100);
+  }
+
+  function perfect(streak = 1) {
+    callout(streak > 1 ? `Perfect ×${streak}` : 'Perfect timing!', streak > 1 ? 'golpes perfectos seguidos' : '¡Golpe perfecto!', 'perfect');
+  }
+
+  /** The partner's call ("¡Mía!") as a chip at the left, under the score blocks. */
+  function partnerCall(c) {
+    if (!c || (state.settings && state.settings.callouts === false)) return;
+    const el = layerHud.querySelector('.hud-partner');
+    if (!el) return;
+    // Left column, just under the scoreboard and the camera inset (whatever their height).
+    const tl = layerHud.querySelector('.hud-tl');
+    const below = tl && !layerHud.hidden ? Math.round(tl.getBoundingClientRect().bottom + 10) : 0;
+    const top = below > 0 ? `${Math.max(below, Math.round(window.innerHeight * 0.3))}px` : '';
+    if (el.style.top !== top) el.style.top = top;
+    setText(el.querySelector('.hpa-who'), c.who || '');
+    setText(el.querySelector('.hpa-text'), c.text || '');
+    setText(el.querySelector('.hpa-en'), c.en || '');
+    el.hidden = false;
+    el.classList.remove('fresh');
+    if (!reducedMotion()) void el.offsetWidth;
+    el.classList.add('fresh');
+    clearTimeout(el._t);
+    el._t = setTimeout(() => { el.hidden = true; }, 2200);
+  }
+
+  /** During play the toasts sit in the right column under the points, combo and last-shot
+   *  card (measured; only while a toast is up), so they never cover the card or the racket. */
+  function placeAchievements() {
+    if (!achEl.childElementCount || layerHud.hidden) {
+      if (achEl.style.top) achEl.style.top = '';
+      return;
+    }
+    let bottom = 0;
+    for (const sel of ['.hud-tr', '.shotcard']) {
+      const el = layerHud.querySelector(sel);
+      if (el && !el.hidden) bottom = Math.max(bottom, el.getBoundingClientRect().bottom);
+    }
+    const top = bottom ? `${Math.round(bottom + 12)}px` : '';
+    if (achEl.style.top !== top) achEl.style.top = top;
+  }
+
+  /** Achievement toast (top right; any screen). a: { name, es, desc, xp, tier, icon }. */
+  function achievement(a) {
+    if (!a) return;
+    const t = document.createElement('div');
+    t.className = `ach-toast ach-${a.tier || 'bronze'}`;
+    t.innerHTML = `<i class="ach-ico">${gs.glyph(a.icon)}</i><span><small>Achievement · Logro</small><b>${esc(a.name)}</b><em>${esc(a.desc || '')}</em></span><strong>+${fmtInt(a.xp || 0)} XP</strong>`;
+    achEl.appendChild(t);
+    while (achEl.childElementCount > 3) achEl.firstElementChild.remove();
+    placeAchievements();
+    setTimeout(() => {
+      t.classList.add('out');
+      setTimeout(() => t.remove(), reducedMotion() ? 0 : 400);
+    }, 4200);
   }
 
   // ---- Timing hits: miss reason card, timing meter, "Now!" (round 3) ------------------
@@ -1751,7 +2059,10 @@ export function createUI(root, handlers = {}) {
         win.style.width = `${(((meter.early + meter.late) / (2 * span)) * 100).toFixed(1)}%`;
         const mark = tEl.querySelector('.htm-mark');
         mark.style.left = pctOf(meter.e);
-        const onTime = Math.abs(meter.e) <= 0.06;
+        const good = tEl.querySelector('.htm-good');
+        const gw = Number.isFinite(meter.green) ? meter.green : 0.06;
+        if (good) { good.style.left = pctOf(-gw); good.style.width = `${((gw / span) * 100).toFixed(1)}%`; }
+        const onTime = Math.abs(meter.e) <= gw;
         tEl.dataset.state = !meter.hit ? 'miss' : onTime ? 'good' : 'ok';
         setText(tEl.querySelector('.htm-val'), meter.label || '');
       }
@@ -1998,7 +2309,8 @@ export function createUI(root, handlers = {}) {
       g.addColorStop(1, '#05080d');
       ctx.fillStyle = g;
       ctx.fillRect(0, 0, w, h);
-      if (cv.dataset.preview !== 'pip') {
+      // The placeholder only while no pose frames arrive (QA r5: it sat over the tracked skeleton).
+      if (cv.dataset.preview !== 'pip' && !(state.skeleton && performance.now() - state.skeletonAt < 1500)) {
         ctx.fillStyle = 'rgba(244,239,228,0.55)';
         ctx.font = `600 ${Math.round(h * 0.05)}px 'Barlow Semi Condensed', sans-serif`;
         ctx.textAlign = 'center';
@@ -2053,7 +2365,8 @@ export function createUI(root, handlers = {}) {
     rafId = 0;
     const dt = Math.min(0.1, (now - lastFrame) / 1000);
     lastFrame = now;
-    if (state.screen === 'calibrate') calUpdate(dt);
+    if (state.screen === 'calibrate' && !state.calibFactory) calUpdate(dt);
+    else if (state.screen === 'calibrate' && mounted && mounted.update) mounted.update(dt);
     // Previews at ~30 fps keep the main thread free for tracking and rendering.
     if (now - lastDraw > 32) {
       lastDraw = now;
@@ -2103,6 +2416,25 @@ export function createUI(root, handlers = {}) {
     ballIndicator,
     missCard,
     timingCue,
+    // Round 4: arcade / career presentation.
+    partnerCall,
+    achievement,
+    perfect,
+    callout,
+    /**
+     * Calibration hook: an external calibration screen (e.g. src/ui/calibrate.js) replaces the
+     * built-in one. factory(data, ctx) -> { el, mount?, unmount?, redraw?, onControl? }; ctx gives
+     * { settings, changeSetting(key, value), goto(screen, data), back(), finish(), call(handler, ...args),
+     * toast(text), status() (last ui.calibration() status) }. Pass null to restore the built-in screen.
+     */
+    setCalibrationScreen(factory) {
+      state.calibFactory = typeof factory === 'function' ? factory : null;
+    },
+    /** Registers (or replaces) any screen renderer: render(data, ctx) -> { el, mount?, unmount?, redraw?, onControl? }. */
+    registerScreen(name, render) {
+      if (typeof render !== 'function') return;
+      RENDER[name] = (data) => render(data, screenCtx());
+    },
     copyDiagnostics,
     get diagnosticsText() { return state.lastDiagnostics || null; },
     get screen() { return state.screen; },

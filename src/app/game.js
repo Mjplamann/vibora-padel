@@ -9,18 +9,26 @@ import { SIM, ASSIST, DEFAULT_ASSIST } from '../config.js';
 import { createWorld, stepWorld, emit } from '../game/world.js';
 import { createHumanController } from '../game/human.js';
 import { createDrillMode, createRallyMode, createMatchMode } from '../game/modes.js';
+import { createChallengeMode } from '../game/challenges.js';
+import { racketById } from '../game/progression.js';
+import { setRacketProfile, makeRacketProfile } from '../physics/racket.js';
 import { getDrill, DRILL_BY_ID } from '../game/drills.js';
 import { createSession } from '../game/session.js';
 import { createAutopilotFeed } from './autofeed.js';
+import { installCloseFeed } from './closeFeed.js';
 import { createSyntheticCamera } from '../tracking/synthetic.js';
 
+/** Workout recap: a counted swing (m/s at the sweet spot) and the window that groups its peaks (s). */
+export const SWING_COUNT = Object.freeze({ min: 3, group: 0.8 });
 export const STEP = 1 / SIM.tickRate;
 /** Latency (s) used for mouse / trackpad input: one display frame. */
 export const FALLBACK_LATENCY = 0;
 
 /**
  * @param {object} o
- * @param {{kind:'drill'|'rally'|'match', drillId?, level?}} o.spec
+ * @param {{kind:'drill'|'rally'|'match'|'challenge', drillId?, level?, games?, challengeId?, daily?,
+ *   opponents?, partner?, teamNames?, resume?, career?, venue?}} o.spec  (round 4: arcade challenges and
+ *   career matches: named AI pairs with personalities, the partner, a saved score to resume)
  * @param {object} o.settings live app settings (copied into world.settings and kept in sync)
  * @param {'camera'|'autopilot'|'fallback'} o.input
  * @param {object} [o.human] the camera human controller (input 'camera')
@@ -36,15 +44,19 @@ export const FALLBACK_LATENCY = 0;
  *   default settings.apProfile or 'precise'
  * @param {number} [o.apJitter] extra random capture -> result delay (s, uniform 0..apJitter)
  * @param {number} [o.apNoise] landmark noise of the synthetic camera (1 = a typical webcam at 2.5 m)
+ * @param {boolean} [o.apClose] close-mode autopilot (app/closeFeed.js): 1.7 m from a camera at chest
+ *   height, legs out of the picture, a 30 fps webcam-like delivery (?apclose=1)
  */
 export function createGame({
   spec, settings, input = 'camera', human = null, fallback = null, startTime = 0, storage = null,
   seed = 1, apLatency = 0, apDelivery = 0.045, onFrame = null, attract = false,
-  apProfile = null, apJitter = null, apNoise = null,
+  apProfile = null, apJitter = null, apNoise = null, apClose = false,
 }) {
   const overrides = input === 'autopilot' ? { latency: apLatency } : input === 'fallback' ? { latency: FALLBACK_LATENCY, gazeFollow: false } : {};
   const world = createWorld({ settings: { ...settings, ...overrides }, rng: createRng(seed) });
   world.input = input; // mouse play keeps physical hits (game/swingAssist.js timingConfig)
+  // The equipped racket (game/progression.js RACKETS) sets the impact physics of this session.
+  setRacketProfile(makeRacketProfile(racketById(world.settings.racketModel)));
   const session = attract ? null : createSession({ storage });
   let feed = null;
   let h = human;
@@ -59,10 +71,18 @@ export function createGame({
       delivery: apDelivery,
     });
     const profile = attract ? 'precise' : apProfile || settings.apProfile || 'precise';
-    if (profile !== 'precise' && feed.autopilot.setProfile) feed.autopilot.setProfile(profile, { seed: seed * 7919 + 13 });
     const jit = apJitter ?? settings.apJitter ?? 0;
     const noise = apNoise ?? settings.apNoise ?? 0;
-    if (jit > 0 || noise > 0) installRealisticFeed(feed, { delivery: apDelivery, jitter: jit, noise, hfovDeg: world.settings.hfovDeg, seed: seed + 991 });
+    if (apClose && !attract) {
+      // Close mode: the virtual player stands 1.7 m from a camera at chest height (legs out of view).
+      installCloseFeed(feed, {
+        handed: world.settings.handed, height: world.settings.height, hfovDeg: world.settings.hfovDeg, seed: seed + 101,
+        delivery: apDelivery, jitter: jit || 0.02, noise, profile,
+      });
+    } else {
+      if (profile !== 'precise' && feed.autopilot.setProfile) feed.autopilot.setProfile(profile, { seed: seed * 7919 + 13 });
+      if (jit > 0 || noise > 0) installRealisticFeed(feed, { delivery: apDelivery, jitter: jit, noise, hfovDeg: world.settings.hfovDeg, seed: seed + 991 });
+    }
     // Stand still for a second, then calibrate the neutral spot (what the calibration screen does).
     world.time = startTime - 1.0;
     while (world.time < startTime - 1e-9) {
@@ -83,11 +103,22 @@ export function createGame({
     mode = createDrillMode(drill, { rng: createRng(seed + 7), session });
   } else if (spec.kind === 'rally') {
     mode = createRallyMode({ level: spec.level || 'club', rng: createRng(seed + 7), session });
+  } else if (spec.kind === 'challenge') {
+    mode = createChallengeMode(spec.challengeId || 'por-tres-party', { rng: createRng(seed + 7), session, daily: spec.daily || null });
+    drill = mode.activeDrill || null;
   } else {
-    mode = createMatchMode({ level: spec.level || 'club', games: spec.games || 4, rng: createRng(seed + 7), session });
+    mode = createMatchMode({
+      level: spec.level || 'club', games: spec.games || 4, rng: createRng(seed + 7), session,
+      opponents: spec.opponents || null, partner: spec.partner || null, teamNames: spec.teamNames || null, resume: spec.resume || null,
+      skill: Number.isFinite(spec.skill) ? spec.skill : null, partnerSkill: Number.isFinite(spec.partnerSkill) ? spec.partnerSkill : null,
+      callouts: world.settings.callouts !== false,
+      title: spec.career ? spec.career.eventName : 'Match',
+      subtitle: spec.career ? `${spec.career.round} · ${spec.pairName || ''}` : null,
+    });
   }
   world.mode = mode;
   mode.start(world);
+  if (spec.kind === 'challenge') drill = mode.activeDrill || null;
 
   // Stats for tests / the debug overlay.
   const stats = {
@@ -116,8 +147,19 @@ export function createGame({
       stats.rallies++;
       stats.outcomes[o.reason] = (stats.outcomes[o.reason] || 0) + 1;
     }),
+    // Fitness recap: swing peaks the tracking reports ('player:swing' { phase, speed }). QA r5: the
+    // take-back and the recovery around each stroke counted too (12 shots, 25 swings): peaks below
+    // SWING_COUNT.min m/s are ignored and peaks within SWING_COUNT.group s of a counted one belong
+    // to the same swing (its speed is the fastest of them).
+    world.bus.on('player:swing', (p) => {
+      if (!session || !p || p.phase !== 'peak' || !(p.speed >= SWING_COUNT.min)) return;
+      if (world.time - lastSwingAt < SWING_COUNT.group) session.swingUpdate(p.speed);
+      else session.swing(p.speed);
+      lastSwingAt = world.time;
+    }),
   ];
 
+  let lastSwingAt = -Infinity;
   let lastKeyMove = -Infinity;
   let lastMoveKey = '';
   let fbNext = null;

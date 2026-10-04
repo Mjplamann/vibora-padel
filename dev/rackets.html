@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Víbora Padel — rackets</title>
+<script type="importmap">{"imports":{"three":"../vendor/three/three.module.js","three/addons/":"../vendor/three/addons/"}}</script>
+<style>
+  html, body { margin: 0; height: 100%; background: #070b12; overflow: hidden; }
+  canvas { display: block; width: 100vw; height: 100vh; }
+  #lbl { position: fixed; left: 0; right: 0; bottom: 4vh; display: flex; justify-content: space-around; font: 600 22px 'Barlow Semi Condensed', sans-serif; color: #f4efe4; letter-spacing: 0.06em; text-transform: uppercase; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="lbl"></div>
+<script type="module">
+// The five racket models (game/progression.js RACKETS, render/racket.js RACKET_MODELS): front faces
+// (?side=back for the backhand faces), plus one racket switched with setModel() to check the swap.
+import * as THREE from 'three';
+import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
+import { buildRacket, RACKET_MODELS } from '../src/render/racket.js';
+import { RACKETS } from '../src/game/progression.js';
+import { loadFonts } from '../src/render/textures.js';
+
+const qs = new URLSearchParams(location.search);
+const back = qs.get('side') === 'back';
+await loadFonts();
+const canvas = document.getElementById('c');
+const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
+renderer.setSize(innerWidth, innerHeight);
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.outputColorSpace = THREE.SRGBColorSpace;
+const scene = new THREE.Scene();
+scene.background = new THREE.Color('#0b1220');
+const pmrem = new THREE.PMREMGenerator(renderer);
+scene.environment = pmrem.fromScene(new RoomEnvironment(), 0.04).texture;
+const key = new THREE.DirectionalLight('#ffffff', 2.2);
+key.position.set(1, 2, 3);
+scene.add(key);
+const cam = new THREE.PerspectiveCamera(30, innerWidth / innerHeight, 0.01, 20);
+cam.position.set(0, 0.22, 1.9);
+cam.lookAt(0, 0.22, 0);
+
+const n = RACKETS.length;
+const rackets = RACKETS.map((r, i) => {
+  // The last one is built as the starter racket and switched with setModel (the in-game equip path).
+  const g = buildRacket({ model: i === n - 1 ? 'fang' : r.id, color: i === n - 1 ? '#e8572a' : r.color, cord: false });
+  if (i === n - 1) g.userData.setModel(r.id, r.color);
+  g.position.set((i - (n - 1) / 2) * 0.34, 0, 0);
+  if (back) g.rotation.y = Math.PI;
+  scene.add(g);
+  return g;
+});
+document.getElementById('lbl').innerHTML = RACKETS.map((r) => `<span>${r.name}<br><small style="opacity:.6">${RACKET_MODELS[r.id].shape}</small></span>`).join('');
+let frames = 0;
+const loop = () => {
+  renderer.render(scene, cam);
+  if (++frames > 3) window.__ready = { models: rackets.map((g) => g.userData.model) };
+  requestAnimationFrame(loop);
+};
+loop();
+</script>
+</body>
+</html>

@@ -27,6 +27,12 @@
 // the centre; never by tilting up past a chest-high contact), so racket and ball meet on screen.
 // Overheads cap the upward pitch (OVERHEAD_PITCH_MAX): the view does not stare at the ceiling and
 // the racket rising from behind the head enters the frame.
+//
+// Swing nod (QA r5: "the racket is off-screen for the ~100 ms before contact and pops in from the
+// corner"): over the last SWING_LEAD s of a contact below the shoulders the view nods SWING_NOD
+// further down and turns SWING_YAW toward the hitting side, where the racket comes from, so it
+// enters the picture earlier (a player keeps the head down and still through contact). It eases
+// out over SWING_RELEASE s after the contact.
 
 const DEG = Math.PI / 180;
 const COURT_HALF_LENGTH = 10; // m, back glass plane (config COURT.halfLength; gaze.js stays dependency-free)
@@ -52,6 +58,13 @@ export const GAZE = Object.freeze({
   CONTACT_LEAD: Object.freeze([0.25, 0.8]), // s before the contact: full framing .. framing starts
   CONTACT_BLEND_FAR: 4.0, // m (ball to contact, horizontal), when the contact has no time
   CONTACT_BLEND_NEAR: 1.5,
+  SWING_NOD: 16 * DEG,
+  SWING_YAW: 9 * DEG,
+  SWING_LEAD: Object.freeze([0.18, 0.62]), // s before the contact: full nod .. nod starts (the springs lag ~0.1 s)
+  SWING_LAMBDA: 12, // pitch / yaw spring during the nod (1/s)
+  SWING_SMOOTH: 10, // low-pass of the nod amount (1/s)
+  SWING_RELEASE: 0.4, // s after the contact over which the nod eases out
+  SWING_BELOW: 0.3, // m: the contact must be this far below the eye (no nod for overheads)
 });
 
 /** Glass-view modes (settings.glassView): limits, springs and anticipation (see the header). */
@@ -107,6 +120,7 @@ export function createGaze() {
   let pitchInit = false;
   let phase = 'front';
   let rear = false;
+  let nodS = 0; // low-passed swing nod (0..1): no target steps when the planned contact moves
 
   function reset(basePitch = 0) {
     yaw.x = 0; yaw.v = 0;
@@ -116,6 +130,7 @@ export function createGaze() {
     pitchInit = true;
     phase = 'front';
     rear = false;
+    nodS = 0;
   }
 
   function update(ball, eye, dt, { basePitch = 0, follow = true, contact = null, glassView = 'turn' } = {}) {
@@ -135,6 +150,7 @@ export function createGaze() {
     let passing = 0; // turn: weight of a ball passing the eye on its way to the glass
     phase = 'front';
     rear = false;
+    let nodTouched = false;
     if (follow && ball && !ball.atRest && !ball.outside && eye) {
       const dx = ball.pos.x - eye.x, dy = ball.pos.y - eye.y, dz = ball.pos.z - eye.z;
       const horiz = Math.hypot(dx, dz);
@@ -214,8 +230,21 @@ export function createGaze() {
           // chest-high ball is framed at the centre rather than with the ceiling).
           const e = Math.atan2(cy, cH);
           const cPitch = clamp(Math.min(e + GAZE.CONTACT_DROP, Math.max(basePitch, e)), GAZE.PITCH_MIN, GAZE.OVERHEAD_PITCH_MAX);
-          tYaw = tYaw + (cYaw - tYaw) * w;
-          tPitch = tPitch + (cPitch - tPitch) * w;
+          // Swing nod toward where the racket comes from (groundstrokes, volleys below the shoulders).
+          let nodT = 0;
+          if (tl !== null && cy < -GAZE.SWING_BELOW) {
+            nodT = tl >= 0 ? 1 - smoothstep(GAZE.SWING_LEAD[0], GAZE.SWING_LEAD[1], tl) : 1 - smoothstep(0, GAZE.SWING_RELEASE, -tl);
+            nodT *= smoothstep(GAZE.SWING_BELOW, GAZE.SWING_BELOW + 0.25, -cy);
+          }
+          nodS += (nodT - nodS) * (1 - Math.exp(-GAZE.SWING_SMOOTH * dt));
+          nodTouched = true;
+          const nod = nodS;
+          const side = cx > 0.05 ? -1 : cx < -0.05 ? 1 : 0; // yaw + = left: turn toward the contact's side
+          const nYaw = clamp(cYaw + side * GAZE.SWING_YAW * nod, -cLim, cLim);
+          const nPitch = clamp(cPitch - GAZE.SWING_NOD * nod, GAZE.PITCH_MIN, GAZE.OVERHEAD_PITCH_MAX);
+          tYaw = tYaw + (nYaw - tYaw) * w;
+          tPitch = tPitch + (nPitch - tPitch) * w;
+          if (nod > 0.05) lambda = Math.max(lambda, GAZE.SWING_LAMBDA);
           lambda = Math.max(lambda, calm ? 6 : GAZE.LAMBDA_NEAR);
           lamT = GLASS_VIEW.TARGET_LAMBDA_NEAR;
           phase = 'contact';
@@ -226,6 +255,7 @@ export function createGaze() {
     } else if (turn && Math.abs(yaw.x) > GAZE.CONTACT_LIMIT) {
       lambda = Math.max(GLASS_VIEW.TURN_LAMBDA, GAZE.LAMBDA);
     }
+    if (!nodTouched) nodS += (0 - nodS) * (1 - Math.exp(-GAZE.SWING_SMOOTH * dt));
     tYaw = clamp(tYaw, -yawLimit, yawLimit);
     // The yaw target is low-passed so no step reaches the spring (smooth acceleration).
     yawT += (tYaw - yawT) * (1 - Math.exp(-lamT * dt));

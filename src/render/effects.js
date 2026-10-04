@@ -156,7 +156,8 @@ function createRipples(root, n = 6) {
           float w = 0.05 + uT * 0.16;
           float ang = atan(p.y, p.x);
           float wob = 0.75 + 0.25 * sin(ang * 5.0 + uT * 9.0) * sin(ang * 3.0 - 1.3);
-          float front = exp(-pow((r - R) / w, 2.0)) * wob;
+          float fq = (r - R) / w;
+          float front = exp(-fq * fq) * wob;
           // Trailing interference bands behind the front read as a shimmer, not a target.
           float bands = 0.5 + 0.5 * sin((r - R) * 70.0);
           float trail = smoothstep(R, R - 0.35, r) * smoothstep(0.0, R * 0.6, r) * bands * 0.35;
@@ -269,6 +270,142 @@ function createFlashes(root, n = 4) {
 }
 
 // ---------------------------------------------------------------------------------------------
+// Skid marks: where a fast ball bounces it flattens the pile and scatters the sand along its path
+// (a lighter, elongated scuff with a darker sand rim), fading over a few seconds. Pooled decals.
+
+function createSkidMarks(root, n = 14) {
+  const geo = new THREE.PlaneGeometry(1, 1);
+  geo.rotateX(-Math.PI / 2);
+  const pool = [];
+  for (let i = 0; i < n; i++) {
+    const mat = new THREE.ShaderMaterial({
+      uniforms: { uA: { value: 0 }, uLen: { value: 1 } },
+      vertexShader: 'varying vec2 vUv; void main(){ vUv = uv; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }',
+      fragmentShader: /* glsl */ `
+        varying vec2 vUv; uniform float uA; uniform float uLen;
+        float h(vec2 p) { return fract(sin(dot(p, vec2(12.9898, 78.233))) * 43758.5453); }
+        void main() {
+          vec2 p = (vUv - 0.5) * 2.0;
+          // Teardrop along +y (the travel direction): narrow at the touchdown, wider where it leaves.
+          float w = mix(0.45, 1.0, smoothstep(-1.0, 0.6, p.y));
+          float d = length(vec2(p.x / w, p.y));
+          float core = 1.0 - smoothstep(0.55, 1.0, d);
+          float rim = smoothstep(0.6, 0.85, d) * (1.0 - smoothstep(0.85, 1.0, d));
+          float grain = 0.6 + 0.4 * h(floor(vUv * vec2(18.0, 18.0 * uLen)));
+          // Light scuff (flattened fibres) premultiplied over a darker sand rim.
+          vec3 col = vec3(0.5, 0.55, 0.64) * core * grain;
+          float a = (core * 0.15 * grain + rim * 0.1) * uA;
+          if (a < 0.003) discard;
+          gl_FragColor = vec4(col * a + vec3(0.32, 0.29, 0.24) * rim * 0.12 * uA, a);
+        }`,
+      transparent: true,
+      depthWrite: false,
+      polygonOffset: true,
+      polygonOffsetFactor: -2,
+      polygonOffsetUnits: -2,
+    });
+    const m = new THREE.Mesh(geo, mat);
+    m.visible = false;
+    m.renderOrder = 3;
+    m.userData.age = 99;
+    root.add(m);
+    pool.push(m);
+  }
+  let next = 0;
+  const LIFE = 7;
+  return {
+    spawn(pos, dirX, dirZ, speed) {
+      const m = pool[next];
+      next = (next + 1) % n;
+      const len = Math.min(0.32, 0.07 + speed * 0.012);
+      m.position.set(pos.x + dirX * len * 0.35, 0.004, pos.z + dirZ * len * 0.35);
+      m.rotation.set(0, Math.atan2(dirX, dirZ), 0);
+      m.scale.set(0.055 + speed * 0.0012, 1, len);
+      m.material.uniforms.uLen.value = len / 0.06;
+      m.material.uniforms.uA.value = Math.min(1, 0.35 + speed * 0.05);
+      m.userData.a0 = m.material.uniforms.uA.value;
+      m.userData.age = 0;
+      m.visible = true;
+    },
+    update(dt) {
+      for (const m of pool) {
+        if (!m.visible) continue;
+        m.userData.age += dt;
+        const k = 1 - m.userData.age / LIFE;
+        if (k <= 0) {
+          m.visible = false;
+          continue;
+        }
+        m.material.uniforms.uA.value = m.userData.a0 * Math.min(1, k * 2.5);
+      }
+    },
+  };
+}
+
+// ---------------------------------------------------------------------------------------------
+// Shock rings: a faint expanding ring at the racket contact (the felt puff and the air) and a
+// specular glint where the ball meets the glass. Camera-facing billboards, additive.
+
+function createRings(root, n = 6) {
+  const geo = new THREE.PlaneGeometry(1, 1);
+  const pool = [];
+  for (let i = 0; i < n; i++) {
+    const mat = new THREE.ShaderMaterial({
+      uniforms: { uT: { value: 99 }, uA: { value: 0 }, uColor: { value: new THREE.Color(1, 1, 1) } },
+      vertexShader: /* glsl */ `
+        varying vec2 vUv;
+        void main() {
+          vUv = uv;
+          vec4 mv = modelViewMatrix * vec4(0.0, 0.0, 0.0, 1.0);
+          mv.xy += position.xy * length(modelMatrix[0].xyz);
+          gl_Position = projectionMatrix * mv;
+        }`,
+      fragmentShader: /* glsl */ `
+        varying vec2 vUv; uniform float uT, uA; uniform vec3 uColor;
+        void main() {
+          float r = length(vUv - 0.5) * 2.0;
+          float R = 0.25 + uT * 9.0;
+          float rq = (r - R) / (0.06 + uT * 1.2);
+          float ring = exp(-rq * rq);
+          float a = ring * exp(-uT * 14.0) * uA * smoothstep(1.0, 0.8, r);
+          if (a < 0.003) discard;
+          gl_FragColor = vec4(uColor * a, a);
+        }`,
+      transparent: true,
+      depthWrite: false,
+      blending: THREE.AdditiveBlending,
+    });
+    const m = new THREE.Mesh(geo, mat);
+    m.visible = false;
+    m.frustumCulled = false;
+    m.renderOrder = 7;
+    root.add(m);
+    pool.push(m);
+  }
+  let next = 0;
+  return {
+    spawn(pos, size, color, amp) {
+      const m = pool[next];
+      next = (next + 1) % n;
+      m.position.copy(pos);
+      m.scale.setScalar(size);
+      m.material.uniforms.uT.value = 0;
+      m.material.uniforms.uA.value = amp;
+      m.material.uniforms.uColor.value.copy(color);
+      m.visible = true;
+    },
+    update(dt) {
+      for (const m of pool) {
+        if (!m.visible) continue;
+        const u = m.material.uniforms.uT;
+        u.value += dt;
+        if (u.value > 0.35) m.visible = false;
+      }
+    },
+  };
+}
+
+// ---------------------------------------------------------------------------------------------
 // Landing marker: predicted first-bounce ring on the floor
 
 function createLandingMarker(root) {
@@ -369,7 +506,8 @@ function makeZone(zone) {
         float corner = step(uSize.x * 0.5 - 0.55, abs(p.x)) * step(uSize.y * 0.5 - 0.55, abs(p.y));
         float glow = exp(-e / 0.35) * 0.35;
         float fill = 0.07 + 0.05 * uHi;
-        float scan = uHi * exp(-pow((fract(uTime * 0.45) * (uSize.y + 1.0) - 0.5 - (p.y + uSize.y * 0.5)) / 0.25, 2.0)) * 0.35;
+        float sq = (fract(uTime * 0.45) * (uSize.y + 1.0) - 0.5 - (p.y + uSize.y * 0.5)) / 0.25;
+        float scan = uHi * exp(-sq * sq) * 0.35;
         float pulse = 1.0 + uHi * 0.25 * sin(uTime * 5.0);
         float a = (border * (0.85 + corner * 0.6) + glow + fill + scan) * pulse * uA * (0.85 + 0.6 * uHi);
         if (a < 0.002) discard;
@@ -739,6 +877,8 @@ function createGhost(root) {
  *   it is looked up in the scene by name ('vibora-net').
  */
 export function createEffects(scene, opts = {}) {
+  // Round 4: bounce(pos, surface, speed, vel?) leaves a skid mark; meshHit(pos, normal, speed);
+  // racket contacts add a felt shock ring, glass contacts a specular glint.
   const root = new THREE.Group();
   root.name = 'vibora-effects';
   scene.add(root);
@@ -750,11 +890,16 @@ export function createEffects(scene, opts = {}) {
   const landing = createLandingMarker(root);
   const targets = createTargets(root);
   const ghost = createGhost(root);
+  const skids = createSkidMarks(root);
+  const rings = createRings(root);
   let net = opts.net || null;
   let time = 0;
 
   const rnd = Math.random;
   const tmpColor = new THREE.Color();
+  const tmpPos = new THREE.Vector3();
+  const RING_FELT = new THREE.Color(0.9, 1.0, 0.55);
+  const RING_GLASS = new THREE.Color(0.8, 0.95, 1.0);
 
   function sandPuff(pos, speed, outside) {
     const k = Math.min(1.4, Math.max(0.3, speed / 14));
@@ -778,20 +923,52 @@ export function createEffects(scene, opts = {}) {
 
   return {
     root,
-    /** Floor bounce: sand puff on turf, faint dust elsewhere. */
-    bounce(pos, surface = 'turf', speed = 8) {
+    /**
+     * Floor bounce: sand puff on turf, faint dust elsewhere; a skid mark along the travel
+     * direction for faster balls on turf. vel (post-impact velocity, optional) orients the mark.
+     */
+    bounce(pos, surface = 'turf', speed = 8, vel = null) {
       if (surface === 'turf' || surface === 'outsideFloor' || surface == null) sandPuff(pos, speed, surface === 'outsideFloor');
+      if ((surface === 'turf' || surface == null) && speed > 2.5) {
+        let dx = vel ? vel.x : rnd() - 0.5, dz = vel ? vel.z : rnd() - 0.5;
+        const h = Math.hypot(dx, dz) || 1;
+        dx /= h;
+        dz /= h;
+        skids.spawn(pos, dx, dz, speed);
+      }
     },
     /** Glass impact: shimmer ripple on the panel plane + fine dust and a couple of glints. */
     glassHit(pos, normal, speed = 8) {
       const n = normal || { x: 0, y: 0, z: 1 };
       ripples.spawn(pos, n, speed);
+      // Specular glint where the ball meets the pane.
+      tmpPos.set(pos.x + n.x * 0.04, pos.y + n.y * 0.04, pos.z + n.z * 0.04);
+      rings.spawn(tmpPos, 0.1 + Math.min(0.16, speed * 0.008), RING_GLASS, Math.min(0.5, 0.12 + speed * 0.018));
       const k = Math.min(1.3, speed / 15);
       for (let i = 0; i < Math.round(4 + 8 * k); i++) {
         const sx = (rnd() - 0.5) * 0.6, sy = (rnd() - 0.5) * 0.6, sz = (rnd() - 0.5) * 0.6;
         dust.spawn(pos.x + n.x * 0.03, pos.y + n.y * 0.03, pos.z + n.z * 0.03,
           n.x * (0.3 + rnd() * 0.5) + sx, n.y * 0.3 + sy - 0.1, n.z * (0.3 + rnd() * 0.5) + sz,
           { size: 0.02, sizeEnd: 0.07, alpha: 0.22, lifetime: 0.5 + rnd() * 0.4, dragK: 5, gravity: 0.4, r: 0.36, g: 0.36, b: 0.32 });
+      }
+    },
+    /**
+     * Wire-mesh impact: the panel rattles (fine metallic glints and dust shaken off the wires).
+     * normal points into the court.
+     */
+    meshHit(pos, normal, speed = 8) {
+      const n = normal || { x: 0, y: 0, z: 1 };
+      const k = Math.min(1.3, speed / 14);
+      for (let i = 0; i < Math.round(6 + 12 * k); i++) {
+        const sx = (rnd() - 0.5) * 1.2, sy = (rnd() - 0.5) * 1.2;
+        sparks.spawn(pos.x + (rnd() - 0.5) * 0.3, pos.y + (rnd() - 0.5) * 0.3, pos.z + (rnd() - 0.5) * 0.3,
+          n.x * rnd() * 0.6 + (n.x === 0 ? sx : 0), sy, n.z * rnd() * 0.6 + (n.z === 0 ? sx : 0),
+          { size: 0.006, sizeEnd: 0.003, alpha: 0.7, lifetime: 0.1 + rnd() * 0.15, dragK: 4, gravity: 3, r: 0.9, g: 0.92, b: 0.95 });
+      }
+      for (let i = 0; i < Math.round(4 + 8 * k); i++) {
+        dust.spawn(pos.x + n.x * 0.04, pos.y, pos.z + n.z * 0.04,
+          n.x * (0.2 + rnd() * 0.4) + (rnd() - 0.5) * 0.3, (rnd() - 0.6) * 0.4, n.z * (0.2 + rnd() * 0.4) + (rnd() - 0.5) * 0.3,
+          { size: 0.02, sizeEnd: 0.08, alpha: 0.18, lifetime: 0.6 + rnd() * 0.5, dragK: 4, gravity: 0.5, r: 0.3, g: 0.3, b: 0.28 });
       }
     },
     /** Net impact: forwarded to the environment's net shader wobble. */
@@ -806,6 +983,7 @@ export function createEffects(scene, opts = {}) {
       else if (q >= 0.4) tmpColor.setRGB(1.9, 1.9, 1.9);
       else tmpColor.setRGB(1.8, 0.85, 0.4);
       flashes.spawn(pos, tmpColor, 0.16 + q * 0.12);
+      rings.spawn(tmpPos.set(pos.x, pos.y, pos.z), 0.2 + q * 0.1, RING_FELT, 0.12 + 0.18 * q);
       const n = Math.round(6 + q * 10);
       for (let i = 0; i < n; i++) {
         const u = rnd() * 2 - 1, a = rnd() * Math.PI * 2, s = Math.sqrt(1 - u * u);
@@ -847,6 +1025,8 @@ export function createEffects(scene, opts = {}) {
       landing.update(dt, time);
       targets.update(dt, time);
       ghost.update(dt, time);
+      skids.update(dt);
+      rings.update(dt);
     },
   };
 }

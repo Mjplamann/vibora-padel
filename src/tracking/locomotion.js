@@ -45,8 +45,25 @@ export function softDeadzone(v, deadzone, knee = deadzone) {
 }
 
 /**
+ * Close mode (round 4): a player calibrated close to the camera (upper body only, ~1.3-2.2 m) has a
+ * smaller play area in the picture (the visible width shrinks with the distance), so the gains are
+ * boosted by (REF_DISTANCE / d0)^exponent, clamped to [1, max]. Full-body play (2.2 m and beyond)
+ * keeps the gains as set.
+ */
+export const CLOSE_RANGE_BOOST = Object.freeze({ refDistance: 2.6, exponent: 0.75, max: 1.45 });
+
+/** Gain boost { lateral, depth } for a calibration distance d0 (m) in close mode. */
+export function closeRangeBoost(d0) {
+  const B = CLOSE_RANGE_BOOST;
+  if (!(d0 > 0)) return { lateral: 1, depth: 1 };
+  const k = clamp((B.refDistance / d0) ** B.exponent, 1, B.max);
+  return { lateral: k, depth: k };
+}
+
+/**
  * @param cfg { gainLateral, gainDepth, deadzone, knee? } defaults from TRACKING
- * @returns Locomotion = { setHome({x,z}), moveHome({x,z}), update(sample, dt, ctx) -> { target: {x,z} }, target, home, config }
+ * @returns Locomotion = { setHome({x,z}), moveHome({x,z}), update(sample, dt, ctx) -> { target: {x,z} }, target, home, config,
+ *   setBoost({lateral, depth}), gains() -> { lateral, depth } (boosted) }
  */
 export function createLocomotion(cfg = {}) {
   const conf = {
@@ -54,6 +71,8 @@ export function createLocomotion(cfg = {}) {
     gainDepth: cfg.gainDepth ?? TRACKING.gainDepth,
     deadzone: cfg.deadzone ?? TRACKING.deadzone,
     knee: cfg.knee ?? cfg.deadzone ?? TRACKING.deadzone,
+    // Close-mode boost of the gains (closeRangeBoost), set at calibration.
+    boost: { lateral: 1, depth: 1 },
   };
   const home = { x: 0, z: 8 };
   const target = { x: home.x, z: home.z };
@@ -84,8 +103,8 @@ export function createLocomotion(cfg = {}) {
    */
   function update(sample, dt, ctx = {}) {
     if (!sample || sample.valid === false || !sample.offset) return { target: { x: target.x, z: target.z } };
-    let x = home.x + conf.gainLateral * softDeadzone(sample.offset.x, conf.deadzone, conf.knee);
-    let z = home.z + conf.gainDepth * softDeadzone(sample.offset.d, conf.deadzone, conf.knee);
+    let x = home.x + conf.gainLateral * conf.boost.lateral * softDeadzone(sample.offset.x, conf.deadzone, conf.knee);
+    let z = home.z + conf.gainDepth * conf.boost.depth * softDeadzone(sample.offset.d, conf.deadzone, conf.knee);
 
     const m = ctx.magnet;
     const strength = clamp(ctx.magnetStrength ?? 0, 0, 1);
@@ -117,5 +136,16 @@ export function createLocomotion(cfg = {}) {
       return { x: home.x, z: home.z };
     },
     config: conf,
+    /** Close-mode gain boost ({ lateral, depth }, 1 = none). */
+    setBoost(b) {
+      conf.boost = {
+        lateral: Number.isFinite(b && b.lateral) ? b.lateral : 1,
+        depth: Number.isFinite(b && b.depth) ? b.depth : 1,
+      };
+    },
+    /** Effective gains (court m per real m) with the boost. */
+    gains() {
+      return { lateral: conf.gainLateral * conf.boost.lateral, depth: conf.gainDepth * conf.boost.depth };
+    },
   };
 }

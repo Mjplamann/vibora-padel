@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark">
+<title>Calibration panels (close mode)</title>
+<link rel="stylesheet" href="../styles/app.css">
+<style>
+  /* Dev page (round 4): the close-mode body check of src/ui/calibrate.js in several live states,
+     in the app's calibration styles. dev/calibrate.html[?state=<id>] shows one state large. */
+  body { background: radial-gradient(120% 90% at 30% 0%, #1b2a3a 0%, #0b121b 60%, #070b10 100%); margin: 0; min-height: 100vh; }
+  .grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 1.2rem; padding: 1.4rem; }
+  .card { background: rgba(10, 18, 28, 0.82); border: 1px solid rgba(139, 228, 238, 0.18); padding: 1rem 1.2rem 0.6rem; }
+  .card > .cap { font: 600 0.62rem/1.2 var(--f-ui, sans-serif); letter-spacing: 0.14em; text-transform: uppercase; color: #8be4ee; margin: 0 0 0.6rem; }
+  .dm-ideal[data-label]::after { content: attr(data-label); }
+  .cal-tip { color: var(--text-3, #9aa4ad); font-size: 0.66rem; }
+  .single .grid { grid-template-columns: minmax(0, 560px); justify-content: center; }
+</style>
+</head>
+<body>
+<div class="grid" id="grid"></div>
+<script type="module">
+import { bodyPanelHtml, updateBodyPanel, areaReadout, areaStep, spotCheck } from '../src/ui/calibrate.js';
+const CHECK = '<svg viewBox="0 0 20 20" aria-hidden="true"><path d="M4 10.5l4 4 8-9"/></svg>';
+const esc = (t) => String(t).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c]);
+const up = { head: true, shoulders: true, hips: true, knees: false, ankles: false };
+const all = { head: true, shoulders: true, hips: true, knees: true, ankles: true };
+const STATES = [
+  { id: 'close-ok', cap: 'Close 1.7 m · upper body · OK', st: { visible: up, bodyInFrame: 0.62, distance: 1.7, tracking: 'ok' } },
+  { id: 'full-ok', cap: 'Full body 2.8 m · OK', st: { visible: all, bodyInFrame: 1, distance: 2.8, tracking: 'ok' } },
+  { id: 'too-close', cap: 'Too close 1.1 m', st: { visible: { head: true, shoulders: true }, bodyInFrame: 0.4, distance: 1.1, tracking: 'ok' } },
+  { id: 'gap', cap: 'Upper body at 2.6 m (feet cut)', st: { visible: up, bodyInFrame: 0.7, distance: 2.6, tracking: 'ok' } },
+  { id: 'no-head', cap: 'Camera too low: head cut', st: { visible: { head: false, shoulders: true, hips: true }, bodyInFrame: 0.5, distance: 1.6, tracking: 'ok' } },
+  { id: 'searching', cap: 'Searching', st: { visible: {}, bodyInFrame: 0, distance: null, tracking: 'searching' } },
+];
+const one = new URLSearchParams(location.search).get('state');
+if (one) document.body.classList.add('single');
+const grid = document.getElementById('grid');
+const out = [];
+for (const s of STATES.filter((x) => !one || x.id === one)) {
+  const card = document.createElement('div');
+  card.className = 'card cal-panel';
+  card.innerHTML = `<p class="cap">${esc(s.cap)}</p>${bodyPanelHtml({ esc, check: CHECK })}`;
+  grid.appendChild(card);
+  const calib = { okSince: 0, auto: true };
+  const c = updateBodyPanel(card, s.st, calib, 2000);
+  out.push({ id: s.id, mode: c.mode, ok: c.ok, advance: calib.advance, msg: c.msg });
+}
+// Play-area readout of a close calibration (boosted gains) for the console / smoke.
+const area = areaReadout({ x: 0.2, d: -0.2 }, { gainLateral: 1.6, gainDepth: 2.0 }, { lateral: 1.3, depth: 1.3 });
+window.__calibrate = { states: out, area, step: areaStep('upper'), spot: spotCheck({ visible: up, bodyInFrame: 0.6, distance: 1.7, still: true }) };
+console.log(JSON.stringify(window.__calibrate));
+</script>
+</body>
+</html>

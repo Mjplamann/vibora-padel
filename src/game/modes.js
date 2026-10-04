@@ -14,6 +14,8 @@ import { createCoach } from './coach.js';
 import { DRILL_BY_ID, mirrorDrill, scoreShot, starsFor, noteEs } from './drills.js';
 import { launchBall, emit } from './world.js';
 import { createTacticalHome } from './tactics.js';
+import { createCallouts } from './callouts.js';
+import { PERSONALITIES } from './coach.js';
 
 const BANNER_S = 1.8;
 const REP_TIMEOUT = 9; // s after a feed without any ruling
@@ -59,7 +61,8 @@ function lastShotHud(shot, notes = []) {
     quality: shot.quality,
     timing: shot.timing,
     spacing: shot.spacing,
-    notes,
+    // Spacing coaching of a timing hit (game/swingAssist.js spacingNote, QA r5) leads the notes.
+    notes: shot.timingHit && shot.timingHit.spacingText ? [shot.timingHit.spacingText, ...(notes || [])] : notes,
   };
 }
 
@@ -92,7 +95,7 @@ export function shotOutcomeInfo(events, hitT, outcome, { team = 0, feed = null }
       continue;
     }
     if (e.type === 'wall') {
-      walls.push({ surface: e.surface, wall: e.wall, side: e.side, t: e.t });
+      walls.push({ surface: e.surface, wall: e.wall, side: e.side, t: e.t, pos: e.pos ? { x: e.pos.x, y: e.pos.y, z: e.pos.z } : null });
       if (e.wall === 'side' && e.surface === 'glass' && e.side === oppSide) sideGlass = true;
       if (e.wall === 'back' && e.surface === 'glass' && e.side === oppSide) backGlass = true;
     } else if (e.type === 'exit' && exitVia === null) exitVia = e.via || null;
@@ -108,6 +111,7 @@ export function shotOutcomeInfo(events, hitT, outcome, { team = 0, feed = null }
     winner: outcome ? outcome.winner : null,
     legal,
     landing,
+    landingT: landing ? landT : null,
     walls,
     sideGlassAfterBounce: legal && sideGlass,
     backGlassAfterBounce: legal && backGlass,
@@ -116,12 +120,55 @@ export function shotOutcomeInfo(events, hitT, outcome, { team = 0, feed = null }
   };
 }
 
+/**
+ * Rally / match shot log for the session (results: stroke table, landing map, in-play rate): each
+ * judged player shot is recorded once its fate is known, i.e. when the other side plays the ball
+ * (it was in) or when the point ends on it. success = the shot landed legally on the far side.
+ * Fed from the mode's onBus (authoritative timeline only) and onOutcome. No allocation per frame.
+ */
+export function createRallyShotLog(session) {
+  let pend = null; // { shot, hitT, events: [] }
+  function close(outcome) {
+    if (!pend) return;
+    const p = pend;
+    pend = null;
+    if (!session) return;
+    const info = shotOutcomeInfo(p.events, p.hitT, outcome, { team: 0 });
+    // The other side played it (no outcome yet): it was in if it bounced legally first, or a volley.
+    const success = outcome ? info.legal : !!info.landing || p.events.every((e) => e.type !== 'bounce' && e.type !== 'exit' && e.type !== 'outside-bounce');
+    session.record(p.shot, { success, points: 0, landing: info.landing, rallyLength: 1 });
+  }
+  return {
+    onBus(type, p) {
+      if (type === 'ball:hit' && p.shot && p.shot.by === 'player') {
+        close(null);
+        pend = { shot: p.shot, hitT: Number.isFinite(p.shot.t) ? p.shot.t : -Infinity, events: [] };
+      } else if (type === 'judge:event' && pend && p.evt) {
+        if (pend.events.length < 32) pend.events.push(p.evt);
+      } else if (type === 'judge:hit' && pend && p.team === 1) {
+        close(null);
+      }
+    },
+    onOutcome(o) {
+      if (o && o.pointOver === false) return; // a fault: the serve is replayed, not a shot of the rally
+      close(o || null);
+    },
+    clear() { pend = null; },
+  };
+}
+
 // ---------------------------------------------------------------------------
 // Drill mode
 
 /**
  * @param drill DrillDef (right-handed; mirrored at start for a left-hander) or a drill id
- * @param opts { rng?, session?, startDelay = 2, machineSigma?, reps? }
+ * @param opts { rng?, session?, startDelay = 2, machineSigma?, reps?,
+ *   quiet?: true -> no per-rep banners / coach cues (arcade challenges show their own),
+ *   gate?: (world) => boolean, an extra feed gate (arcade pacing),
+ *   resolveOnLanding?: true -> a rep is settled at the return's first legal bounce on the far side
+ *     (fast arcade feeding; the ball plays on but is no longer judged),
+ *   resolveWhen?: (outcomeInfo, judgedEvent) => boolean, the same with a custom moment (e.g. the
+ *     return reaching the far glass after its legal bounce) }
  */
 export function createDrillMode(drill, opts = {}) {
   const base = typeof drill === 'string' ? DRILL_BY_ID[drill] : drill;
@@ -164,10 +211,10 @@ export function createDrillMode(drill, opts = {}) {
     } else {
       machine = createMachine({ pos: v3(0, 1.0, -9.2), rng: createRng((rng() * 2 ** 32) >>> 0), landingSigma: opts.machineSigma });
       machine.load((i, w) => d.feeds(i, rng, { home: d.home, world: w, player: w.player.pos }), { interval: d.interval, count: reps, startDelay });
-      machine.gate = (w) => feedGateOpen(w, FEED_GAP);
+      machine.gate = (w) => feedGateOpen(w, FEED_GAP) && (!opts.gate || opts.gate(w) !== false);
       world.machine = machine;
     }
-    emit(world, 'coach:cue', { text: d.cues.intro, es: d.cues.introEs, priority: 2 });
+    if (!opts.quiet) emit(world, 'coach:cue', { text: d.cues.intro, es: d.cues.introEs, priority: 2 });
   }
 
   function dropBall(world) {
@@ -239,7 +286,14 @@ export function createDrillMode(drill, opts = {}) {
         }
         break;
       case 'judge:event':
-        if (rep) rep.events.push(p.evt);
+        if (rep) {
+          rep.events.push(p.evt);
+          const early = opts.resolveWhen || (opts.resolveOnLanding ? (info, e) => e.type === 'bounce' && e.side === 'far' && !!info.landing : null);
+          if (early && rep.shot && p.evt.side === 'far') {
+            const info = shotOutcomeInfo(rep.events, rep.hitT, null, { team: 0 });
+            if (info.legal && early(info, p.evt)) resolveRep(world, { winner: 0, reason: 'landed', label: 'In', pos: p.evt.pos, pointOver: true, synthetic: true });
+          }
+        }
         break;
       case 'ball:hit':
         if (p.shot.by === 'player') {
@@ -291,12 +345,13 @@ export function createDrillMode(drill, opts = {}) {
     if (session && r.shot) {
       session.record(r.shot, { success: res.success, points: res.points, landing: info.landing, rallyLength: 1, notes: res.notes });
     }
-    if (outcome) emit(world, 'rally:outcome', { winner: outcome.winner, reason: outcome.reason, label: outcome.label, pos: outcome.pos });
+    if (outcome && !outcome.synthetic) emit(world, 'rally:outcome', { winner: outcome.winner, reason: outcome.reason, label: outcome.label, pos: outcome.pos, rallyLength: outcome.rallyLength, lastBy: r.shot ? 'player' : null });
     emit(world, 'shot:result', {
       shotId: r.shot ? r.shot.id : null, landing: info.landing, inTarget: !!res.zone && res.success, points: res.points,
       notes: res.notes, success: res.success, zone: res.zone, reason: info.reason, legal: info.legal,
     });
     emit(world, 'drill:rep', { index: r.index, total: reps, points: res.points, totalPoints: st.points, streak: st.streak });
+    if (opts.quiet) return;
     if (outcome && (outcome.reason === 'por-tres' || outcome.reason === 'por-cuatro')) setBanner(world, outcome.label, 'great');
     else if (res.points > 0) setBanner(world, `+${res.points}`, res.success ? 'good' : 'info');
     else if (outcome && outcome.winner === 1) setBanner(world, outcome.label, 'bad');
@@ -369,6 +424,17 @@ export function createDrillMode(drill, opts = {}) {
     get state() { return st; },
     get referee() { return referee; },
     get tactics() { return tactics; },
+    get machine() { return machine; },
+    get rep() { return rep; },
+    /** Stops feeding (arcade timer): the rep in play is still judged. */
+    stopFeeding() {
+      if (machine) machine.stop();
+    },
+    /** Every launched ball has been judged (nothing left in play for scoring). */
+    get settled() {
+      const launchedCount = isServeDrill() ? launched : machine ? machine.state.fed : 0;
+      return !rep && st.opened >= launchedCount;
+    },
   };
 }
 
@@ -412,6 +478,7 @@ function topTips(results) {
  * opts: { level = 'club', rng?, session?, rallies = Infinity (finish after this many) }
  */
 export function createRallyMode({ level = 'club', rng = createRng(0x7a11), session = null, rallies = Infinity } = {}) {
+  const shotLog = createRallyShotLog(session);
   let coach = null;
   let referee = null;
   let nextFeedAt = Infinity;
@@ -454,6 +521,7 @@ export function createRallyMode({ level = 'club', rng = createRng(0x7a11), sessi
   }
 
   function onBus(type, p, world) {
+    shotLog.onBus(type, p);
     if (type === 'judge:launch' && p.by === 'coach') {
       referee.reset({ serving: null, feedTeam: 1 });
       st.current = 0;
@@ -462,6 +530,7 @@ export function createRallyMode({ level = 'club', rng = createRng(0x7a11), sessi
     } else if (type === 'judge:hit') {
       st.current = referee.state.hits;
       lastActivity = world.time;
+      st.lastBy = p.shot ? p.shot.by : p.team === 0 ? 'player' : 'coach';
     } else if (type === 'ball:hit' && p.shot.by === 'player') {
       st.playerHits++;
       st.lastShot = p.shot;
@@ -473,6 +542,7 @@ export function createRallyMode({ level = 'club', rng = createRng(0x7a11), sessi
 
   function onOutcome(world, o) {
     const len = o.rallyLength;
+    shotLog.onOutcome(o);
     tactics.setBase(world, RALLY_HOME, { snap: false }); // walk back for the next feed
     st.rallies++;
     st.best = Math.max(st.best, len);
@@ -482,7 +552,8 @@ export function createRallyMode({ level = 'club', rng = createRng(0x7a11), sessi
     if (session) session.rallyEnded(len);
     st.banner = { text: `${o.label} · rally ${len}`, kind: o.winner === 0 ? 'good' : 'bad' };
     st.bannerUntil = world.time + BANNER_S;
-    emit(world, 'rally:outcome', { winner: o.winner, reason: o.reason, label: o.label, pos: o.pos, rallyLength: len, duration: world.time - rallyStartT });
+    emit(world, 'rally:outcome', { winner: o.winner, reason: o.reason, label: o.label, pos: o.pos, rallyLength: len, duration: world.time - rallyStartT, lastBy: st.lastBy || null });
+    st.lastBy = null;
     if (st.rallies >= rallies) st.finished = true;
     else nextFeedAt = world.time + 2.5;
   }
@@ -525,22 +596,38 @@ export function createRallyMode({ level = 'club', rng = createRng(0x7a11), sessi
  * serves with the referee, server rotation A, C, B, D.
  * opts: { level = 'club', games = 6 (games per set; one set), rng?, session?, goldenPoint = true,
  *         autoPlayer = false (the human slot is played by the AI brain: tests, attract mode),
- *         firstServer = { team: 1, player: 0 } }
+ *         firstServer = { team: 1, player: 0 },
+ *         opponents?: [{ name, short, personality, handed, kit }] x2 (career pairs; default neutral rivals),
+ *         partner?: { name, short, personality, handed, kit } (default Lucía, all-round),
+ *         teamNames?: [[name, small], [name, small]] for the scoreboard,
+ *         resume?: { points: [winner 0|1, ...] } replays a saved match point by point,
+ *         callouts = true: the partner's calls (game/callouts.js), title?, subtitle? }
  */
+export const DEFAULT_PARTNER_INFO = Object.freeze({ name: 'Lucía Navarro', short: 'Lucía', personality: 'all-rounder', handed: 'right', kit: null });
+
 export function createMatchMode({
   level = 'club', games = 6, rng = createRng(0x3a7c), session = null, goldenPoint = true, autoPlayer = false,
-  firstServer = { team: 1, player: 0 },
+  firstServer = { team: 1, player: 0 }, opponents = null, partner: partnerInfo = null, teamNames = null, resume = null,
+  callouts: wantCallouts = true, title = 'Match', subtitle = null, skill = null, partnerSkill = null,
 } = {}) {
+  // Career (round 5): a continuous opponent skill 0..2 (game/career.js adaptive difficulty) and the
+  // partner's (at least club level, so a career partner is a help, not a liability).
+  const oppSkill = Number.isFinite(skill) ? skill : null;
+  const mateSkill = Number.isFinite(partnerSkill) ? partnerSkill : oppSkill;
   const match = createMatch({ gamesPerSet: games, setsToWin: 1, goldenPoint, tiebreakAt: games, firstServer });
+  const shotLog = createRallyShotLog(session);
   let referee = null;
   let partner = null, oppA = null, oppB = null, auto = null;
   let nextPointAt = Infinity;
   let serveAt = Infinity;
   let dropRetryAt = Infinity;
   let pointStartT = 0;
+  let callouts = null;
+  const pInfo = partnerInfo || DEFAULT_PARTNER_INFO;
+  const names = teamNames || [['You', 'Nosotros'], ['Rivals', 'Rivales']];
   const st = {
     points: [], banner: null, bannerUntil: 0, lastShot: null, finished: false, rally: 0, pointLive: false, faults: 0, serving: null,
-    misses: {}, playerHits: 0,
+    misses: {}, playerHits: 0, lastHit: null, resumed: 0, gameLosses: 0, cleanGames: 0,
   };
   const tactics = createTacticalHome({ netGame: true });
 
@@ -553,9 +640,24 @@ export function createMatchMode({
 
   function start(world) {
     const pl = world.player;
-    partner = createCoach({ level, rng: createRng(seed()), side: 'near', team: 0, by: 'ai', name: 'B', home: { x: -2.4, z: 7.2 } });
-    oppA = createCoach({ level, rng: createRng(seed()), side: 'far', team: 1, by: 'ai', name: 'C', home: { x: -2.4, z: -7.2 } });
-    oppB = createCoach({ level, rng: createRng(seed()), side: 'far', team: 1, by: 'ai', name: 'D', home: { x: 2.4, z: -7.2 } });
+    const oi = (k) => (opponents && opponents[k]) || {};
+    partner = createCoach({
+      level, skill: mateSkill, rng: createRng(seed()), side: 'near', team: 0, by: 'ai', name: 'B', home: { x: -2.4, z: 7.2 },
+      personality: pInfo.personality, handed: pInfo.handed || 'right', kit: pInfo.kit || null, displayName: pInfo.short || pInfo.name,
+    });
+    oppA = createCoach({
+      level, skill: oppSkill, rng: createRng(seed()), side: 'far', team: 1, by: 'ai', name: 'C', home: { x: -2.4, z: -7.2 },
+      personality: oi(0).personality, handed: oi(0).handed || 'right', kit: oi(0).kit || null, displayName: oi(0).short || oi(0).name || null,
+    });
+    oppB = createCoach({
+      level, skill: oppSkill, rng: createRng(seed()), side: 'far', team: 1, by: 'ai', name: 'D', home: { x: 2.4, z: -7.2 },
+      personality: oi(1).personality, handed: oi(1).handed || 'right', kit: oi(1).kit || null, displayName: oi(1).short || oi(1).name || null,
+    });
+    if (wantCallouts) {
+      const talk = (PERSONALITIES[pInfo.personality] || PERSONALITIES['all-rounder']).mods.talk ?? 0.6;
+      // Own rng (the match rng stream that seeds the players stays unchanged).
+      callouts = createCallouts({ partner, who: pInfo.short || pInfo.name || 'Partner', talk, rng: createRng(0xca11 + games * 131 + level.length) });
+    }
     // Responsibilities and targets.
     patchCoach(partner, coversVs(partner.state.pos, pl.pos), () => far());
     patchCoach(oppA, coversVs(oppA.state.pos, oppB.state.pos), (w) => near(w));
@@ -568,10 +670,25 @@ export function createMatchMode({
     }
     world.coach = null;
     world.machine = null;
+    // Resume a saved match: the point winners replayed into the score (server rotation included).
+    if (resume && Array.isArray(resume.points)) {
+      for (const w of resume.points) {
+        if ((w !== 0 && w !== 1) || match.isOver) continue;
+        match.pointWonBy(w);
+        st.points.push({ winner: w, reason: 'resumed', rally: 0, server: null, t: world.time });
+        st.resumed++;
+      }
+      // A saved match that had already been won (quit before its results): it ends at once.
+      if (match.isOver) st.endOnStart = true;
+    }
     referee = createReferee({ serving: match.server(), onOutcome: (o) => onOutcome(world, o) });
     world.referee = referee;
     nextPointAt = world.time + 1.5;
-    emit(world, 'coach:cue', { text: `Match vs ${level} opponents. Golden point at 40-all.`, es: `Partido contra rivales ${level}. Punto de oro en 40 iguales.`, priority: 2 });
+    const vs = opponents ? names[1][1] || names[1][0] : `${level} opponents`;
+    emit(world, 'coach:cue', {
+      text: st.resumed ? `Match resumed vs ${vs}.` : `Match vs ${vs}. Golden point at 40-all.`,
+      es: st.resumed ? `Partido reanudado contra ${vs}.` : `Partido contra ${vs}. Punto de oro en 40 iguales.`, priority: 2,
+    });
   }
 
   // createCoach takes covers/opponents at construction; rebuild with closures that see live positions.
@@ -632,6 +749,7 @@ export function createMatchMode({
     referee.reset({ serving: { team: sv.team, box: sv.box } });
     placeTeams(world, sv);
     scheduleServe(world, 1.8);
+    if (callouts) callouts.beforePoint(world, match.display(), sv);
   }
 
   function scheduleServe(world, delay) {
@@ -651,6 +769,11 @@ export function createMatchMode({
   }
 
   function update(world, dt) {
+    if (st.endOnStart) {
+      st.endOnStart = false;
+      st.finished = true;
+      emit(world, 'match:end', { summary: summary() });
+    }
     if (st.finished) return;
     if (!auto) tactics.update(world, dt);
     if (world.time >= nextPointAt) {
@@ -663,6 +786,7 @@ export function createMatchMode({
     }
     if (referee && referee.state.awaitingServe && world.time >= dropRetryAt && world.flight.by === 'drop') dropForHuman(world);
     if (st.banner && world.time > st.bannerUntil) st.banner = null;
+    if (callouts && st.pointLive) callouts.update(world);
     // Failsafe: replay a point that has produced no ruling for a long time.
     if (st.pointLive && world.time - pointStartT > 90) {
       emit(world, 'rally:outcome', { winner: null, reason: 'let', label: OUTCOME_LABELS.let, pos: null, detail: 'stalled' });
@@ -674,9 +798,11 @@ export function createMatchMode({
   }
 
   function onBus(type, p, world) {
+    shotLog.onBus(type, p);
     if (type === 'judge:hit') {
       st.rally = referee.state.hits;
       if (p.team === 0 || p.team === 1) dropRetryAt = Infinity;
+      st.lastHit = { by: p.shot ? p.shot.by : null, team: p.team, t: p.t };
     } else if (type === 'ball:hit' && p.shot.by === 'player') {
       st.lastShot = p.shot;
       st.playerHits++;
@@ -687,6 +813,7 @@ export function createMatchMode({
   }
 
   function onOutcome(world, o) {
+    shotLog.onOutcome(o);
     if (!o.pointOver) {
       // First fault or let: same server again.
       st.faults = o.faults;
@@ -698,10 +825,27 @@ export function createMatchMode({
     }
     st.pointLive = false;
     let res = null;
+    const before = match.display();
     if (o.winner === 0 || o.winner === 1) res = match.pointWonBy(o.winner);
-    st.points.push({ winner: o.winner, reason: o.reason, rally: o.rallyLength, server: st.serving, t: world.time });
+    st.points.push({ winner: o.winner, reason: o.reason, rally: o.rallyLength, server: st.serving, t: world.time, lastBy: st.lastHit ? st.lastHit.by : null });
     if (session) session.rallyEnded(o.rallyLength);
-    emit(world, 'rally:outcome', { winner: o.winner, reason: o.reason, label: o.label, pos: o.pos, score: match.display() });
+    // A game won to love (clean sheet): the losing side had no points when the game ended.
+    let clean = false;
+    if (res && res.gameWon && !before.flags.tiebreak) {
+      const loserPts = before.points[1 - o.winner];
+      clean = loserPts === '0' || loserPts === '';
+      if (clean && o.winner === 0) st.cleanGames++;
+    }
+    const lastHit = st.lastHit;
+    st.lastHit = null;
+    emit(world, 'rally:outcome', {
+      winner: o.winner, reason: o.reason, label: o.label, pos: o.pos, score: match.display(), rallyLength: o.rallyLength,
+      lastBy: lastHit ? lastHit.by : null, lastTeam: lastHit ? lastHit.team : null, gameWon: !!(res && res.gameWon), cleanSheet: clean,
+      golden: !!(before.flags.goldenPoint && before.points[0] === '40' && before.points[1] === '40'),
+    });
+    emit(world, 'match:point', { points: st.points.filter((q) => q.winner === 0 || q.winner === 1).map((q) => q.winner), score: match.display() });
+    markMoods(world, o.winner);
+    if (callouts) callouts.onPoint(world, o, lastHit, { gameWon: !!(res && res.gameWon && o.winner === 0) });
     const text = res && res.matchWon ? (o.winner === 0 ? 'Match won!' : 'Match lost') : res && res.gameWon ? `Game ${o.winner === 0 ? 'won' : 'lost'}` : o.label;
     st.banner = { text, kind: o.winner === 0 ? 'good' : 'bad' };
     st.bannerUntil = world.time + BANNER_S;
@@ -711,9 +855,22 @@ export function createMatchMode({
     } else nextPointAt = world.time + 2.6;
   }
 
+  /** Actors' reaction to the point (renderer hint: celebrate / dejected), { kind, at }. */
+  function markMoods(world, winner) {
+    if (winner !== 0 && winner !== 1) return;
+    for (const a of [partner, oppA, oppB, auto]) {
+      if (!a) continue;
+      a.state.mood = { kind: a.team === winner ? 'celebrate' : 'dejected', at: world.time };
+    }
+  }
+
   function summary() {
     const d = match.display();
-    return { mode: 'match', level, games, winner: match.winner, score: d, points: st.points.slice(), playerHits: st.playerHits, misses: { ...st.misses }, session: session ? session.summary() : null };
+    return {
+      mode: 'match', level, games, winner: match.winner, score: d, points: st.points.slice(), playerHits: st.playerHits, misses: { ...st.misses },
+      session: session ? session.summary() : null, teamNames: names, cleanGames: st.cleanGames,
+      bestRally: st.points.reduce((m, q) => Math.max(m, q.rally || 0), 0),
+    };
   }
 
   return {
@@ -723,15 +880,15 @@ export function createMatchMode({
     onBus,
     hud: (world) => ({
       ...(world ? timingHud(world) : {}),
-      title: 'Match',
-      subtitle: `vs ${level}`,
+      title,
+      subtitle: subtitle || `vs ${level}`,
       repIndex: st.points.length,
       repTotal: null,
       points: null,
       streak: null,
       rally: st.rally,
       timer: null,
-      score: match.display(),
+      score: { ...match.display(), names },
       lastShot: lastShotHud(st.lastShot),
       banner: st.banner,
       prompt: st.serving && st.serving.team === 0 && st.serving.player === 0 && referee && referee.state.awaitingServe ? 'Your serve: let it bounce, hit at waist height' : null,
@@ -741,6 +898,8 @@ export function createMatchMode({
     match,
     get state() { return st; },
     get actors() { return { partner, oppA, oppB, auto }; },
+    get callouts() { return callouts; },
+    teamNames: names,
     get tactics() { return tactics; },
   };
 }

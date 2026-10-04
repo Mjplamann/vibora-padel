@@ -70,6 +70,12 @@ const ROOM_ACCEL = 9; // m/s^2
  */
 export const ROOM_ENVELOPE = Object.freeze({ front: 0.7, back: 0.6, side: 1.0 });
 /**
+ * Close mode (round 4): the play area of a player calibrated ~1.7 m from the camera with only the
+ * upper body in view (head and shoulders stay in the picture between ~1.3 and 2.2 m, about
+ * ±0.55 m sideways at 1.35 m).
+ */
+export const CLOSE_ENVELOPE = Object.freeze({ front: 0.35, back: 0.45, side: 0.55 });
+/**
  * A contact is playable when the stance the play area allows is within this of the ideal one
  * (court m): sideways the arm absorbs it; in depth it would turn a drive into a late contact.
  */
@@ -169,10 +175,13 @@ export function solveSwing({ C, vin, spinIn, vDes, shoulder, faceSign = 1, brush
 }
 
 /**
- * @param {{handed?: 'right'|'left', skill?: number, rng?: Function, height?: number, room0?: {x,d}}} o
+ * @param {{handed?: 'right'|'left', skill?: number, rng?: Function, height?: number, room0?: {x,d}, envelope?: {front, back, side}}} o
+ *   room0: the calibrated spot (2.6 m: full body; ~1.7 m: close mode with CLOSE_ENVELOPE)
  * @returns Autopilot = { update(world, simTime) -> SyntheticBody, state, reset() }
  */
-export function createAutopilot({ handed = 'right', skill = 0.9, rng = createRng(0xa7a7), height = PLAYER.defaultHeight, room0 = { x: 0, d: 2.6 } } = {}) {
+export function createAutopilot({
+  handed = 'right', skill = 0.9, rng = createRng(0xa7a7), height = PLAYER.defaultHeight, room0 = { x: 0, d: 2.6 }, envelope = ROOM_ENVELOPE,
+} = {}) {
   const dom = handed === 'left' ? -1 : 1;
   const domSide = handed === 'left' ? 'L' : 'R';
   const offSide = handed === 'left' ? 'R' : 'L';
@@ -576,7 +585,12 @@ export function createAutopilot({ handed = 'right', skill = 0.9, rng = createRng
   function locoOf(world, forPlan = false) {
     const pl = world.player;
     const loco = world.human && world.human.locomotion;
-    const cfg = loco ? loco.config : {
+    // The gains the game applies (a close-mode calibration boosts them: locomotion.setBoost).
+    const lc = loco ? loco.config : null;
+    const cfg = lc ? {
+      gainLateral: lc.gainLateral * (lc.boost ? lc.boost.lateral : 1), gainDepth: lc.gainDepth * (lc.boost ? lc.boost.depth : 1),
+      deadzone: lc.deadzone, knee: lc.knee,
+    } : {
       gainLateral: world.settings.gainLateral ?? TRACKING.gainLateral,
       gainDepth: world.settings.gainDepth ?? TRACKING.gainDepth,
       deadzone: TRACKING.deadzone, knee: TRACKING.deadzone,
@@ -621,7 +635,7 @@ export function createAutopilot({ handed = 'right', skill = 0.9, rng = createRng
       rx = P.x - (dx / dist) * pull;
       rz = P.z - (dz / dist) * pull;
     }
-    const E = ROOM_ENVELOPE;
+    const E = envelope;
     return {
       x: room0.x + clamp(softDeadzoneInverse((rx - home.x) / cfg.gainLateral, cfg.deadzone, cfg.knee), -E.side, E.side),
       d: room0.d + clamp(softDeadzoneInverse((rz - home.z) / cfg.gainDepth, cfg.deadzone, cfg.knee), -E.front, E.back),
@@ -819,6 +833,10 @@ export function createAutopilot({ handed = 'right', skill = 0.9, rng = createRng
     },
     get plan() {
       return plan;
+    },
+    /** The racket the virtual player really holds (court, last update) and its capture time: ground truth for tests. */
+    get racketTruth() {
+      return cur.valid ? { t: lastT, grip: cur.grip.clone(), axis: cur.axis.clone(), normal: cur.normal.clone() } : null;
     },
     get state() {
       return { ...st, room: { ...room } };

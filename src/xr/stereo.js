@@ -15,8 +15,7 @@ import * as THREE from 'three';
 import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
 import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
 import { ShaderPass } from 'three/addons/postprocessing/ShaderPass.js';
-import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
-import { FINITE_GUARD_SHADER } from '../render/scene.js';
+import { FINITE_GUARD_SHADER, GradedOutputPass, applyGradeUniforms } from '../render/scene.js';
 import { sbsLayout, eyeOffsets, hudPlacement, BEAST } from './display.js';
 import { hudLines } from './hudText.js';
 
@@ -164,6 +163,8 @@ export function createStereoRenderer({ ipd = BEAST.ipdMm / 1000, layout = 'auto'
   const stats = { frames: 0, frameMs: 0, drawCalls: 0, layout: null, eyeWidth: 0, eyeHeight: 0, post: false };
 
   let composer = null, renderPass = null, target = null, compKey = '';
+  // The venue's colour grade (render/scene.js GradedOutputPass, scene.userData.grade / gradeVersion).
+  let outputPass = null, gradeKey = null, gradeAspect = 0;
   function ensureComposer(renderer, wPx, hPx, samples) {
     const k = `${wPx}x${hPx}x${samples}`;
     if (composer && k === compKey) return composer;
@@ -175,7 +176,9 @@ export function createStereoRenderer({ ipd = BEAST.ipdMm / 1000, layout = 'auto'
     renderPass = new RenderPass(new THREE.Scene(), eyes[0]);
     composer.addPass(renderPass);
     composer.addPass(new ShaderPass(FINITE_GUARD_SHADER));
-    composer.addPass(new OutputPass());
+    outputPass = new GradedOutputPass();
+    composer.addPass(outputPass);
+    gradeKey = null;
     compKey = k;
     return composer;
   }
@@ -185,6 +188,7 @@ export function createStereoRenderer({ ipd = BEAST.ipdMm / 1000, layout = 'auto'
     composer.renderTarget2.dispose();
     target = null;
     composer = null;
+    outputPass = null;
     compKey = '';
   }
 
@@ -215,6 +219,12 @@ export function createStereoRenderer({ ipd = BEAST.ipdMm / 1000, layout = 'auto'
       const samples = appComposer && appComposer.renderTarget1 ? appComposer.renderTarget1.samples || 0 : 4;
       ensureComposer(renderer, Math.max(1, Math.round(L.left.width * pr)), Math.max(1, Math.round(L.left.height * pr)), samples);
       renderPass.scene = scene;
+      const gv = scene.userData.gradeVersion ?? 0;
+      if (outputPass && (gv !== gradeKey || L.eyeAspect !== gradeAspect)) {
+        gradeKey = gv;
+        gradeAspect = L.eyeAspect;
+        applyGradeUniforms(outputPass.uniforms, scene.userData.grade, L.eyeAspect);
+      }
     }
     stats.eyeWidth = Math.round(L.left.width * pr);
     stats.eyeHeight = Math.round(L.left.height * pr);

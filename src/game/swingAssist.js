@@ -31,13 +31,14 @@ import { Vec3, v3 } from '../util/vec3.js';
 import { clamp, smoothstep, lerp, angleDiff, createRng } from '../util/math.js';
 import { BALL, RACKET, PLAYER, ASSIST, DEFAULT_ASSIST, COURT, netHeightAt } from '../config.js';
 import { interceptCandidates, solveShot } from '../physics/predict.js';
-import { spinFromComponents } from '../physics/racket.js';
+import { spinFromComponents, racketProfile } from '../physics/racket.js';
 import { playableCandidates, pickGlassContact, stanceBounds } from './intercept.js';
 import { pickIntercept, contactFamily, idealStance } from './human.js';
 import {
   applyPlayerHit, applySpeculativeHit, revertSpeculative, emit, emitView, predictFlight, currentStroke,
 } from './world.js';
 import { blendRacketPose, createRacketPose } from '../tracking/racketTrack.js';
+import { LOB_TRAJECTORY } from '../tracking/swing.js';
 
 const REF_H = PLAYER.defaultHeight;
 /** Poses further apart than this (s) are a tracking gap (racketTrack MAX_GAP). */
@@ -69,6 +70,8 @@ export const TIMING = Object.freeze({
   typicalSwingAz: 0.35,
   /** Swing path angle (deg) that gives full topspin (rising) or slice (falling). */
   pathFull: 35,
+  /** Degrees a full-speed swing adds to the path angle that makes a drill's drive a lob (round 4). */
+  lobPathPace: 20,
   /** Landing scatter σ (m) at quality 1 -> 0. */
   scatterX: Object.freeze([0.2, 1.5]),
   scatterZ: Object.freeze([0.25, 1.3]),
@@ -80,6 +83,11 @@ export const TIMING = Object.freeze({
   /** A swing must carry the racket at least this far (m) in the 0.3 s into its peak (punches: minTravelShort). */
   minTravel: 0.32,
   minTravelShort: 0.2,
+  /**
+   * Backswing gate of groundstrokes and volleys (isBackswing, fractions of the speed): down steeper
+   * than `drop`, or sideways to the hitting side over `side`, while going forward less than `fwd`.
+   */
+  backswing: Object.freeze({ drop: 0.6, side: 0.6, fwd: 0.5 }),
   /** Swing threshold >= noiseFactor × the median jitter speed of the tracked racket (capped at 1.6 × minSpeed). */
   noiseFactor: 2.4,
   /**
@@ -366,10 +374,28 @@ export function autoTarget(world, own, dt, cfg = timingConfig(world)) {
 // ---------------------------------------------------------------------------
 // Swings (body-relative sweet-spot speed of the tracked racket)
 
+const OVERHEAD_FAMILIES = new Set(['oh', 'sm']);
+const BACKHAND_FAMILIES = new Set(['bh', 'vbh']);
+
+/**
+ * Body-relative racket velocity v (court axes, |v| = raw) that takes a groundstroke or volley back
+ * rather than swinging it (TIMING.backswing): steeply down without going forward (the drop into a
+ * low take-back), or sideways toward the hitting side without going forward. Overheads are never
+ * gated: they rise into the contact and smash steeply down through it.
+ */
+export function isBackswing(v, raw, { family, dom = 1 }) {
+  if (OVERHEAD_FAMILIES.has(family)) return false;
+  const B = TIMING.backswing;
+  const fwd = -v.z / raw, up = v.y / raw;
+  if (up < -B.drop && fwd < B.fwd) return true;
+  const toSide = (v.x * dom * (BACKHAND_FAMILIES.has(family) ? -1 : 1)) / raw;
+  return toSide > B.side && fwd < B.fwd;
+}
+
 /**
  * Turns settled racket-track poses into swing events. racketTrack is the court-frame track of the
  * human controller; posAt(t) its court position history (subtracted: own movement is no swing).
- * @returns { process(minSpeed) -> SwingEvent[], prepared(c0) -> boolean, maxSpeed(c0, c1), lastT, recent }
+ * @returns { process(minSpeed, travel, gate) -> SwingEvent[], prepared(c0) -> boolean, maxSpeed(c0, c1), lastT, recent }
  * SwingEvent = { tStart, cPeak, peakSpeed, vRel: Vec3 (court), pathDeg, az (court azimuth, rad), at }
  */
 export function createSwingWatch({ racketTrack, posAt }) {
@@ -462,7 +488,13 @@ export function createSwingWatch({ racketTrack, posAt }) {
   }
 
   let minTravel = TIMING.minTravel;
-  function process(minSpeed, travel = TIMING.minTravel) {
+  /**
+   * gate (optional): { family, dom } of the planned stroke. A backswing is no swing: the racket
+   * dropping into a low take-back, taken back to the hitting side, or (overheads) up behind the
+   * head, without moving toward the net (round 4: in rallies off the glass these read as swings
+   * 0.3-0.7 s early and the real stroke after them was dismissed as the recovery).
+   */
+  function process(minSpeed, travel = TIMING.minTravel, gate = null) {
     minTravel = travel;
     const events = [];
     const settled = racketTrack.settledTime();
@@ -480,7 +512,8 @@ export function createSwingWatch({ racketTrack, posAt }) {
       if (!relPos(i, rp)) rp.set(0, 0, 0);
       const raw = vr.length();
       const fwd = -vr.z;
-      const s = fwd >= -0.1 * raw ? raw : 0; // forward (or across): a backswing never counts
+      let s = fwd >= -0.1 * raw ? raw : 0; // forward (or across): a backswing never counts
+      if (s > 0 && gate && raw > 1e-6 && isBackswing(vr, raw, gate)) s = 0;
       recent.push({ t: p.t, s, raw, back: Math.max(0, vr.z), up: Math.max(0, vr.y), x: rp.x, y: rp.y, z: rp.z });
       while (recent.length && recent[0].t < p.t - 2) recent.shift();
       // Tracking noise sets the floor: a swing must stand well above the jitter of a still racket.
@@ -504,7 +537,10 @@ export function createSwingWatch({ racketTrack, posAt }) {
           ev.threshold = th;
           // A real swing carries the racket a long way into its peak; jitter does not.
           if (travel >= minTravel) events.push(ev);
-          armed = s < 0.7 * th; // the follow-through is no new swing
+          // The follow-through is no new swing; a candidate too short to be one (a dip in a swing's
+          // acceleration, jitter) leaves the watch armed, or the rest of that swing went unseen
+          // (round 4: a no-swing miss at 8.6 m/s in a rally).
+          armed = travel < minTravel || s < 0.7 * th;
         }
       }
       prev = { t: p.t, s };
@@ -658,7 +694,11 @@ export function timingAnalysis(world, ball, contact, t, extra, ctx, isServe) {
   const hint = (world.mode && world.mode.apHints) || null;
   const intent = hint && hint.shot ? hint.shot : null;
   const e = Number.isFinite(tm.e) ? tm.e : 0;
-  const win = e < 0 ? tm.early || 0.2 : tm.late || 0.22;
+  // The equipped racket (game/progression.js RACKETS timing: pace, scatter, window, spin; clamped by
+  // physics/racket.js makeRacketProfile): a forgiving racket widens the timing window the quality is
+  // judged in, a power racket adds pace and scatter, a rough face adds spin.
+  const rt = racketProfile().timing;
+  const win = (e < 0 ? tm.early || 0.2 : tm.late || 0.22) * rt.window;
   const eN = clamp(e / Math.max(0.05, win), -1, 1);
   // Volleys are punches: a webcam sees 3-8 m/s where a drive shows 8-14.
   const ref = volley && !overhead ? TIMING.speedRefVolley : TIMING.speedRef;
@@ -667,7 +707,10 @@ export function timingAnalysis(world, ball, contact, t, extra, ctx, isServe) {
 
   // Quality: on time and well spaced.
   const qT = 1 - 0.55 * Math.abs(eN) ** 1.5;
-  const qS = Number.isFinite(tm.dist) ? 1 - 0.45 * Math.min(1.4, tm.dist / 0.75) ** 2 : 1;
+  // Spacing counts more on Club than on Rookie (QA r5: half-metre racket errors still hit cleanly,
+  // so footwork was never trained): the racket's miss distance lowers pace and accuracy.
+  const kS = world.settings.assist === 'rookie' ? 0.45 : 0.75;
+  const qS = Number.isFinite(tm.dist) ? 1 - kS * Math.min(1.4, tm.dist / 0.75) ** 2 : 1;
   const q = clamp(qT * qS, 0.25, 1);
 
   // What the swing plays: the drill's stroke (ap.shot) unless the swing clearly says otherwise.
@@ -680,7 +723,9 @@ export function timingAnalysis(world, ball, contact, t, extra, ctx, isServe) {
     else type = 'bandeja';
   } else {
     const lobDrill = intent === 'lob' && !(u > 0.8 && path < 5); // a fast flat swing is still a drive
-    const lobPath = intent === 'chiquita' ? 70 : intent === 'glass' ? 62 : volley ? 55 : intent ? 50 : 40;
+    // A steep path lifts a lob when the swing is slow; a fast steep swing is a brushed topspin drive
+    // (round 4: off the back glass the low-to-high brush read as a lob 40% of the time).
+    const lobPath = (intent === 'chiquita' ? 70 : intent === 'glass' ? 62 : volley ? 55 : intent ? 50 : 40) + (intent ? TIMING.lobPathPace * u : 0);
     if (lobDrill || (intent !== 'lob' && path > lobPath)) type = 'lob';
     else if (!volley && intent === 'chiquita' && u < 0.75) type = 'chiquita';
     else if (volley) type = 'volley';
@@ -689,7 +734,7 @@ export function timingAnalysis(world, ball, contact, t, extra, ctx, isServe) {
 
   // Pace.
   const pr = TIMING.pace[type];
-  const kmh = lerp(pr[0], pr[1], u ** 0.85) * (0.85 + 0.15 * q);
+  const kmh = lerp(pr[0], pr[1], u ** 0.85) * (0.8 + 0.2 * q) * rt.pace;
 
   // Spin (rpm) from the swing path.
   const f = clamp(path / TIMING.pathFull, -1, 1);
@@ -718,7 +763,9 @@ export function timingAnalysis(world, ball, contact, t, extra, ctx, isServe) {
   } else if (hint && hint.aim && !isServe) aim = { x: hint.aim.x, z: aim.z };
   const kind = type === 'smash' || type === 'bandeja' || type === 'vibora' ? 'overhead' : type;
   const spread = TIMING.spread[kind] ?? TIMING.spread.ground;
-  let tx = aim.x + dom * (back ? -1 : 1) * spread * eN;
+  // A control racket turns the same timing error into less sideways spread, a power racket into
+  // more (QA r5: the control stat barely moved the landings: direction comes from the timing).
+  let tx = aim.x + dom * (back ? -1 : 1) * spread * eN * rt.scatter;
   let tz = aim.z;
   const dist = Math.hypot(tx - C.x, tz - C.z);
   if (Number.isFinite(tm.az) && !isServe) {
@@ -729,8 +776,8 @@ export function timingAnalysis(world, ball, contact, t, extra, ctx, isServe) {
   }
   // The timing / swing aim stays inside the court; only a poor contact (scatter) can miss it.
   tx = clamp(tx, -4.6, 4.6);
-  tx += rng.normal(0, lerp(TIMING.scatterX[0], TIMING.scatterX[1], 1 - q));
-  tz += rng.normal(0, lerp(TIMING.scatterZ[0], TIMING.scatterZ[1], 1 - q));
+  tx += rng.normal(0, lerp(TIMING.scatterX[0], TIMING.scatterX[1], 1 - q) * rt.scatter);
+  tz += rng.normal(0, lerp(TIMING.scatterZ[0], TIMING.scatterZ[1], 1 - q) * rt.scatter);
   if (isServe) {
     const sx = serveBox === 'left' ? 1 : -1;
     tx = sx > 0 ? clamp(tx, 0.2, 5.3) : clamp(tx, -5.3, -0.2);
@@ -748,7 +795,7 @@ export function timingAnalysis(world, ball, contact, t, extra, ctx, isServe) {
   // Launch: the pace toward the target (a lob by its apex); fall back to a safe arc.
   const target = v3(tx, 0, tz);
   const dir = v3(tx - C.x, 0, tz - C.z);
-  const spin = spinFromComponents(dir, top, side);
+  const spin = spinFromComponents(dir, top * rt.spin, side * rt.spin);
   let res = null;
   if (type === 'lob') res = solveShot({ from: C, target, spin, apex: clamp(5.2 + 1.4 * u, 5.0, 7.0) });
   else if (type === 'chiquita') {
@@ -758,6 +805,20 @@ export function timingAnalysis(world, ball, contact, t, extra, ctx, isServe) {
     res = solveShot({ from: C, target, spin, speed: kmh / 3.6 });
     if (!res.ok || !res.clearsNet) {
       res = solveShot({ from: C, target, spin, apex: Math.max(C.y + 0.4, netHeightAt(tx) + 0.7 + 0.06 * dist) });
+    }
+    // A drive, glass return or volley flies like one: a slow pace over a long way (off the back
+    // glass, 15-18 m) solves into a high, steep arc that reads as a lob. Struck a little harder
+    // (up to DRIVE_FLIGHT.maxPace of the type's range) it stays a drive.
+    if (res && res.ok && lobLike(res)) {
+      const top = pr[1] * DRIVE_FLIGHT.maxPace * rt.pace;
+      for (let f = DRIVE_FLIGHT.step; kmh * f <= top + 1e-9 || f === DRIVE_FLIGHT.step; f *= DRIVE_FLIGHT.step) {
+        const r2 = solveShot({ from: C, target, spin, speed: Math.min(top, kmh * f) / 3.6 });
+        if (r2.ok && r2.clearsNet && !lobLike(r2)) {
+          res = r2;
+          break;
+        }
+        if (kmh * f >= top) break;
+      }
     }
   }
   const vOut = res && Number.isFinite(res.vel.x) && res.vel.lengthSq() > 1 ? res.vel.clone() : dir.clone().normalize().scale(kmh / 3.6).add(v3(0, 2, 0));
@@ -769,15 +830,21 @@ export function timingAnalysis(world, ball, contact, t, extra, ctx, isServe) {
   // The racket that would have played it (strike frame, magnetized display, stroke analysis).
   const shoulder = v3(pp.x + dom * 0.18 * k, PLAYER.shoulderHeightRatio * H, pp.z);
   const pose = contactPose(C, vIn, vOut, shoulder, { back, pathDeg: path });
+  // The predicted strike is drawn from the racket as it was shown (round 4, smooth swings): its
+  // sweet spot onto the ball, its face turned STAMP_TURN of the way to the striking face, so the
+  // strike frame does not pop the racket into a new orientation (display only: the ball's flight
+  // comes from the timing above).
+  if (tm.predicted && pl.renderRacket && pl.renderRacket.axis) stampFromShown(pose, pl.renderRacket, C);
   pose.t = t;
 
   const label = strokeLabel(type, back);
-  const timing = Math.abs(e) <= TIMING.green ? 'good' : e < 0 ? 'early' : 'late';
+  const timing = Math.abs(e) <= TIMING.green * rt.window ? 'good' : e < 0 ? 'early' : 'late';
   let spacing = 'good';
   if (tm.offU && Number.isFinite(tm.dist) && tm.dist > 0.25 && !overhead) {
     const outward = tm.offU.x * dom * (back ? -1 : 1);
     if (Math.abs(outward) > 0.2) spacing = outward > 0 ? 'stretched' : 'cramped';
   }
+  const spacingText = spacingNote(tm, dom, back, overhead);
   return {
     info: {
       hit: true, speedIn, speedOut: vOut.length(), racketSpeed: tm.speed, offCenter: (1 - q) * 0.1, eA: RACKET.apparentCOR,
@@ -792,8 +859,76 @@ export function timingAnalysis(world, ball, contact, t, extra, ctx, isServe) {
     timing: {
       e, early: tm.early, late: tm.late, speed: tm.speed, pathDeg: path, dist: Number.isFinite(tm.dist) ? tm.dist : null,
       quality: q, type, kmh, top, side, target: { x: tx, z: tz }, predicted: !!tm.predicted, tStar: tm.tStar, family: fam,
+      spacingText: spacingText ? spacingText.en : null, spacingTextEs: spacingText ? spacingText.es : null,
     },
   };
+}
+
+/**
+ * Spacing coaching on a hit (QA r5): how far the racket's path passed from the ball, in the
+ * player's terms ("Good — 35 cm low, bend your knees"), or null when it was within 20 cm.
+ * tm.offU: ball minus racket at the closest approach, in U (x the player's right, y up).
+ */
+export function spacingNote(tm, dom = 1, back = false, overhead = false) {
+  if (!tm || !tm.offU || !Number.isFinite(tm.dist) || tm.dist < 0.2) return null;
+  const o = tm.offU;
+  const cm = (v) => Math.round(Math.abs(v) * 100);
+  const outward = o.x * dom * (back ? -1 : 1); // + : the ball was further out than the racket
+  if (Math.abs(o.y) >= Math.abs(outward)) {
+    if (o.y < -0.18) return overhead
+      ? { en: `Good — racket ${cm(o.y)} cm above the ball, wait for it`, es: `Bien — pala ${cm(o.y)} cm por encima, espérala` }
+      : { en: `Good — ${cm(o.y)} cm high, bend your knees`, es: `Bien — ${cm(o.y)} cm alta, flexiona las rodillas` };
+    if (o.y > 0.18) return { en: `Good — ${cm(o.y)} cm low, meet it higher`, es: `Bien — ${cm(o.y)} cm baja, búscala más arriba` };
+  } else {
+    if (outward > 0.18) return { en: `Good — stretched ${cm(outward)} cm, step closer`, es: `Bien — estirado ${cm(outward)} cm, acércate` };
+    if (outward < -0.18) return { en: `Good — cramped ${cm(outward)} cm, give it room`, es: `Bien — encogido ${cm(outward)} cm, déjale sitio` };
+  }
+  return null;
+}
+
+/**
+ * Drive flights (round 4): the free-flight apex (m) and launch (deg) a ground / glass / volley shot
+ * stays under so the trajectory reading (tracking/swing.js relabelByTrajectory) keeps it a drive,
+ * the pace step (x) and the largest pace (x the type's range top) used to get there.
+ */
+export const DRIVE_FLIGHT = Object.freeze({
+  apex: LOB_TRAJECTORY.apex + LOB_TRAJECTORY.apexBand * 0.5,
+  launchDeg: LOB_TRAJECTORY.launchDeg + LOB_TRAJECTORY.launchBand * 0.5,
+  step: 1.06,
+  maxPace: 1.1,
+});
+
+/** A solved flight that would read as a lob (high apex, or slow and steep). */
+export function lobLike(res) {
+  const v = res.vel;
+  const h = Math.hypot(v.x, v.z);
+  const launch = (Math.atan2(v.y, h) * 180) / Math.PI;
+  return res.apex > DRIVE_FLIGHT.apex || (v.length() <= LOB_TRAJECTORY.maxSpeed && launch > DRIVE_FLIGHT.launchDeg);
+}
+
+/** Share of the way from the shown racket's orientation to the striking face on the strike frame. */
+export const STAMP_TURN = 0.35;
+const _stamp = createRacketPose();
+const _off = new Vec3();
+
+/** Rewrites a contact pose (in place) as the shown racket moved onto the ball (STAMP_TURN). */
+function stampFromShown(pose, shown, C) {
+  _off.subVectors(C, pose.sweet); // contact offset: ball centre minus sweet spot
+  const offLen = _off.length();
+  _stamp.sweet.copy(shown.sweet);
+  _stamp.grip.copy(shown.grip);
+  _stamp.axis.copy(shown.axis);
+  _stamp.normal.copy(shown.normal);
+  _stamp.vel.copy(pose.vel);
+  _stamp.angVel.copy(pose.angVel);
+  _stamp.t = pose.t;
+  blendRacketPose(_stamp, pose, STAMP_TURN, _stamp);
+  if (!(offLen > 1e-6) || !Number.isFinite(_stamp.axis.x) || !Number.isFinite(_stamp.normal.x)) return pose;
+  pose.axis.copy(_stamp.axis);
+  pose.normal.copy(_stamp.normal);
+  pose.sweet.copy(C).addScaled(_off, -1);
+  pose.grip.copy(pose.sweet).addScaled(pose.axis, -RACKET.sweetSpotY);
+  return pose;
 }
 
 function strokeLabel(type, back) {
@@ -823,6 +958,8 @@ export function missText(m) {
   const dirEs = m.step === 'left' ? 'a la izquierda' : m.step === 'right' ? 'a la derecha' : m.step === 'forward' ? 'adelante' : 'atrás';
   switch (m.reason) {
     case 'no-swing':
+      // A volley is a short punch: a slow one seen by the camera is "too soft", not "no swing" (QA r5).
+      if (m.speed > 0 && (m.family === 'vfh' || m.family === 'vbh')) return { text: 'Volley too soft — punch forward through the ball', es: 'Volea demasiado suave: empuja la pala hacia delante' };
       return m.speed > 0
         ? { text: `Swing too slow (${Math.round(m.speed)} m/s) — swing a bit faster`, es: 'Golpe demasiado lento: golpea un poco más rápido' }
         : { text: 'No swing detected — swing a bit faster', es: 'No se detectó el golpe: golpea un poco más rápido' };
@@ -894,8 +1031,10 @@ export function minSpeedFor(world, cfg, P) {
 /** Timing meter after a swing: { e, early, late, hit, at, label }. */
 function meterOf(world, cfg, e, hit) {
   const a = Math.abs(e);
-  const label = a <= TIMING.green ? 'On time' : `${e < 0 ? 'Early' : 'Late'} ${Math.round(a * 1000)} ms`;
-  return { e, early: cfg.early, late: cfg.late, hit, at: world.time, label };
+  // The equipped racket's timing tolerance widens / narrows the green "on time" band (QA r5).
+  const green = TIMING.green * racketProfile().timing.window;
+  const label = a <= green ? 'On time' : `${e < 0 ? 'Early' : 'Late'} ${Math.round(a * 1000)} ms`;
+  return { e, early: cfg.early, late: cfg.late, hit, at: world.time, label, green };
 }
 
 // ---------------------------------------------------------------------------
@@ -910,6 +1049,7 @@ function meterOf(world, cfg, e, hit) {
  */
 export function createTimingJudge({ racketTrack, posAt, prepTimeBefore = null }) {
   const watch = createSwingWatch({ racketTrack, posAt });
+  const swingGate = { family: null, dom: 1 };
   const tmpPose = createRacketPose();
   const pp0 = { x: 0, z: 0 };
 
@@ -1098,7 +1238,8 @@ export function createTimingJudge({ racketTrack, posAt, prepTimeBefore = null })
       // rulings it holds) waiting.
       if (c >= cEnd + TIMING.lateWait || world.time > P.tStar + cfg.late + 1.1) {
         const slow = watch.maxSpeed(P.tStar + lat - cfg.early - 0.2, P.tStar + lat + cfg.late);
-        decideMiss(world, cfg, P, { reason: 'no-swing', speed: slow >= 1.6 ? slow : 0 });
+        const volleyFam = P.family === 'vfh' || P.family === 'vbh';
+        decideMiss(world, cfg, P, { reason: 'no-swing', speed: slow >= (volleyFam ? 1.0 : 1.6) ? slow : 0 });
       }
     } else if (world.time > P.tStar + cfg.late + 0.9) {
       // No camera frames came through (out of frame, tracker stalled).
@@ -1125,7 +1266,14 @@ export function createTimingJudge({ racketTrack, posAt, prepTimeBefore = null })
     const cfg = timingConfig(world);
     const P = T.plan;
     const short = P && (P.family === 'vfh' || P.family === 'vbh' || P.serve || ((world.mode && world.mode.apHints) || {}).shot === 'chiquita');
-    const ev = watch.process(minSpeedFor(world, cfg, P), short ? TIMING.minTravelShort : TIMING.minTravel);
+    const handed = world.settings.handed || world.player.handed || 'right';
+    let gate = null;
+    if (P && P.family) {
+      gate = swingGate;
+      gate.family = P.family;
+      gate.dom = handed === 'left' ? -1 : 1;
+    }
+    const ev = watch.process(minSpeedFor(world, cfg, P), short ? TIMING.minTravelShort : TIMING.minTravel, gate);
     if (!cfg) return shots;
     for (const e of ev) judgeSwing(world, cfg, e, shots);
     closeWindow(world, cfg);
@@ -1181,11 +1329,12 @@ export function createTimingJudge({ racketTrack, posAt, prepTimeBefore = null })
       closeWindow(world, cfg);
       cues(world, cfg, P);
     }
-    // Magnetized display racket: on the ball at the strike, released into the follow-through.
+    // Magnetized display racket: on the ball at the strike, released into the follow-through (a
+    // display that continues the swing from the strike itself sets T.magnet.handled: human.js).
     if (T.magnet) {
       const age = world.time - T.magnet.t0;
       if (age > TIMING.magnetS || !pl.renderRacket) T.magnet = null;
-      else blendRacketPose(pl.renderRacket, T.magnet.pose, 1 - smoothstep(0, TIMING.magnetS, age), pl.renderRacket);
+      else if (!T.magnet.handled) blendRacketPose(pl.renderRacket, T.magnet.pose, 1 - smoothstep(0, TIMING.magnetS, age), pl.renderRacket);
     }
     slowmo(world, cfg, dt);
   }
@@ -1259,4 +1408,62 @@ export function reachRing(world) {
     tStar: P.tStar,
     pStar: P.pStar,
   };
+}
+
+/**
+ * Racket ghost at the planned contact (QA r5: "the player never sees the racket approach the ball";
+ * the real racket comes from beside the hip, outside a TV picture, until ~50 ms before contact).
+ * A faint racket face where the swing should meet the ball, shown from GHOST.lead s before t* to
+ * GHOST.after s after it, so the player sees where the racket is going. Pure; no allocation (out
+ * is reused). Returns null when there is no timing plan to show (Pro / physical, struck, decided).
+ * out: { grip, axis, normal, sweet: Vec3, alpha 0..1, green }.
+ */
+export const GHOST = Object.freeze({ lead: 0.4, full: 0.25, after: 0.08, alpha: 0.42 });
+const _gN = new Vec3();
+const _gRh = new Vec3();
+const _gSh = new Vec3();
+export function createGhostPose() {
+  return { grip: new Vec3(), axis: new Vec3(), normal: new Vec3(), sweet: new Vec3(), alpha: 0, green: false };
+}
+export function contactGhostPose(world, out) {
+  const T = world && world.timing;
+  const P = T && T.plan;
+  if (!P || !P.pStar || !P.vStar || P.closed || !timingConfig(world) || isDecided(T, P.key) || P.key !== flightKeyOf(world)) return null;
+  if (world.spec && world.ball && world.spec.ballId === world.ball.id) return null; // struck on screen
+  const now = world.time;
+  const dt = P.tStar - now;
+  if (dt > GHOST.lead || dt < -GHOST.after) return null;
+  const pl = world.player;
+  const handed = world.settings.handed || pl.handed || 'right';
+  const C = P.pStar;
+  const vIn = P.vStar;
+  const sp = Math.max(8, vIn.length());
+  // Outgoing direction: deep toward the far court, a little cross-court, rising (overheads level).
+  const oh = P.family === 'oh' || P.family === 'sm';
+  _gN.set(clamp(-C.x * 0.45, -3, 3) - C.x, 0, -7.5 - C.z);
+  const hl = Math.hypot(_gN.x, _gN.z) || 1;
+  _gN.set((_gN.x / hl) * sp * 1.2, oh ? -0.1 * sp : 0.14 * sp, (_gN.z / hl) * sp * 1.2);
+  _gN.sub(vIn);
+  if (_gN.lengthSq() < 1e-9) _gN.set(0, 0, -1);
+  _gN.normalize();
+  out.normal.copy(_gN);
+  out.sweet.copy(C).addScaled(_gN, -(R + RACKET.thickness / 2));
+  // The handle points away from the hitting shoulder (tracked, else from the eye).
+  const j = pl.bodyCourt && pl.bodyCourt.joints;
+  const backhand = P.family === 'bh' || P.family === 'vbh';
+  const sideR = handed === 'right' ? !backhand : backhand;
+  const S = j && (sideR ? j.shoulderR : j.shoulderL);
+  if (S && Number.isFinite(S.x)) _gSh.set(S.x, S.y, S.z);
+  else _gSh.set(pl.pos.x + (sideR ? 0.19 : -0.19), (pl.height || REF_H) * PLAYER.shoulderHeightRatio, pl.pos.z);
+  _gRh.subVectors(out.sweet, _gSh);
+  _gRh.addScaled(_gN, -_gRh.dot(_gN));
+  if (_gRh.lengthSq() < 1e-6) _gRh.set(sideR ? 1 : -1, 0, 0).addScaled(_gN, -_gN.x * (sideR ? 1 : -1));
+  _gRh.normalize();
+  out.axis.copy(_gRh);
+  out.grip.copy(out.sweet).addScaled(out.axis, -RACKET.sweetSpotY);
+  const up = dt > GHOST.full ? 1 - (dt - GHOST.full) / (GHOST.lead - GHOST.full) : 1;
+  const down = dt < 0 ? 1 + dt / GHOST.after : 1;
+  out.alpha = GHOST.alpha * clamp(Math.min(up, down), 0, 1);
+  out.green = Math.abs(dt) <= TIMING.green;
+  return out;
 }
