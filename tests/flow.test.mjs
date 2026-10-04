@@ -15,7 +15,7 @@ function runDrill(drillId, { seed = 3, maxSeconds = 200, settings = {}, apLatenc
   const w = g.world;
   const log = { launches: [], overLive: 0, results: [], hits: [] };
   let open = null; // the player's struck ball awaiting its ruling
-  w.bus.on('ball:hit', ({ shot }) => { if (shot.by === 'player') { open = shot.id; log.hits.push(w.time); } });
+  w.bus.on('ball:hit', ({ shot }) => { if (shot.by === 'player' && !shot.provisional) { open = shot.id; log.hits.push(w.time); } });
   w.bus.on('shot:result', (r) => { log.results.push({ t: w.time, ...r }); if (r.shotId === open) open = null; });
   w.bus.on('ball:launch', ({ by }) => {
     if (by !== 'machine' && by !== 'drop') return;

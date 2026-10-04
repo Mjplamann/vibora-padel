@@ -100,13 +100,16 @@ export const PLAYER = {
 };
 
 export const TRACKING = {
-  // Horizontal field-of-view presets for common Mac setups (degrees).
+  // Horizontal field-of-view presets for common Mac setups (degrees). captureOffsetMs:
+  // typical sensor exposure + transfer delay before the browser sees a frame, used to
+  // back-date the capture time when the browser has no metadata.captureTime (Safari):
+  // built-in FaceTime camera ~50 ms, Continuity Camera (Wi-Fi/USB relay) ~120 ms, UVC ~70 ms.
   cameraPresets: {
-    'macbook-builtin': { label: 'MacBook built-in camera', hfov: 68 },
-    'iphone-continuity': { label: 'iPhone (Continuity Camera)', hfov: 74 },
-    'iphone-ultrawide': { label: 'iPhone ultra-wide', hfov: 106 },
-    'usb-webcam': { label: 'USB webcam', hfov: 78 },
-    'usb-wide': { label: 'USB wide-angle webcam', hfov: 100 },
+    'macbook-builtin': { label: 'MacBook built-in camera', hfov: 68, captureOffsetMs: 50 },
+    'iphone-continuity': { label: 'iPhone (Continuity Camera)', hfov: 74, captureOffsetMs: 120 },
+    'iphone-ultrawide': { label: 'iPhone ultra-wide', hfov: 106, captureOffsetMs: 120 },
+    'usb-webcam': { label: 'USB webcam', hfov: 78, captureOffsetMs: 70 },
+    'usb-wide': { label: 'USB wide-angle webcam', hfov: 100, captureOffsetMs: 70 },
   },
   defaultCamera: 'macbook-builtin',
   model: 'full', // 'lite' | 'full' | 'heavy'

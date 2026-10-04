@@ -20,7 +20,7 @@ function runDrill(drillId, seed, maxSeconds = 90) {
   const gaze = createGaze();
   const frames = [];
   const contacts = [];
-  g.world.bus.on('ball:hit', ({ shot }) => { if (shot.by === 'player') contacts.push(shot.t); });
+  g.world.bus.on('ball:hit', ({ shot }) => { if (shot.by === 'player' && !shot.provisional) contacts.push(shot.t); });
   const t0 = g.world.time;
   while (!g.isFinished() && g.world.time < t0 + maxSeconds) {
     g.advanceTo(g.world.time + FRAME);

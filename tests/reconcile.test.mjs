@@ -19,7 +19,7 @@ describe('hit reconciliation', () => {
     });
     const w = g.world;
     const rec = createRecorder({ seconds: 6 });
-    w.bus.on('ball:hit', ({ shot }) => rec.onHit(shot));
+    w.bus.on('ball:hit', ({ shot }) => { if (!shot.provisional) rec.onHit(shot); });
     const recon = createBallReconciler();
     let prevRaw = null, prevShown = null, prevId = null, prevVel = null;
     let rawMax = 0, shownMax = 0, corrections = 0, lastSeq = null;

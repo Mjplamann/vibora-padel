@@ -14,13 +14,24 @@ export function bindWorld(world, ctx) {
   const on = (type, fn) => offs.push(bus.on(type, fn));
   const quiet = !!ctx.quiet;
 
-  // Spatial sound: racket, bounces, glass, mesh, net, cord, machine, footsteps.
-  if (audio && !quiet) offs.push(audio.bindBus(bus, { cheer: {} }));
+  // Spatial sound: racket, bounces, glass, mesh, net, cord, machine, footsteps. A predicted hit
+  // plays its pock when the shown racket meets the ball; the camera's confirmation of it
+  // (shot.confirms) must not play a second one.
+  const audioBus = {
+    on: (type, fn) => bus.on(type, type === 'ball:hit' ? (p) => { if (!(p && p.shot && p.shot.confirms)) fn(p); } : fn),
+  };
+  if (audio && !quiet) offs.push(audio.bindBus(audioBus, { cheer: {} }));
 
   let lastPlayerShot = null;
   on('ball:hit', ({ shot }) => {
-    stage.effects.racketHit(shot.contact, shot.quality ?? 0.8);
-    stage.ballView.flash('hit');
+    // Effects once, when the hit is shown: at the predicted strike, or at a hit found late.
+    if (!shot.confirms) {
+      stage.effects.racketHit(shot.contact, shot.quality ?? 0.8);
+      stage.ballView.flash('hit');
+    }
+    // Provisional (predicted) hits are presentation only: the shot card, voice and replay
+    // follow the confirmed shot.
+    if (shot.provisional) return;
     if (recorder) recorder.onHit(shot);
     if (shot.by !== 'player' || quiet) return;
     lastPlayerShot = shot;

@@ -56,6 +56,24 @@ function popConsoleFilter() {
 const copyLm = (p) => ({ x: p.x, y: p.y, z: p.z, visibility: p.visibility ?? p.presence ?? 1 });
 
 /**
+ * Capture-time estimate of a video frame (ms, performance.now clock). Pure.
+ * With a plausible metadata.captureTime (Chrome) it is used as is: { t, real: true }.
+ * Otherwise (Safari, rAF fallback) the frame is assumed captured one frame interval before
+ * it is due on screen, and a further offsetMs of sensor exposure + transfer (per camera
+ * preset, TRACKING.cameraPresets[*].captureOffsetMs) is subtracted: { t, real: false }.
+ * @param {{ perfNow: number, now: number, md?: object|null, fps?: number, offsetMs?: number }} o
+ */
+export function estimateCaptureTime({ perfNow, now, md = null, fps = 30, offsetMs = 0 }) {
+  if (md && Number.isFinite(md.captureTime) && md.captureTime > 0) {
+    const age = perfNow - md.captureTime;
+    if (age >= -5 && age < 1000) return { t: md.captureTime, real: true };
+  }
+  const ref = md && Number.isFinite(md.expectedDisplayTime) ? md.expectedDisplayTime : now;
+  const frameMs = 1000 / (fps > 0 ? fps : 30);
+  return { t: Math.min(perfNow, ref - frameMs) - Math.max(0, offsetMs || 0), real: false };
+}
+
+/**
  * @param {object} o
  * @param {HTMLVideoElement} o.video
  * @param {'lite'|'full'|'heavy'} [o.model]
@@ -74,6 +92,7 @@ export async function createPoseTracker({
   minDetection = 0.5,
   minPresence = 0.5,
   minTracking = 0.5,
+  captureOffsetMs = 0,
 } = {}) {
   if (!video) throw new Error('createPoseTracker: video element required');
   let landmarker = null;
@@ -87,7 +106,14 @@ export async function createPoseTracker({
   let lastFrameAt = null;
   let goodFrames = 0;
   let closed = false;
-  const stats = { fps: 0, inferMs: 0, latencyMs: 0, frames: 0, people: 0, delegate: null, model: curModel, captureTime: false };
+  // captureTime: the browser supplies real capture timestamps. needsLatencyTest: it does not
+  // (Safari), so the capture time is a per-camera estimate and the calibration should
+  // recommend the latency test. captureOffsetMs: the preset offset applied in that case.
+  const stats = {
+    fps: 0, inferMs: 0, latencyMs: 0, frames: 0, people: 0, delegate: null, model: curModel,
+    captureTime: false, needsLatencyTest: false, captureOffsetMs: Math.max(0, captureOffsetMs || 0),
+  };
+  let fallbackFrames = 0;
 
   const status = (phase, message, extra = {}) => {
     try {
@@ -152,17 +178,12 @@ export async function createPoseTracker({
 
   /** Capture-time estimate (ms, performance.now clock). */
   function captureTimeOf(now, md) {
-    const perfNow = performance.now();
-    if (md && Number.isFinite(md.captureTime) && md.captureTime > 0) {
-      const age = perfNow - md.captureTime;
-      if (age >= -5 && age < 1000) {
-        stats.captureTime = true;
-        return md.captureTime;
-      }
-    }
-    stats.captureTime = false;
-    const ref = md && Number.isFinite(md.expectedDisplayTime) ? md.expectedDisplayTime : now;
-    return Math.min(perfNow, ref - 1000 / nominalFps());
+    const est = estimateCaptureTime({ perfNow: performance.now(), now, md, fps: nominalFps(), offsetMs: stats.captureOffsetMs });
+    stats.captureTime = est.real;
+    fallbackFrames = est.real ? 0 : fallbackFrames + 1;
+    if (fallbackFrames >= 5) stats.needsLatencyTest = true;
+    else if (est.real) stats.needsLatencyTest = false;
+    return est.t;
   }
 
   let fallingBack = false;
@@ -268,6 +289,10 @@ export async function createPoseTracker({
       if (rafHandle != null) cancelAnimationFrame(rafHandle);
       handle = null;
       rafHandle = null;
+    },
+    /** Capture offset (ms) subtracted from estimated capture times (no metadata.captureTime). */
+    setCaptureOffset(ms) {
+      stats.captureOffsetMs = Number.isFinite(ms) ? Math.max(0, Math.min(400, ms)) : 0;
     },
     /** Swap model at runtime ('lite' | 'full' | 'heavy'). */
     async setModel(m) {

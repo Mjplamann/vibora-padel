@@ -288,11 +288,27 @@ function scoreReturn(drill, shot, result) {
 // Feeds
 
 const r2 = (rng, a, b) => rng.range(a, b);
+/** Machine heads impart a little sidespin (rpm): wheel speed mismatch, never perfectly flat. */
+export const FEED_SIDE_RPM = 200;
+/**
+ * Deterministic per-feed value in [-1, 1] from the feed index (a hash, so adding spin
+ * variety does not shift the drill rng stream that places the feeds).
+ */
+export function feedJitter(i, salt = 0) {
+  const x = Math.sin((i + 1) * 12.9898 + salt * 78.233) * 43758.5453;
+  return 2 * (x - Math.floor(x)) - 1;
+}
+const feedSide = (i, amp = FEED_SIDE_RPM) => amp * feedJitter(i, 1);
+/** A sliced underhand serve: top in -600..-200 rpm, side 300..900 rpm either way. */
+const serveSpin = (i, rng) => {
+  const u = feedJitter(i, 2);
+  return { top: -r2(rng, 200, 600), side: Math.sign(u || 1) * (300 + 600 * Math.abs(feedJitter(i, 3))) };
+};
 
 const feedDrive = (cx) => (i, rng) => ({
   target: { x: cx + r2(rng, -0.6, 0.6), z: r2(rng, 5.5, 6.5) },
   speedKmh: r2(rng, 55, 70),
-  spinRpm: { top: r2(rng, 500, 1000), side: 0 },
+  spinRpm: { top: r2(rng, 500, 1000), side: feedSide(i) },
 });
 
 const ALL_DRILLS = [
@@ -330,7 +346,7 @@ const ALL_DRILLS = [
     feeds: (i, rng) => ({
       target: { x: r2(rng, 1.2, 3.0), z: r2(rng, 7.6, 8.6) },
       flightTime: r2(rng, 1.15, 1.3),
-      spinRpm: { top: r2(rng, 300, 700), side: 0 },
+      spinRpm: { top: r2(rng, 300, 700), side: feedSide(i) },
     }),
     targets: [zone('deep', 'Deep', -5, 5, -10, -6.0, 100)],
     scoring: (shot, result) => scoreBackGlass(DRILL_BY_ID['back-glass'], shot, result),
@@ -348,7 +364,7 @@ const ALL_DRILLS = [
     feeds: (i, rng) => ({
       target: { x: r2(rng, 3.4, 4.0), z: r2(rng, 7.8, 8.5) },
       flightTime: r2(rng, 1.1, 1.25),
-      spinRpm: { top: r2(rng, 200, 600), side: 0 },
+      spinRpm: { top: r2(rng, 200, 600), side: feedSide(i) },
       offsetX: -3.0,
     }),
     targets: [zone('deep', 'Deep', -5, 5, -10, -6.0, 100)],
@@ -377,7 +393,7 @@ const ALL_DRILLS = [
       return {
         via: { x: h.x + (fh ? 0.62 : -0.48), y: r2(rng, 1.05, 1.35), z: h.z - 0.42 },
         speedKmh: r2(rng, 50, 65),
-        spinRpm: { top: r2(rng, 0, 200), side: 0 },
+        spinRpm: { top: r2(rng, 0, 200), side: feedSide(i) },
       };
     },
     targets: [
@@ -399,7 +415,7 @@ const ALL_DRILLS = [
     feeds: (i, rng) => ({
       target: { x: r2(rng, 0.9, 2.4), z: r2(rng, 7.1, 7.9) },
       apex: r2(rng, 6.0, 7.0),
-      spinRpm: { top: r2(rng, 100, 400), side: 0 },
+      spinRpm: { top: r2(rng, 100, 400), side: feedSide(i) },
     }),
     targets: [zone('deep', 'Deep', -5, 5, -9.5, -7, 100)],
     scoring: (shot, result) => scoreBandeja(DRILL_BY_ID.bandeja, shot, result),
@@ -417,7 +433,7 @@ const ALL_DRILLS = [
     feeds: (i, rng) => ({
       target: { x: r2(rng, 0.9, 2.4), z: r2(rng, 6.6, 7.4) },
       apex: r2(rng, 5.5, 6.5),
-      spinRpm: { top: r2(rng, 100, 400), side: 0 },
+      spinRpm: { top: r2(rng, 100, 400), side: feedSide(i) },
     }),
     targets: [
       zone('side-corner', 'Side-glass corner', -5, -3, -9.5, -6.5, 100),
@@ -434,11 +450,11 @@ const ALL_DRILLS = [
   },
   {
     id: 'smash-x3', name: 'Smash Por Tres', es: 'Remate por tres', skill: 'Overheads', level: 3,
-    home: { x: 1.2, z: 3.6 }, side: 'right', reps: 12, interval: 4.2, mirrorForLefty: true,
+    home: { x: 1.2, z: 3.0 }, side: 'right', reps: 12, interval: 4.2, mirrorForLefty: true,
     feeds: (i, rng) => ({
-      target: { x: r2(rng, 0.6, 2.0), z: r2(rng, 4.1, 4.9) },
+      target: { x: r2(rng, 0.6, 2.0), z: r2(rng, 3.3, 4.0) },
       apex: r2(rng, 5.0, 5.5),
-      spinRpm: { top: r2(rng, 0, 300), side: 0 },
+      spinRpm: { top: r2(rng, 0, 300), side: feedSide(i) },
     }),
     targets: [
       // To z -1: a steep smash that bounces close to the net is the one that can go por tres.
@@ -447,12 +463,12 @@ const ALL_DRILLS = [
     ],
     scoring: (shot, result) => scoreSmash(DRILL_BY_ID['smash-x3'], shot, result),
     cues: {
-      intro: 'Smash por tres: get under the short lob, full flat smash into the service area so it bounces out over the back wall.',
-      introEs: 'Remate por tres: colócate bajo el globo corto y remata plano al cuadro para sacarla por el fondo.',
-      tips: ['Move back fast, side-on', 'Contact high and in front', 'Hit down and through – bounce it near the service line'],
-      tipsEs: ['Retrocede rápido, de perfil', 'Golpe alto y delante', 'Hacia abajo: bote cerca de la línea de saque'],
+      intro: 'Smash por tres: get under the short lob, full flat smash (130 km/h+) bounced 2–3 m past the net so it kicks out over the back wall.',
+      introEs: 'Remate por tres: colócate bajo el globo corto y remata plano y fuerte (130 km/h+) con bote a 2–3 m de la red para sacarla por el fondo.',
+      tips: ['Move back fast, side-on', 'Contact high and in front', 'Hit down and through – bounce it 2–3 m past the net'],
+      tipsEs: ['Retrocede rápido, de perfil', 'Golpe alto y delante', 'Hacia abajo: bote a 2–3 m de la red'],
     },
-    ap: { contact: 'overhead', family: 'sm', aim: { x: 0.3, z: -5.0 }, speedKmh: 120, top: 400 },
+    ap: { contact: 'overhead', family: 'sm', aim: { x: 0.3, z: -2.6 }, speedKmh: 138, top: 300 },
   },
   {
     id: 'lob-defense', name: 'Defensive Lob', es: 'Globo', skill: 'Tactics', level: 2,
@@ -460,7 +476,7 @@ const ALL_DRILLS = [
     feeds: (i, rng) => ({
       target: { x: r2(rng, 0.5, 3.2), z: r2(rng, 6.4, 7.4) },
       speedKmh: r2(rng, 58, 72),
-      spinRpm: { top: r2(rng, 400, 900), side: 0 },
+      spinRpm: { top: r2(rng, 400, 900), side: feedSide(i) },
     }),
     targets: [zone('deep', 'Deep lob', -5, 5, -9.5, -7.5, 100)],
     scoring: (shot, result) => scoreLob(DRILL_BY_ID['lob-defense'], shot, result),
@@ -479,7 +495,7 @@ const ALL_DRILLS = [
     feeds: (i, rng) => ({
       target: { x: r2(rng, 1.2, 2.8), z: r2(rng, 4.2, 5.0) },
       speedKmh: r2(rng, 40, 50),
-      spinRpm: { top: r2(rng, 300, 700), side: 0 },
+      spinRpm: { top: r2(rng, 300, 700), side: feedSide(i) },
     }),
     targets: [zone('feet', 'At their feet', -5, 5, -4.5, -1.5, 100)],
     scoring: (shot, result) => scoreChiquita(DRILL_BY_ID.chiquita, shot, result),
@@ -516,9 +532,10 @@ const ALL_DRILLS = [
     home: { x: 2.6, z: 8.6 }, side: 'right', reps: 15, interval: 4.2, mirrorForLefty: true,
     serving: { team: 1, box: 'right' },
     feeds: (i, rng) => ({
-      target: { x: r2(rng, 1.0, 3.8), z: r2(rng, 4.9, 6.5) },
+      // Wide serves reach the side glass; the slice/side spin varies the kick off it.
+      target: { x: r2(rng, 1.0, 4.2), z: r2(rng, 4.9, 6.5) },
       speedKmh: r2(rng, 55, 65),
-      spinRpm: { top: r2(rng, -400, 100), side: 0 },
+      spinRpm: serveSpin(i, rng),
       offsetX: -2.2,
       launchHeight: 0.9,
       serve: true,

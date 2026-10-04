@@ -62,7 +62,7 @@ function runDrill(id, { reps, assist = 'club', seed = 7, handed = 'right', sessi
   const results = [];
   const shots = [];
   world.bus.on('shot:result', (p) => results.push(p));
-  world.bus.on('ball:hit', (p) => { if (p.shot.by === 'player') shots.push(p.shot); });
+  world.bus.on('ball:hit', (p) => { if (p.shot.by === 'player' && !p.shot.provisional) shots.push(p.shot); });
   const t0 = performance.now();
   while (!mode.isFinished() && world.time < 15 + reps * 6) h.tick();
   const ms = performance.now() - t0;
@@ -153,7 +153,7 @@ describe('end to end: autopilot -> synthetic camera -> tracking -> lag-compensat
     const outcomes = [];
     world.bus.on('rally:outcome', (p) => outcomes.push(p));
     const playerShots = [];
-    world.bus.on('ball:hit', (p) => { if (p.shot.by === 'player') playerShots.push(p.shot); });
+    world.bus.on('ball:hit', (p) => { if (p.shot.by === 'player' && !p.shot.provisional) playerShots.push(p.shot); });
     let gameDone = false;
     while (!gameDone && world.time < 400) {
       h.tick();

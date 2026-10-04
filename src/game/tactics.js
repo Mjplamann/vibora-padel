@@ -9,11 +9,16 @@
 //   - in rally / match (netGame) the base itself follows padel tactics: after a serve, a volley,
 //     a lob or a shot from mid-court the player holds the net; after a groundstroke from the
 //     back they stay back. A lob over them pulls them back through the reach rule above.
+// Near the enclosure the plan follows padel technique (game/intercept.js, QA2): glass balls are
+// played once they have come >= 1.2 m off the glass, groundstrokes >= 1.1 m off it, and no stance
+// is planned deeper than 9.2 m (the body itself stays >= 0.6 m off the back glass).
 // The glide is critically damped with a speed cap (no jumps). Pure module.
 
 import { clamp } from '../util/math.js';
-import { defaultBounds } from '../tracking/locomotion.js';
-import { interceptStance } from './human.js';
+import { stanceBounds, playableCandidates, pickGlassContact } from './intercept.js';
+import { interceptCandidates } from '../physics/predict.js';
+import { pickIntercept, contactFamily, idealStance } from './human.js';
+import { predictFlight } from './world.js';
 
 export const TACTICS = Object.freeze({
   REACH_DEPTH: 0.9, // court m covered by the player's own steps toward / away from the TV
@@ -25,6 +30,30 @@ export const TACTICS = Object.freeze({
   NET_Z: 3.8, // net position (court z) in rally / match
   NET_FROM_Z: 5.5, // a shot struck in front of this sends the player to the net
 });
+
+/**
+ * Predicted contact and stance for the incoming ball, like human.interceptStance but planned the
+ * way a padel player does it near the enclosure (QA2): only contacts that have come >= 1.1-1.2 m
+ * off the back glass (playableCandidates), and stances no deeper than STANCE_Z_MAX (9.2 m).
+ * @returns {{x, z, t, family, contact}|null}
+ */
+export function planIntercept(world, { maxTime = 3 } = {}) {
+  const pl = world.player;
+  if (!world.ball) return null;
+  const pred = predictFlight(world, { maxTime });
+  const cands = playableCandidates(interceptCandidates(pred, {
+    playerPos: pl.pos, side: 'near', now: world.time - (world.settings.latency || 0), minHeight: 0.3, maxHeight: 2.4,
+  }));
+  const m = world.mode;
+  const hint = m && m.apHints ? m.apHints : null;
+  const c = (hint && hint.contact === 'glass' && pickGlassContact(cands, pl.height)) || pickIntercept(cands, hint, pl.height);
+  if (!c) return null;
+  const handed = world.settings.handed || pl.handed;
+  const fam = contactFamily(c.pos, c.kind, pl.pos, handed, pl.height);
+  const s = idealStance(c.pos, fam, handed, pl.height);
+  const b = stanceBounds();
+  return { x: clamp(s.x, b.xMin, b.xMax), z: clamp(s.z, b.zMin, b.zMax), t: c.t, family: fam, contact: c.pos };
+}
 
 const excess = (v, reach) => (v > reach ? v - reach : v < -reach ? v + reach : 0);
 
@@ -83,7 +112,7 @@ export function createTacticalHome({ netGame = false } = {}) {
       if (k !== key || (!committed && world.time - at >= TACTICS.REFRESH)) {
         key = k;
         at = world.time;
-        ic = interceptStance(world);
+        ic = planIntercept(world);
       }
       if (ic) {
         tx = base.x + excess(ic.x - base.x, TACTICS.REACH_LATERAL);
@@ -93,7 +122,7 @@ export function createTacticalHome({ netGame = false } = {}) {
       key = null;
       ic = null;
     }
-    const bd = defaultBounds();
+    const bd = stanceBounds();
     tx = clamp(tx, bd.xMin, bd.xMax);
     tz = clamp(tz, bd.zMin, bd.zMax);
     state.target.x = tx;

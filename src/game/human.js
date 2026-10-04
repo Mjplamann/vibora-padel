@@ -14,7 +14,11 @@ import { createLocomotion, defaultBounds } from '../tracking/locomotion.js';
 import { createRacketTrack, createRacketPose, copyRacketPose, MAX_GAP } from '../tracking/racketTrack.js';
 import { sweptContact } from '../physics/racket.js';
 import { interceptCandidates } from '../physics/predict.js';
-import { applyPlayerHit, emit, HIT_COOLDOWN, resolveSettings, predictFlight } from './world.js';
+import {
+  applyPlayerHit, applySpeculativeHit, revertSpeculative, emit, HIT_COOLDOWN, resolveSettings, predictFlight,
+} from './world.js';
+import { createSwingPredictor } from './swingPredict.js';
+import { playableCandidates, pickGlassContact, stanceBounds } from './intercept.js';
 
 const REF_HEIGHT = 1.75;
 
@@ -87,22 +91,25 @@ export function pickIntercept(cands, hint = null, height = REF_HEIGHT) {
 /**
  * Predicted contact and the stance that plays it for the incoming ball, or null:
  * { x, z (stance), t, family, contact: Vec3 }. Uses the drill's hints (world.mode.apHints).
+ * Planned like the tactical home and the autopilot (game/intercept.js, QA2): only contacts that
+ * have come off the back / side glass, a glass ball in its window off the glass, and stances
+ * no deeper than STANCE_Z_MAX, so the assist magnet never pulls a player against the glass.
  */
 export function interceptStance(world, { maxTime = 3 } = {}) {
   const pl = world.player;
   if (!world.ball) return null;
   const pred = predictFlight(world, { maxTime });
-  const cands = interceptCandidates(pred, {
+  const cands = playableCandidates(interceptCandidates(pred, {
     playerPos: pl.pos, side: 'near', now: world.time - (world.settings.latency || 0), minHeight: 0.3, maxHeight: 2.4,
-  });
+  }));
   const m = world.mode;
   const hint = m && m.apHints ? m.apHints : null;
-  const c = pickIntercept(cands, hint, pl.height);
+  const c = (hint && hint.contact === 'glass' && pickGlassContact(cands, pl.height)) || pickIntercept(cands, hint, pl.height);
   if (!c) return null;
   const handed = world.settings.handed || pl.handed;
   const fam = contactFamily(c.pos, c.kind, pl.pos, handed, pl.height);
   const s = idealStance(c.pos, fam, handed, pl.height);
-  const b = defaultBounds();
+  const b = stanceBounds();
   return { x: clamp(s.x, b.xMin, b.xMax), z: clamp(s.z, b.zMin, b.zMax), t: c.t, family: fam, contact: c.pos };
 }
 
@@ -124,6 +131,19 @@ export const PREP_MIN = { ground: 0.22, volley: 0.1 };
 /** Max sweet-spot travel (m) per swept sub-segment, and the max number of sub-segments. */
 export const SUB_SPACING = 0.12;
 const SUB_MAX = 10;
+/**
+ * A predicted hit is undone when the camera's racket has been checked this far (s of capture
+ * time) past the predicted contact without a contact (a whiff or a swing stopped short).
+ */
+export const WHIFF_WINDOW = 0.1;
+/** Longest wait (s) of a speculative contact inside the assist margin for the face to meet the ball. */
+const MARGIN_WAIT = 0.025;
+
+/** Stroke label -> swing family of the predictor (learning the player's racket speed). */
+const STROKE_FAMILY = {
+  forehand: 'fh', backhand: 'bh', 'volley-fh': 'vfh', 'volley-bh': 'vbh', 'glass-fh': 'gfh', 'glass-bh': 'gbh',
+  bandeja: 'oh', vibora: 'oh', smash: 'sm', serve: 'serve', lob: 'fh', chiquita: 'fh',
+};
 
 /**
  * @param {{settings: object}} o  settings as in world.DEFAULT_SETTINGS (live object; read on use)
@@ -154,7 +174,13 @@ export function createHumanController({ settings = {} } = {}) {
   const ballA = blank();
   const ballB = blank();
   const tmpC = new Vec3();
-  const state = { frames: 0, hits: 0, lastContact: null, lastShot: null, valid: false };
+  const state = { frames: 0, hits: 0, lastContact: null, lastShot: null, valid: false, speculative: 0 };
+  // Predictive swing for display and speculative hits (swingPredict.js).
+  const predictor = createSwingPredictor({ racketTrack, posAt, contactOffsets: CONTACT_OFFSETS, futurePos });
+  const specBallPrev = blank();
+  let pendingMargin = null; // speculative contact inside the assist margin only, waiting for the face
+  let specPrevId = null;
+  const planFamily = { key: null, fam: null };
   // Reaction: first real shift of the movement target after the opponent's stroke.
   const react = { key: null, x: 0, z: 0, t: null };
 
@@ -191,6 +217,24 @@ export function createHumanController({ settings = {} } = {}) {
     const u = (t - hT[a]) / (hT[b] - hT[a]);
     out.x = hX[a] + (hX[b] - hX[a]) * u;
     out.z = hZ[a] + (hZ[b] - hZ[a]) * u;
+    return out;
+  }
+
+  /**
+   * The player's court position `ahead` s from now: the critically damped follow (update())
+   * toward the current movement target, without its speed / acceleration limits.
+   */
+  function futurePos(world, ahead, out = { x: 0, z: 0 }) {
+    const pl = world.player;
+    const tgt = manualTarget || locomotion.target;
+    const k = PLAYER.followStiffness;
+    const e = Math.exp(-k * ahead);
+    const ex = pl.pos.x - tgt.x, ez = pl.pos.z - tgt.z;
+    out.x = tgt.x + (ex + (pl.vel.x + k * ex) * ahead) * e;
+    out.z = tgt.z + (ez + (pl.vel.z + k * ez) * ahead) * e;
+    const b = defaultBounds();
+    out.x = clamp(out.x, b.xMin, b.xMax);
+    out.z = clamp(out.z, b.zMin, b.zMax);
     return out;
   }
 
@@ -385,12 +429,18 @@ export function createHumanController({ settings = {} } = {}) {
       const pp = playerPosAt(world, c.t);
       state.lastContact = c;
       const flightKey = world.flight.startT;
+      const fk = world.ball ? `${world.ball.id}:${world.flight.startT}` : null;
       const prepTime = prepTimeBefore(c.t);
       const shot = applyPlayerHit(world, c, c.pose, tSim, {
         playerPos: { x: pp.x, z: pp.z },
         swing: { peakSpeed: racketTrack.peakSpeed(c.t - 0.3, c.t + 0.05), racketTime: c.t, prepTime },
       });
       if (shot) {
+        // The player's own swing speed, for the predicted swings to come.
+        const fam = (planFamily.key === fk && planFamily.fam) || STROKE_FAMILY[shot.stroke];
+        predictor.learn(world, shot, fam);
+        const shU = lastSample && lastSample.joints[lastSample.dominant === 'L' ? 'shoulderL' : 'shoulderR'];
+        if (shU) predictor.learnFrame(world, fam, c.pose, uToCourt(shU, pp.x, pp.z, tmpC.set(0, 0, 0)).clone());
         // Session analytics (SPEC §5.5): reaction to the incoming ball and racket preparation.
         if (react.key === flightKey && react.t !== null) shot.reactionMs = Math.round(react.t * 1000);
         if (prepTime !== null) {
@@ -403,6 +453,74 @@ export function createHumanController({ settings = {} } = {}) {
       }
     }
     return shots;
+  }
+
+  // ---- prediction -------------------------------------------------------------
+
+  /**
+   * After each tick's ball physics: the predicted display racket for world.time, a
+   * speculative hit when it meets the ball, and the undoing of one the camera did not confirm.
+   */
+  function afterStep(world, dt) {
+    const pose = predictor.update(world);
+    const pl = world.player;
+    if (pose) {
+      if (!pl.renderRacket) pl.renderRacket = createRacketPose();
+      copyRacketPose(pl.renderRacket, pose);
+    } else pl.renderRacket = null;
+    const plan = predictor.plan;
+    if (plan && !plan.dead) {
+      planFamily.key = plan.key;
+      planFamily.fam = plan.fam;
+    }
+    const b = world.ball;
+    // Speculative contact: the shown racket (previous tick -> now) against the ball over the same tick.
+    if (b && !world.spec && plan && !plan.struck && specPrevId === b.id) {
+      const assist = ASSIST[world.settings.assist] || ASSIST[DEFAULT_ASSIST];
+      // The real face first. A contact only inside the assist margin waits while the ball is
+      // still closing in the margin (it then strikes on the strings, not 10 cm early) and is
+      // taken once the ball leaves the margin without touching the face (a forgiven near miss).
+      let c = predictor.detect(world, specBallPrev, b, 0);
+      if (pendingMargin && pendingMargin.plan.key !== plan.key) pendingMargin = null;
+      if (!c && assist.contactMargin > 0) {
+        const cm = predictor.detect(world, specBallPrev, b, assist.contactMargin);
+        if (pendingMargin && (!cm || world.time - pendingMargin.seenAt >= MARGIN_WAIT)) c = pendingMargin;
+        else if (!pendingMargin && cm) {
+          pendingMargin = cm;
+          cm.seenAt = world.time;
+        }
+      }
+      if (c) pendingMargin = null;
+      if (c) {
+        const pp = posAt(c.t + (world.settings.latency ?? 0)) || pl.pos;
+        const shot = applySpeculativeHit(world, c, c.pose, c.t, {
+          playerPos: { x: pp.x, z: pp.z }, cStar: c.plan.cStar,
+          plan: { fam: c.plan.fam, D: c.plan.D, rho0: c.plan.rho0, rho1: c.plan.rho1, miss: c.plan.miss, speed: c.plan.speed },
+        });
+        if (shot) {
+          predictor.strike();
+          state.speculative++;
+        }
+      }
+    }
+    if (b) {
+      specBallPrev.pos.copy(b.pos);
+      specBallPrev.vel.copy(b.vel);
+      specBallPrev.t = b.t;
+      specBallPrev.id = b.id;
+      specBallPrev.atRest = b.atRest;
+      specPrevId = b.id;
+    } else specPrevId = null;
+    // No contact where the prediction struck: the camera has shown the swing past it.
+    const sp = world.spec;
+    if (sp && checkedUntil >= sp.cStar + WHIFF_WINDOW) revertSpeculative(world, 'whiff');
+  }
+
+  /** Ball time of the contact the predicted swing is going for (current flight), or null. */
+  function predictedContact(world) {
+    const plan = predictor.plan;
+    if (!plan || plan.dead || !world.ball) return null;
+    return plan.key === `${world.ball.id}:${world.flight.startT}` ? plan.tStar : null;
   }
 
   // ---- movement ---------------------------------------------------------------
@@ -505,6 +623,9 @@ export function createHumanController({ settings = {} } = {}) {
     onRacketPose,
     calibrate,
     update,
+    afterStep,
+    predictedContact,
+    predictor,
     checkHits,
     posAt,
     moveTo,

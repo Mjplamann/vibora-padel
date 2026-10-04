@@ -1291,3 +1291,43 @@ b, strong { font-weight: 700; }
   pointer-events: none;
   z-index: -1;
 }
+
+/* ---------- Install as an app (PWA) & installed mode ---------- */
+.title-install { display: flex; align-items: center; gap: 0.9rem; margin-top: 1.1rem; flex-wrap: wrap; }
+.btn-install { flex-direction: row; align-items: center; gap: 0.55em; border-color: var(--glass-2); flex: none; white-space: nowrap; }
+.btn-install svg, .install-note svg { width: 1.25em; height: 1.25em; flex: none; fill: none; stroke: var(--glass); stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+.btn-install .es { margin-top: 0.15em; }
+.install-note { display: flex; align-items: center; gap: 0.5em; margin: 0; font: 600 0.62rem/1.25 var(--f-ui); color: var(--text-2); letter-spacing: 0.03em; }
+.install-note b { color: var(--text); }
+.install-note .es { font-size: 0.85em; }
+.help-install { margin-top: 0.8rem; padding: 0.55rem 0.8rem; border-left: 3px solid var(--glass); background: var(--panel); }
+.help-install .skill-head { margin-bottom: 0.45rem; }
+.help-install p { margin: 0 0 0.45rem; font-size: 0.66rem; line-height: 1.35; color: var(--text-2); }
+.help-install p b { color: var(--text); font-weight: 600; }
+.help-install .hi-row { display: flex; align-items: center; gap: 0.8rem; margin: 0.15rem 0 0.45rem; }
+.help-install .hi-row p { margin: 0; }
+.help-install .muted { font-size: 0.6rem; margin: 0; }
+
+/* "Update ready — Restart": top right, out of the way; never over live play. */
+.vp-update {
+  position: absolute;
+  top: var(--safe-y);
+  right: var(--safe-x);
+  z-index: 5;
+  display: flex;
+  align-items: center;
+  gap: 0.8rem;
+  padding: 0.4rem 0.45rem 0.4rem 0.9rem;
+  background: rgba(5, 10, 18, 0.92);
+  border-left: 3px solid var(--ball);
+  pointer-events: auto;
+  animation: toastIn 260ms var(--ease) both;
+}
+.vp-update .vu-text { font: 800 0.72rem/1.05 var(--f-display); text-transform: uppercase; letter-spacing: 0.05em; }
+.vp-update small { display: block; font: 400 0.82em var(--f-ui); color: var(--text-3); text-transform: none; letter-spacing: 0.02em; margin-top: 0.15em; }
+.btn-sm { min-height: 1.6rem; padding: 0.3em 0.8em; font-size: 0.62rem; }
+.vp[data-screen="play"] .vp-update, .vp.is-replay .vp-update { display: none; }
+
+/* Running as the installed app: no browser chrome to explain, nothing to install. */
+:root[data-app="installed"] .title-install { display: none; }
+:root[data-app="installed"] body { -webkit-user-select: none; user-select: none; }

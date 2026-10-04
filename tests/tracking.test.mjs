@@ -11,7 +11,7 @@ import {
 import {
   createSyntheticCamera, standingBody, poseArm, setHandTarget, cloneBody, crouchBody, liftBody, ARM,
 } from '../src/tracking/synthetic.js';
-import { createLocomotion, softDeadzone, defaultBounds, MAGNET_MAX_PULL } from '../src/tracking/locomotion.js';
+import { createLocomotion, softDeadzone, defaultBounds, MAGNET_MAX_PULL, ENCLOSURE_MARGIN } from '../src/tracking/locomotion.js';
 import { createRacketTrack } from '../src/tracking/racketTrack.js';
 import { classifyStroke, contactQuality, createSwingDetector } from '../src/tracking/swing.js';
 
@@ -559,16 +559,19 @@ describe('locomotion', () => {
     assert.deepEqual(r.target, { x: 1, z: 7 });
   });
 
-  test('clamps to the near half inset by the body radius, never closer than the net keep-out', () => {
+  // Re-baselined (QA2 critical): the bounds used to be the body radius (0.3 m) from the glass, which
+  // let glass reps pin the player against the back glass with the racket swinging through it.
+  test('clamps to the near half inset by the enclosure margins, never closer than the net keep-out', () => {
     const loco = createLocomotion();
     loco.setHome({ x: 0, z: 5 });
     let r = loco.update(sample(5, 5), 1 / 30, {});
-    near(r.target.x, COURT.halfWidth - PLAYER.bodyRadius, 1e-12);
-    near(r.target.z, COURT.halfLength - PLAYER.bodyRadius, 1e-12);
+    near(r.target.x, COURT.halfWidth - ENCLOSURE_MARGIN.side, 1e-12);
+    near(r.target.z, COURT.halfLength - ENCLOSURE_MARGIN.back, 1e-12);
     r = loco.update(sample(-5, -5), 1 / 30, { bounds: { xMin: -4, xMax: 4, zMin: 0, zMax: 9 } });
     near(r.target.x, -4, 1e-12);
     near(r.target.z, PLAYER.netKeepOut, 1e-12);
-    assert.deepEqual(defaultBounds(), { xMin: -4.7, xMax: 4.7, zMin: PLAYER.netKeepOut, zMax: 9.7 });
+    assert.deepEqual(defaultBounds(), { xMin: -4.55, xMax: 4.55, zMin: PLAYER.netKeepOut, zMax: 9.4 });
+    assert.ok(ENCLOSURE_MARGIN.back >= 0.6 && ENCLOSURE_MARGIN.side >= 0.45);
   });
 
   test('magnet pulls toward the ideal spot by min(dist, 1.2 m) * strength', () => {

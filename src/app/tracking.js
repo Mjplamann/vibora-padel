@@ -2,6 +2,16 @@
 // pose frames (body-in-frame, distance, stillness, latency-test swings, racket raise).
 import { listCameras, openCamera, preferredCamera, describeCameraError } from '../tracking/camera.js';
 import { createPoseTracker } from '../tracking/pose.js';
+import { TRACKING } from '../config.js';
+
+/**
+ * Capture offset (ms) for a camera preset: sensor exposure + transfer before the browser
+ * sees the frame. Only applied when the browser gives no metadata.captureTime (Safari).
+ */
+export function captureOffsetFor(presetKey) {
+  const p = TRACKING.cameraPresets[presetKey] || TRACKING.cameraPresets[TRACKING.defaultCamera];
+  return p && Number.isFinite(p.captureOffsetMs) ? p.captureOffsetMs : 0;
+}
 
 const PARTS = {
   head: [0, 2, 5],
@@ -27,6 +37,43 @@ export function bodyVisibility(frame) {
     if (ok) n++;
   }
   return { visible, bodyInFrame: n / 5 };
+}
+
+/**
+ * Horizontal bearing (rad) of the tracked person from the camera's optical axis, from the
+ * hip centre in the image: + toward image right. tan(b) = (u - 0.5) / f_n with
+ * f_n = 0.5 / tan(hfov / 2) (focal length in image widths). Equals -atan2(room.x, room.d)
+ * of body.js (room x is the user's right = image left). null without hips.
+ */
+export function offAxisBearing(frame, hfovDeg) {
+  const p = frame && frame.people && frame.people[0];
+  const lm = p && p.landmarks;
+  if (!lm || !lm[23] || !lm[24]) return null;
+  const u = 0.5 * (lm[23].x + lm[24].x);
+  const fn = 0.5 / Math.tan(((hfovDeg || 68) * Math.PI) / 360);
+  return Math.atan((u - 0.5) / fn);
+}
+
+/**
+ * Off-axis yaw correction of MediaPipe world landmarks (optional, default off: QA2 / tracking
+ * concern #4, unverified on real footage). BlazePose GHUM estimates the 3D pose in the frame
+ * of its person crop, whose depth axis runs along the viewing ray rather than the optical
+ * axis, so a player standing 1 m off-axis at 2.6 m has arms and racket face yawed by up to
+ * ~20°. This rotates every world landmark about +y by the bearing b (ray frame -> camera
+ * frame: x = x' cos b + z' sin b, z = -x' sin b + z' cos b; world landmarks are x image-right,
+ * y down, z away from the camera). Returns a new frame; the input is not modified.
+ */
+export function correctOffAxisYaw(frame, hfovDeg) {
+  if (!frame || !frame.people || !frame.people.length) return frame;
+  const b0 = offAxisBearing(frame, hfovDeg);
+  const people = frame.people.map((p) => {
+    const b = offAxisBearing({ people: [p] }, hfovDeg); // each person has their own bearing
+    if (b === null || Math.abs(b) < 1e-6) return p;
+    const c = Math.cos(b), sn = Math.sin(b);
+    const world = (p.world || []).map((q) => ({ ...q, x: q.x * c + q.z * sn, z: -q.x * sn + q.z * c }));
+    return { ...p, world };
+  });
+  return { ...frame, people, yawCorrected: b0 };
 }
 
 /** Seconds a body part may be missing before the play HUD warns. */
@@ -124,8 +171,12 @@ export function createMotionWatch() {
  * Camera and pose tracker. onFrame(PoseFrame) for every inference result.
  * @param {{ video: HTMLVideoElement, onFrame, onStatus, model? }} o
  */
-export function createTracking({ video, onFrame, onStatus = () => {}, model = 'full' }) {
+export function createTracking({ video, onFrame, onStatus = () => {}, model = 'full', cameraPreset = null, yawCorrection = false }) {
   let cam = null;
+  let presetOverride = cameraPreset;
+  let yawOn = !!yawCorrection;
+  const presetKey = () => presetOverride || (cam && cam.presetKey) || TRACKING.defaultCamera;
+  const hfovNow = () => (TRACKING.cameraPresets[presetKey()] || TRACKING.cameraPresets[TRACKING.defaultCamera]).hfov;
   let tracker = null;
   let trackerPromise = null;
   let cameras = [];
@@ -154,7 +205,7 @@ export function createTracking({ video, onFrame, onStatus = () => {}, model = 'f
       trackerPromise = createPoseTracker({
         video,
         model,
-        onFrame: (f) => onFrame(f),
+        onFrame: (f) => onFrame(yawOn ? correctOffAxisYaw(f, hfovNow()) : f),
         onStatus: (s) => setStatus(s),
       }).then((t) => {
         tracker = t;
@@ -190,8 +241,20 @@ export function createTracking({ video, onFrame, onStatus = () => {}, model = 'f
       setStatus({ phase: 'error', message: 'Camera disconnected' });
     });
     const t = await ensureTracker();
+    applyCaptureOffset();
     t.start();
     return cam;
+  }
+
+  function applyCaptureOffset() {
+    if (!tracker || !tracker.setCaptureOffset) return;
+    tracker.setCaptureOffset(captureOffsetFor(presetKey()));
+  }
+
+  /** The user's lens preset (settings.cameraPreset) overrides the one guessed from the camera label. */
+  function setCameraPreset(key) {
+    presetOverride = TRACKING.cameraPresets[key] ? key : null;
+    applyCaptureOffset();
   }
 
   function stop() {
@@ -210,5 +273,12 @@ export function createTracking({ video, onFrame, onStatus = () => {}, model = 'f
     get status() { return status; },
     get stats() { return tracker ? tracker.stats : null; },
     get running() { return !!(cam && tracker && tracker.running); },
+    setCameraPreset,
+    /** Optional off-axis yaw correction of world landmarks (see correctOffAxisYaw). */
+    setYawCorrection(on) { yawOn = !!on; },
+    get yawCorrection() { return yawOn; },
+    /** True when the browser gives no capture timestamps: the calibration should push the latency test. */
+    get needsLatencyTest() { return !!(tracker && tracker.stats.needsLatencyTest); },
+    get captureOffsetMs() { return tracker ? tracker.stats.captureOffsetMs : 0; },
   };
 }

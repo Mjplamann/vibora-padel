@@ -83,7 +83,7 @@ describe('session runner (createGame)', () => {
     const g = createGame({ spec: { kind: 'drill', drillId: 'fh-drive' }, settings: s, input: 'autopilot', startTime: 4321.5, seed: 3 });
     assert.ok(Math.abs(g.world.time - 4321.5) < STEP, 'world continues the global clock');
     const rec = createRecorder({ seconds: 6 });
-    g.world.bus.on('ball:hit', ({ shot }) => rec.onHit(shot));
+    g.world.bus.on('ball:hit', ({ shot }) => { if (!shot.provisional) rec.onHit(shot); });
     let t = g.world.time;
     // Feeds wait for the previous rep to be judged (about 4.5-5 s apart for drives).
     const end = t + 45;
@@ -128,7 +128,8 @@ describe('session runner (createGame)', () => {
     }
     assert.ok(g.stats.playerHits >= 8, `hits ${g.stats.playerHits}`);
     assert.ok(g.stats.playerHits >= g.stats.feeds * 0.75, `hits ${g.stats.playerHits} of ${g.stats.feeds} feeds`);
-    assert.ok(g.stats.inCourt / Math.max(1, g.stats.judgedShots) >= 0.7, `in court ${g.stats.inCourt}/${g.stats.judgedShots}`);
+    // QA2: the aimed auto-swing (drill intent, net safety, contacts off the glass) keeps >= 80% in court.
+    assert.ok(g.stats.inCourt / Math.max(1, g.stats.judgedShots) >= 0.8, `in court ${g.stats.inCourt}/${g.stats.judgedShots}`);
   });
 
   test('rally and match modes run with the autopilot', () => {

@@ -40,7 +40,16 @@ export const ROLLING_RESISTANCE = { turf: 0.09, outsideFloor: 0.03 };
  */
 export const SETTLE_SPEED = 0.25;
 
-const DEFAULT_SURFACES = { ...SURFACES, turf: { ...SURFACES.turf, e0: TURF_E0 } };
+/**
+ * Sand-filled turf "crater" (see craterNormal): tilt (deg) = craterK * |v_n| * |v_t|, capped.
+ * Calibrated so a 140 km/h flat smash from 2.8 m at z 2.5 that bounces 3 m past the net
+ * clears the 4 m back wall (por tres) while 100 km/h smashes and bandejas stay in; drives
+ * (|v_n| ~4–6 m/s) tilt < 1° (rebound ~2° steeper, at most ~0.15 m higher at the back
+ * glass) and the FIP drop test (no tangential speed) is unchanged.
+ */
+export const TURF_CRATER = Object.freeze({ craterK: 0.01, craterMax: 15 });
+
+const DEFAULT_SURFACES = { ...SURFACES, turf: { ...SURFACES.turf, ...TURF_CRATER, e0: TURF_E0 } };
 
 // ---------------------------------------------------------------------------
 // Small pure helpers (SPEC §2.2, §2.6)
@@ -118,6 +127,30 @@ function jitterNormal(n, maxDeg, rng, out) {
 }
 
 /**
+ * Compliant-surface "crater" (the impact-crater model of Penner 2002, "The run of a golf
+ * ball", also used for balls on clay and grass): a fast oblique ball dents sand-filled
+ * turf, the dent's leading edge faces the incoming ball, so the effective contact normal
+ * tilts back toward the ball by theta_c = craterK * |v_n| * |v_t| (deg), capped at
+ * craterMax. Slow or shallow balls (drives, drops) barely dent the surface (< 1°); a
+ * 140 km/h smash landing at ~28° (|v_n| 17, |v_t| 31 m/s) tilts it ~5°, which turns the
+ * rebound ~10° steeper (30° -> 41°): the "kick" that lets a flat smash clear the 4 m back wall.
+ * Writes the tilted normal into out and returns |v_n| on the true surface (the speed
+ * that sets the restitution, so the FIP drop test is untouched).
+ */
+function craterNormal(v, normal, vIn, surface, out) {
+  sT1.copy(v).addScaled(normal, -vIn); // tangential incoming velocity
+  const vt = sT1.length();
+  const vnAbs = -vIn;
+  if (vt < 1e-6) return vnAbs;
+  const deg = Math.min(surface.craterMax || 15, surface.craterK * vnAbs * vt);
+  if (!(deg > 0)) return vnAbs;
+  const th = deg * DEG;
+  sT1.scale(1 / vt);
+  out.copy(normal).scale(Math.cos(th)).addScaled(sT1, -Math.sin(th));
+  return vnAbs;
+}
+
+/**
  * Brody/Cross grip–slip impact of the ball on a rigid surface. Mutates ball.vel and
  * ball.spin. normal: unit, pointing out of the surface toward the ball.
  * Mesh surfaces (normalJitterDeg/lossJitter) tilt the normal and lose a random share of
@@ -137,8 +170,10 @@ export function resolveImpact(ball, normal, surface, rng = null) {
     jitterNormal(normal, surface.normalJitterDeg, rng, n);
     if (v.dot(n) > 0.05 * vIn) n.copy(normal); // the tilt must keep the ball approaching
   }
+  let eSpeed = 0;
+  if (surface.craterK) eSpeed = craterNormal(v, normal, vIn, surface, n);
   const vn = v.dot(n);
-  const e = clamp(surface.e0 - surface.eSlope * Math.abs(vn), surface.eMin, surface.eMax);
+  const e = clamp(surface.e0 - surface.eSlope * (eSpeed || Math.abs(vn)), surface.eMin, surface.eMax);
 
   // Contact point relative to the center and its velocity.
   sRc.copy(n).scale(-R);

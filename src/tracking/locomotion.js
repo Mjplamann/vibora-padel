@@ -10,13 +10,21 @@ import { clamp } from '../util/math.js';
 /** Max distance the magnet may pull the target, m (SPEC §4.4). */
 export const MAGNET_MAX_PULL = 1.2;
 
-/** Near-half bounds inset by the body radius, with the net keep-out. */
+/**
+ * How close the player's body may come to the enclosure (m, body centre to the glass plane). QA:
+ * with only the body radius (0.3 m) a glass rep pinned the player against the back glass and the
+ * racket swung 40-57 cm through it. A real player keeps a stride from the back glass and stays
+ * clear of the side glass to swing.
+ */
+export const ENCLOSURE_MARGIN = Object.freeze({ back: 0.6, side: 0.45 });
+
+/** Near-half bounds for the body (court x/z of the feet): enclosure margins plus the net keep-out. */
 export function defaultBounds() {
   return {
-    xMin: -COURT.halfWidth + PLAYER.bodyRadius,
-    xMax: COURT.halfWidth - PLAYER.bodyRadius,
+    xMin: -COURT.halfWidth + ENCLOSURE_MARGIN.side,
+    xMax: COURT.halfWidth - ENCLOSURE_MARGIN.side,
     zMin: PLAYER.netKeepOut,
-    zMax: COURT.halfLength - PLAYER.bodyRadius,
+    zMax: COURT.halfLength - ENCLOSURE_MARGIN.back,
   };
 }
 

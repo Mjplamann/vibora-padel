@@ -11,6 +11,7 @@ import {
   createCourt, resolveImpact, surfaceAt, sideOf, inServiceBox, floorSurfaceAt,
 } from '../src/physics/court.js';
 import { createBallHistory } from '../src/physics/history.js';
+import { predict, solveShot } from '../src/physics/predict.js';
 
 const R = BALL.radius;
 const DT = 1 / SIM.tickRate;
@@ -620,5 +621,99 @@ describe('performance', () => {
     assert.ok(events.some((e) => e.type === 'bounce'));
     assert.ok(events.some((e) => e.type === 'wall'));
     assert.ok(ms < 50, `${ms.toFixed(1)} ms`);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Sand-filled turf at steep, fast impacts: por tres is reachable only for hard smashes.
+
+describe('turf crater: smashes, bandejas and drives', () => {
+  const RPM = (r) => rpmToRads(r);
+  /** Topspin (+) / sidespin about +y for travel toward -z. */
+  const spinFor = (top, side = 0) => v3(-RPM(top), RPM(side), 0);
+  /** Solves a shot from `from` landing on `target` at kmh (launch speed) and plays it out. */
+  const play = (court, from, target, kmh, spin = v3()) => {
+    const s = solveShot({ from, target, spin, speed: kmh / 3.6, court });
+    assert.ok(s.ok, `solve ${kmh} km/h to ${target.z}`);
+    const p = predict(createBall(from, s.vel, spin), court, { maxTime: 4, stopOn: ['exit', 'rest'] });
+    const bounce = first(p.events, 'bounce');
+    const after = p.events.slice(p.events.indexOf(bounce) + 1);
+    return { bounce, exit: first(p.events, 'exit'), wall: first(after, 'wall'), events: p.events };
+  };
+  const SMASH_FROM = v3(0, 2.8, 2.5);
+  const SMASH_TO = v3(0, 0, -3);
+
+  test('140 km/h flat smash from near the net, bounced 3 m past it, goes out over the back wall (por tres)', () => {
+    const court = createCourt();
+    for (const spin of [v3(), spinFor(600), spinFor(-600)]) {
+      const r = play(court, SMASH_FROM, SMASH_TO, 140, spin);
+      assert.equal(r.bounce.side, 'far');
+      assert.ok(Math.abs(r.bounce.pos.z + 3) < 0.06, `bounce z ${r.bounce.pos.z}`);
+      assert.ok(r.exit, 'exits');
+      assert.equal(r.exit.via, 'back');
+      assert.ok(r.exit.pos.y > COURT.backWall.meshTop);
+      assert.ok(r.bounce.t < r.exit.t && !r.events.some((e) => e.type === 'wall' && e.t < r.exit.t), 'bounce then straight out');
+    }
+    // Without the crater (rigid-floor model) the same smash only reaches the back fence.
+    const rigid = play(createCourt({ surfaces: { turf: { craterK: 0 } } }), SMASH_FROM, SMASH_TO, 140);
+    assert.equal(rigid.exit, null);
+  });
+
+  test('angled 140 km/h smash goes out over the side (por cuatro)', () => {
+    const r = play(createCourt(), v3(1.5, 2.8, 2.5), v3(3.5, 0, -3), 140);
+    assert.ok(r.exit);
+    assert.equal(r.exit.via, 'side');
+    assert.equal(r.exit.side, 'far');
+  });
+
+  test('100 km/h smash and 70 km/h bandejas stay in the court', () => {
+    const court = createCourt();
+    const slow = play(court, SMASH_FROM, SMASH_TO, 100);
+    assert.equal(slow.exit, null);
+    assert.ok(slow.wall && slow.wall.wall === 'back' && slow.wall.pos.y < COURT.backWall.meshTop, `back wall at ${slow.wall?.pos.y}`);
+    for (const [from, to] of [[v3(0, 2.6, 4), v3(0, 0, -3)], [v3(0, 2.6, 6), v3(0, 0, -5)], [v3(1, 2.5, 5), v3(-1.5, 0, -7)]]) {
+      const b = play(court, from, to, 70, spinFor(-900));
+      assert.equal(b.exit, null, `bandeja to ${to.z}`);
+      assert.ok(b.wall && b.wall.surface === 'glass' && b.wall.pos.y < 2.0, `bandeja glass y ${b.wall?.pos.y}`);
+    }
+  });
+
+  test('por tres window: needs pace and a bounce close to the net', () => {
+    const court = createCourt();
+    const out = (kmh, lz) => !!play(court, SMASH_FROM, v3(0, 0, lz), kmh).exit;
+    assert.ok(out(120, -3) && out(150, -3) && out(140, -2));
+    assert.ok(!out(140, -4.5) && !out(100, -3) && !out(110, -3.5));
+  });
+
+  test('drives keep a realistic bounce: 0.6–1.3 m at the back glass, at most 0.2 m above the rigid model', () => {
+    const court = createCourt();
+    const rigid = createCourt({ surfaces: { turf: { craterK: 0 } } });
+    for (const kmh of [60, 80, 100]) {
+      for (const lz of [-6.5, -7]) {
+        const from = v3(0.5, 1.0, 8), to = v3(-0.5, 0, lz), spin = spinFor(1200);
+        const a = play(court, from, to, kmh, spin);
+        const b = play(rigid, from, to, kmh, spin);
+        assert.equal(a.wall.surface, 'glass');
+        const y = a.wall.pos.y;
+        assert.ok(y >= 0.6 && y <= 1.3, `${kmh} km/h to ${lz}: glass at ${y.toFixed(2)} m`);
+        const dy = y - b.wall.pos.y;
+        assert.ok(dy >= 0 && dy < 0.2, `${kmh} km/h: crater changed the glass height by ${dy.toFixed(2)} m`);
+      }
+    }
+  });
+
+  test('crater: vertical drops are unchanged, steep fast balls rebound steeper, shallow ones barely', () => {
+    const turf = createCourt().surfaces.turf;
+    const plain = { ...turf, craterK: 0 };
+    const drop = (s) => { const b = createBall(v3(), v3(0, -6.9, 0)); resolveImpact(b, v3(0, 1, 0), s); return b.vel; };
+    assert.deepEqual(drop(turf).toArray(), drop(plain).toArray());
+    const angleOut = (s, vin) => { const b = createBall(v3(), vin); resolveImpact(b, v3(0, 1, 0), s); return Math.atan2(b.vel.y, -b.vel.z) * 180 / Math.PI; };
+    const smash = v3(0, -16.6, -31.2);
+    assert.ok(angleOut(turf, smash) - angleOut(plain, smash) > 8, 'smash kicks up');
+    const drive = v3(0, -4.6, -16.3);
+    assert.ok(angleOut(turf, drive) - angleOut(plain, drive) < 2.5, 'drive almost unchanged');
+    const b = createBall(v3(), smash.clone());
+    resolveImpact(b, v3(0, 1, 0), turf);
+    assert.ok(b.vel.y > 0 && b.vel.z < 0, 'still leaves forward and up');
   });
 });

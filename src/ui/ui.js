@@ -77,6 +77,7 @@ const ICON = {
   check: '<svg viewBox="0 0 20 20" aria-hidden="true"><path d="M4 10.5l4 4 8-9"/></svg>',
   back: '<svg viewBox="0 0 20 20" aria-hidden="true"><path d="M12.5 4l-6 6 6 6"/></svg>',
   hand: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 13V5.5a1.5 1.5 0 013 0V11m0-6.5V4a1.5 1.5 0 013 0v7m0-5.5a1.5 1.5 0 013 0V12m0-3.5a1.5 1.5 0 013 0V15a7 7 0 01-7 7h-1.2a6 6 0 01-4.8-2.4L4.3 15.5a1.6 1.6 0 012.4-2.1L8 14.7"/></svg>',
+  install: '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="12.5" rx="1.8"/><path d="M8 20.5h8M12 7.5v6M9.2 11l2.8 2.8 2.8-2.8"/></svg>',
   racket: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9.2 14.8a6.2 6.2 0 118.6-1.4c-1.6 1.6-3.3 2.4-5.2 2.4l-5.4 5.4-1.8-1.8 5.4-5.4c-.2-.7-.9-1.4-1.6.8z"/><circle cx="13.2" cy="8.4" r=".7" class="fill"/><circle cx="15.6" cy="8.4" r=".7" class="fill"/><circle cx="13.2" cy="10.8" r=".7" class="fill"/><circle cx="15.6" cy="10.8" r=".7" class="fill"/></svg>',
 };
 
@@ -132,6 +133,7 @@ const SETTINGS_GROUPS = [
   {
     en: 'Play', es: 'Juego', items: [
       { key: 'assist', type: 'seg', en: 'Assist', es: 'Ayuda', options: [['rookie', 'Rookie'], ['club', 'Club'], ['pro', 'Pro']] },
+      { key: 'hitPrediction', type: 'switch', en: 'Predictive hitting', es: 'Golpe predictivo' },
       { key: 'gazeFollow', type: 'switch', en: 'Gaze follows the ball', es: 'Mirada a la bola' },
       { key: 'landingMarker', type: 'switch', en: 'Landing marker', es: 'Marca de bote' },
       { key: 'contactGhost', type: 'switch', en: 'Ideal contact ghost', es: 'Punto de impacto ideal' },
@@ -144,6 +146,7 @@ const SETTINGS_GROUPS = [
       { key: 'gainDepth', type: 'range', en: 'Forward / back gain', es: 'Profundidad', min: 1, max: 4, step: 0.1, fmt: (v) => `×${v.toFixed(1)}` },
       { key: 'fov', type: 'range', en: 'Field of view', es: 'Campo de visión', min: 55, max: 100, step: 1, fmt: (v) => `${Math.round(v)}°` },
       { key: 'latency', type: 'range', en: 'Latency compensation', es: 'Latencia', min: 0, max: 0.3, step: 0.005, fmt: (v) => `${Math.round(v * 1000)} ms` },
+      { key: 'offAxisYaw', type: 'switch', en: 'Off-axis arm correction (experimental)', es: 'Corrección fuera de eje (experimental)' },
     ],
   },
   {
@@ -210,6 +213,7 @@ export function createUI(root, handlers = {}) {
     calStatus: {},
     loading: { p: 0, text: 'Warming up the court…' },
     ballInd: null,
+    install: { kind: 'none', onInstall: null }, // app packaging (src/app/pwa.js)
   };
 
   // ---- DOM scaffold ---------------------------------------------------------
@@ -220,6 +224,7 @@ export function createUI(root, handlers = {}) {
     <div class="vp-hud" data-layer="hud" hidden></div>
     <div class="vp-banner" aria-live="assertive"></div>
     <div class="vp-toasts" aria-live="polite"></div>
+    <div class="vp-update" role="status" hidden><span class="vu-text">Update ready<small>Nueva versión lista</small></span><button type="button" class="btn btn-sm go" data-update-restart>Restart</button></div>
     <div class="vp-pausehold" hidden><svg viewBox="0 0 64 64" aria-hidden="true"><circle class="bg" cx="32" cy="32" r="27"/><circle class="fg" cx="32" cy="32" r="27"/></svg><span>Hold to pause<small>Mantén para pausar</small></span></div>
     <div class="vp-cursor" hidden aria-hidden="true"><svg viewBox="0 0 80 80"><circle class="halo" cx="40" cy="40" r="30"/><circle class="track" cx="40" cy="40" r="30"/><circle class="ring" cx="40" cy="40" r="30"/></svg><span class="dot"></span></div>`;
   const $ = (sel, scope = root) => scope.querySelector(sel);
@@ -444,6 +449,7 @@ export function createUI(root, handlers = {}) {
       case 'start': goto('camera'); break;
       case 'fallback': call('onUseFallbackControls'); break;
       case 'help': goto('help'); break;
+      case 'install': if (state.install.onInstall) state.install.onInstall(); break;
       case 'settings': goto('settings'); break;
       case 'back': goBack(); break;
       case 'hub': goto('hub'); break;
@@ -620,6 +626,61 @@ export function createUI(root, handlers = {}) {
     layerScreen.querySelectorAll('.raise-hint').forEach((r) => { r.hidden = !state.titleHand; });
   }
 
+  // ---- Install as an app (PWA; state from src/app/pwa.js via setInstall) ------------------
+  function installTitleHtml() {
+    switch (state.install.kind) {
+      case 'prompt':
+        return `<button type="button" class="btn btn-install" data-action="install" data-focus-key="install">${ICON.install}<span>Install Víbora<span class="es">Instalar la app</span></span></button><p class="install-note">Its own window and Dock icon · works offline</p>`;
+      case 'safari':
+        return `<p class="install-note">${ICON.install}<span>Make it an app: <b>File → Add to Dock</b><span class="es">Archivo → Añadir al Dock</span></span></p>`;
+      default:
+        return '';
+    }
+  }
+
+  function installHelpHtml() {
+    const k = state.install.kind;
+    const chrome = 'In <b>Chrome</b>: the install icon at the right of the address bar, or <b>⋮ → Cast, save and share → Install page as app</b>.';
+    const safari = 'In <b>Safari</b> (macOS Sonoma or later): <b>File → Add to Dock</b>.';
+    let body;
+    if (k === 'installed') body = '<p>You are running the Víbora app. Press <b>F</b> for full screen (hold <b>Esc</b> to leave it).</p>';
+    else if (k === 'done') body = '<p>Installed. Open <b>Víbora</b> from the Dock or Launchpad.</p>';
+    else if (k === 'prompt') body = `<div class="hi-row"><button type="button" class="btn btn-install" data-action="install" data-focus-key="install-help">${ICON.install}<span>Install Víbora<span class="es">Instalar la app</span></span></button><p>Its own window and Dock icon, no browser bars.</p></div>`;
+    else if (k === 'safari') body = `<p>${safari}</p>`;
+    else if (k === 'chrome') body = `<p>${chrome}</p>`;
+    else body = `<p>${chrome}</p><p>${safari}</p>`;
+    return `<h3 class="skill-head">Use it like an app<span class="es">Como una app</span></h3>${body}<p class="muted">Works offline after the first visit.</p>`;
+  }
+
+  function syncInstall() {
+    layerScreen.querySelectorAll('[data-install-slot]').forEach((el) => {
+      const html = el.dataset.installSlot === 'help' ? installHelpHtml() : installTitleHtml();
+      const hadFocus = el.contains(document.activeElement);
+      el.innerHTML = html;
+      el.hidden = !html;
+      if (hadFocus) focusEl(defaultFocus());
+    });
+  }
+
+  /** info: { kind: 'installed'|'prompt'|'done'|'safari'|'chrome'|'none', onInstall } */
+  function setInstall(info = {}) {
+    state.install = { kind: info.kind || 'none', onInstall: info.onInstall || null };
+    syncInstall();
+  }
+
+  /** A new version is waiting: a small "Update ready — Restart" notice (hidden during play). */
+  function updateReady(onRestart) {
+    const el = root.querySelector('.vp-update');
+    if (!el) return;
+    el.hidden = false;
+    const b = el.querySelector('[data-update-restart]');
+    b.onclick = () => {
+      b.disabled = true;
+      b.textContent = 'Restarting…';
+      if (onRestart) onRestart();
+    };
+  }
+
   function renderTitle(data) {
     const el = document.createElement('section');
     el.innerHTML = `
@@ -638,6 +699,7 @@ export function createUI(root, handlers = {}) {
           <button type="button" class="btn" data-action="help" data-focus-key="help">Setup help</button>
         </div>
       </div>
+      <div class="title-install" data-install-slot="title"${installTitleHtml() ? '' : ' hidden'}>${installTitleHtml()}</div>
       ${data && data.version ? `<p class="title-version">${esc(data.version)}</p>` : ''}`;
     return { el };
   }
@@ -735,7 +797,7 @@ export function createUI(root, handlers = {}) {
       <header class="screen-head">
         <button type="button" class="btn btn-ghost btn-back" data-action="cal-back" aria-label="Back">${ICON.back}<span>Back</span></button>
         <div><p class="eyebrow">Step 2 of 2 · Calibración</p><h2 class="h-display">Calibrate<span class="es">Calibrar</span></h2></div>
-        <ol class="stepper" aria-label="Calibration steps">${CAL_STEPS.map((s, i) => `<li class="${i < stepIdx ? 'done' : i === stepIdx ? 'current' : ''}"${i === stepIdx ? ' aria-current="step"' : ''}><b>${i + 1}</b><span>${esc(s.en)}${s.optional ? ' <em>optional</em>' : ''}<small>${esc(s.es)}</small></span></li>`).join('')}</ol>
+        <ol class="stepper" aria-label="Calibration steps">${CAL_STEPS.map((s, i) => `<li class="${i < stepIdx ? 'done' : i === stepIdx ? 'current' : ''}"${i === stepIdx ? ' aria-current="step"' : ''}><b>${i + 1}</b><span>${esc(s.en)}${s.optional ? ` <em data-k="${s.id}-tag">${esc(optTag(s.id))}</em>` : ''}<small>${esc(s.es)}</small></span></li>`).join('')}</ol>
       </header>
       <div class="cal-grid">
         <div class="preview-wrap panel">
@@ -785,7 +847,8 @@ export function createUI(root, handlers = {}) {
         ${fieldHtml('Height', 'Altura', rangeHtml('height', { min: 1.4, max: 2.1, step: 0.01, value: s.height, label: 'Height', fmt: SETTING_ITEMS.height.fmt }), { valueId: 'height', value: SETTING_ITEMS.height.fmt(s.height) })}
         <div class="btn-row"><button type="button" class="btn go btn-lg" data-action="cal-next" data-autofocus data-focus-key="cal-next">Continue<span class="es">Seguir</span></button></div>`;
       case 'latency': return `
-        <h3 class="cal-title">Latency test <em class="opt">optional</em><span class="es">Prueba de latencia</span></h3>
+        <h3 class="cal-title">Latency test <em class="opt" data-k="latency-tag">${esc(optTag('latency'))}</em><span class="es">Prueba de latencia</span></h3>
+        <p class="cal-lead cal-why" data-k="lat-why"${needsLatencyTest() ? '' : ' hidden'}><b>Your browser doesn't report camera timestamps (Safari) – run the latency test.</b><span class="es">Tu navegador no da la hora de captura: haz la prueba de latencia.</span></p>
         <p class="cal-lead">Six flashes on a steady beat. Swing your racket hand <b>down</b> exactly on each flash. We measure how late the camera sees it.</p>
         <div class="lat-dots" role="list" aria-label="Flashes">${Array.from({ length: LAT_FLASHES }, (_, i) => `<span role="listitem" data-flash="${i}"></span>`).join('')}</div>
         <div class="lat-readout"><span class="meter-label">Measured · medido</span><b data-k="lat">${Math.round(s.latency * 1000)}<small>ms now</small></b></div>
@@ -1068,11 +1131,25 @@ export function createUI(root, handlers = {}) {
     calAdvance();
   }
 
+  /** The latency step is recommended (not optional) when the browser gives no capture timestamps. */
+  function needsLatencyTest() {
+    return !!state.calStatus.needsLatencyTest;
+  }
+  function optTag(id) {
+    return id === 'latency' && needsLatencyTest() ? 'recommended' : 'optional';
+  }
+
   function calibration(status = {}) {
     const st = { ...state.calStatus, ...status };
     if (status.swingAt != null && state.calib && state.calib.lat.phase === 'run') state.calib.lat.swings.push(status.swingAt);
     delete st.swingAt;
+    const latChanged = status.needsLatencyTest !== undefined && !!status.needsLatencyTest !== !!state.calStatus.needsLatencyTest;
     state.calStatus = st;
+    if (latChanged && state.screen === 'calibrate') {
+      layerScreen.querySelectorAll('[data-k="latency-tag"]').forEach((e) => { e.textContent = optTag('latency'); });
+      const why = layerScreen.querySelector('[data-k="lat-why"]');
+      if (why) why.hidden = !needsLatencyTest();
+    }
     if (status.step && state.screen === 'calibrate' && status.step !== state.calib.step) calSetStep(status.step);
   }
 
@@ -1231,7 +1308,7 @@ export function createUI(root, handlers = {}) {
           <button type="button" class="btn" data-action="pause-recal" data-focus-key="recal">Recalibrate<span class="es">Calibrar</span></button>
           <button type="button" class="btn" data-action="quit" data-focus-key="quit">Quit to drills<span class="es">Salir</span></button>
         </div>
-        <p class="pause-hint">Both hands above your head for 1.5 s pauses play · Esc</p>
+        <p class="pause-hint">Both hands above your head for 2 s pauses play (between points) · Esc</p>
       </div>`;
     return { el };
   }
@@ -1376,7 +1453,7 @@ export function createUI(root, handlers = {}) {
       ['bandeja', 'Above-shoulder contact, controlled, face slightly open.'],
       ['vibora', 'Above-shoulder with strong sideways slice.'],
       ['smash', 'High contact, racket over 60 km/h and steeply down.'],
-      ['lob', 'Racket path rising more than 35°.'],
+      ['lob', 'Ball leaves high: apex over 4 m, or climbing over 25° at 70 km/h or less.'],
       ['chiquita', 'Slow, low touch under 30 km/h racket speed.'],
     ];
     el.innerHTML = `
@@ -1402,7 +1479,7 @@ export function createUI(root, handlers = {}) {
             <li><b>1</b><span>Connect the Mac to the TV with HDMI. Mirror the display, set the TV to <em>Game mode</em> to cut lag.</span></li>
             <li><b>2</b><span>Put the camera on top of the TV, centred, at roughly chest height or tilted slightly down.</span></li>
             <li><b>3</b><span>Stand 2.2–3.5 m back with light on you, not behind you. Clear a 2 × 1.5 m area.</span></li>
-            <li><b>4</b><span>Open in Chrome or Safari, full screen (⌃⌘F), and allow camera access.</span></li>
+            <li><b>4</b><span>Install it as an app (see <em>Use it like an app</em>) or open it in Chrome / Safari; full screen with F (or ⌃⌘F); allow camera access.</span></li>
           </ol>
         </section>
         <section class="help-col">
@@ -1412,8 +1489,9 @@ export function createUI(root, handlers = {}) {
             <li>Choose the lens preset that matches your camera so distance reads right.</li>
             <li>60 fps cameras track swings best. Avoid backlight and mirrors behind you.</li>
             <li>Plain clothes with sleeves that contrast with the wall help the tracker.</li>
-            <li>Pause any time: both hands above your head, or Esc.</li>
+            <li>Pause between points: both hands above your head for 2 s, or Esc.</li>
           </ul>
+          <div class="help-install" data-install-slot="help">${installHelpHtml()}</div>
         </section>
         <section class="help-col">
           <h3 class="skill-head">How strokes are read<span class="es">Cómo leemos el golpe</span></h3>
@@ -1857,6 +1935,8 @@ export function createUI(root, handlers = {}) {
     setSkeleton,
     setCursor,
     setTitleHandHint,
+    setInstall,
+    updateReady,
     calibration,
     settings,
     ballIndicator,

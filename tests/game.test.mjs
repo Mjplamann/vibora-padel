@@ -382,7 +382,7 @@ describe('human controller', () => {
       h.onRacketPose(w, { grip, axis: r.pose.axis, normal: r.pose.normal }, t);
     };
     let shots = 0;
-    w.bus.on('ball:hit', (p) => { if (p.shot.by === 'player') shots++; });
+    w.bus.on('ball:hit', (p) => { if (p.shot.by === 'player' && !p.shot.provisional) shots++; });
     let tf = tr - 0.3 + 0.004;
     while (w.time < tr + 0.4) {
       if (w.time >= tf) {

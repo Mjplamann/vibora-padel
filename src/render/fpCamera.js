@@ -63,11 +63,21 @@ export function createFirstPersonCamera(camera, settings = {}) {
     return out;
   }
 
+  /** The incoming ball's planned contact (tactical home's intercept) for contact framing, or null. */
+  function predictedContact(world) {
+    const ic = world?.mode?.tactics?.state?.intercept;
+    const c = ic && ic.contact;
+    if (!c || !world.ball || world.ball.atRest) return null;
+    contactOut.x = c.x; contactOut.y = c.y; contactOut.z = c.z; contactOut.t = ic.t;
+    return contactOut;
+  }
+  const contactOut = { x: 0, y: 0, z: 0, t: 0 };
+
   const basePitch = () => (Number.isFinite(settings.viewPitch) ? settings.viewPitch * DEG : BASE_PITCH);
 
   function updateFp(world, dt) {
     const eye = eyeOf(world.player, toPos);
-    const g = gaze.update(world.ball, eye, dt, { basePitch: basePitch(), follow: settings.gazeFollow !== false });
+    const g = gaze.update(world.ball, eye, dt, { basePitch: basePitch(), follow: settings.gazeFollow !== false, contact: predictedContact(world) });
     euler.set(g.pitch, g.yaw, 0, 'YXZ'); // no roll
     toQuat.setFromEuler(euler);
   }

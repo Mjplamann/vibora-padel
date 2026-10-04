@@ -20,9 +20,10 @@
 
 import { Vec3, v3 } from '../util/vec3.js';
 import { clamp, createRng, smoothstep } from '../util/math.js';
-import { RACKET, PLAYER, TRACKING, ASSIST, DEFAULT_ASSIST } from '../config.js';
+import { RACKET, PLAYER, TRACKING, ASSIST, DEFAULT_ASSIST, COURT } from '../config.js';
 import { standingBody, crouchBody, turnBody, poseArm, setHandTarget } from './synthetic.js';
 import { defaultBounds, MAGNET_MAX_PULL, softDeadzone } from './locomotion.js';
+import { stanceBounds, playableCandidates, pickGlassContact } from '../game/intercept.js';
 import { rotateAbout } from './body.js';
 import { predict, interceptCandidates, solveShot } from '../physics/predict.js';
 import { racketImpact, spinFromComponents } from '../physics/racket.js';
@@ -43,8 +44,15 @@ export const SWING_SHAPE = Object.freeze({
   vfh: { tau0: 0.1, thetaMax: 0.8, brush: 0 },
   vbh: { tau0: 0.1, thetaMax: 0.8, brush: 0 },
   oh: { tau0: 0.11, thetaMax: 1.8, brush: 0 },
-  sm: { tau0: 0.1, thetaMax: 2.0, brush: 20 }, // QA: a 20° brush takes ~30% of the backspin off the smash (40° costs accuracy)
+  // Flat smash: on an overhead arc about the shoulder the brush direction (axis x normal) is
+  // sideways, so any brush became 1600-3600 rpm of sidespin and por cuatro dominated (merge pass;
+  // brush 0 keeps |side| < 550 rpm and doubles por tres in smash-x3).
+  sm: { tau0: 0.1, thetaMax: 2.0, brush: 0 },
 });
+/** Min ball-to-racket-head distance (m) before the contact (swingClearance): head half width + ball + margin. */
+const FOUL_CLEAR = 0.2;
+/** The racket frame stays this far inside the glass (m). */
+const ENCLOSURE_GAP = 0.06;
 const ARC_IN = 0.32; // s before contact when the forward arc takes over from the preparation
 const ARC_OUT = 0.24; // s after contact when the follow-through starts returning to ready
 const RECOVER = 0.5; // s to return to the ready pose
@@ -190,8 +198,10 @@ export function createAutopilot({ handed = 'right', skill = 0.9, rng = createRng
       return after.reduce((b, c) => (h(c) > h(b) ? c : b), after[0]);
     }
     const byT = (arr) => arr.slice().sort((x, y) => x.t - y.t);
-    // A contact whose stance would be behind the back glass / beside the side glass is no option.
-    const b = defaultBounds();
+    // A contact whose stance would be behind the back glass / beside the side glass is no option,
+    // and neither is one jammed against the glass (QA2: let it come off the glass first).
+    cands = playableCandidates(cands);
+    const b = stanceBounds();
     // ...and so is one the real play area cannot take the player to (ROOM_ENVELOPE).
     const reach = (st) => {
       const a = reachableStance(world, { x: clamp(st.x, b.xMin, b.xMax), z: clamp(st.z, b.zMin, b.zMax) });
@@ -214,8 +224,9 @@ export function createAutopilot({ handed = 'right', skill = 0.9, rng = createRng
       const v = cands.filter((c) => c.kind === 'volley' && h(c) >= 0.6 && h(c) <= 1.7 * k);
       if (v.length) return v.reduce((b, c) => (volleyCost(c) < volleyCost(b) ? c : b), v[0]);
     } else if (hint.contact === 'glass') {
-      const g = byT(cands.filter((c) => c.kind === 'after-wall' && c.comfortable && !c.cramped));
-      if (g.length) return g[Math.min(2, g.length - 1)];
+      // Off the glass: once it has come out (game/intercept.js), not right at the rebound.
+      const g = pickGlassContact(cands, height);
+      if (g) return g;
     }
     // Default preference (comfortable groundstroke, then volley...), never an overhead by accident.
     const low = cands.filter((c) => h(c) <= 1.7 * k);
@@ -282,7 +293,7 @@ export function createAutopilot({ handed = 'right', skill = 0.9, rng = createRng
     if (!c) return { key, none: true, made: T };
     const fam = serving ? 'fh' : familyFor(c, hint, pl.pos);
     const off = CONTACT_OFFSETS[fam];
-    const b = defaultBounds();
+    const b = stanceBounds();
     const s = idealStance(c.pos, fam, handed, height);
     // Where the play area can actually put the player (the swing is planned from there).
     const stance = reachableStance(world, { x: clamp(s.x, b.xMin, b.xMax), z: clamp(s.z, b.zMin, b.zMax) });
@@ -303,7 +314,7 @@ export function createAutopilot({ handed = 'right', skill = 0.9, rng = createRng
     const aim = aimFor(world, hint, fam, serving);
     const fromC = c.pos.clone();
     const dir = v3(aim.target.x - fromC.x, 0, aim.target.z - fromC.z);
-    let spinGuess = spinFromComponents(dir, aim.top, 0);
+    const spinGuess = spinFromComponents(dir, aim.top, 0);
     const solveDes = (spin) => {
       let res = aim.apex ? solveShot({ from: fromC, target: aim.target, spin, apex: aim.apex }) : solveShot({ from: fromC, target: aim.target, spin, speed: aim.speed });
       // Skim the tape (chiquita): add pace until the lowest trajectory clears by < maxClear.
@@ -323,14 +334,29 @@ export function createAutopilot({ handed = 'right', skill = 0.9, rng = createRng
     const adaptKey = serving ? 'serve' : fam;
     const corr = adapt[adaptKey];
     const corrected = (v) => (corr ? applyCorrection(v, corr) : v);
-    let des = solveDes(spinGuess);
-    let sw = solveSwing({ C: fromC, vin: vIn, spinIn, vDes: corrected(des.vel), shoulder, faceSign, brushDeg: shape.brush });
-    spinGuess = sw.spinOut;
-    des = solveDes(spinGuess);
-    sw = solveSwing({ C: fromC, vin: vIn, spinIn, vDes: corrected(des.vel), shoulder, faceSign, brushDeg: shape.brush });
-
-    const omega = sw.omega.length();
-    const tau0 = Math.min(shape.tau0, shape.thetaMax / Math.max(omega, 1e-3));
+    const solveWith = (brushDeg, thetaMax = shape.thetaMax) => {
+      let des = solveDes(spinGuess);
+      let sw = solveSwing({ C: fromC, vin: vIn, spinIn, vDes: corrected(des.vel), shoulder, faceSign, brushDeg });
+      des = solveDes(sw.spinOut);
+      sw = solveSwing({ C: fromC, vin: vIn, spinIn, vDes: corrected(des.vel), shoulder, faceSign, brushDeg });
+      const omega = sw.omega.length();
+      const tau0 = Math.min(shape.tau0, thetaMax / Math.max(omega, 1e-3));
+      return { des, sw, omega, tau0 };
+    };
+    // A held backswing must not sit in the ball's path before the contact (QA2: off the back glass the
+    // ball came straight back into the waiting racket, 0.6 m from the glass). Try a lower, brushed
+    // (low-to-high) arc when it would: "side-on to the glass, racket low".
+    let best = null;
+    // ...or a fuller backswing that takes the head round behind the body, out of the ball's line.
+    const options = c.kind === 'volley' || serving ? [[shape.brush]] : [[shape.brush], [shape.brush, 2.4], [50, 2.4], [50], [66, 2.4]];
+    for (const [brushDeg, thetaMax] of options) {
+      const s = solveWith(brushDeg, thetaMax);
+      s.clear = swingClearance({ tr, t: c.t, C: fromC, shoulder, sw: s.sw, tau0: s.tau0, omega: s.omega, faceSign }, pred);
+      if (!best || s.clear > best.clear + 0.02) best = s;
+      if (s.clear >= FOUL_CLEAR) break;
+    }
+    const { des, sw, omega, tau0 } = best;
+    st.minClear = Math.min(st.minClear ?? Infinity, best.clear);
     st.plans++;
     const p = {
       key, none: false, made: T, committed, t: c.t, tr, kind: c.kind, fam, adaptKey, stance, crouch, turn,
@@ -340,6 +366,37 @@ export function createAutopilot({ handed = 'right', skill = 0.9, rng = createRng
     };
     st.lastPlan = p;
     return p;
+  }
+
+  const fpA = { grip: v3(), axis: v3(), normal: v3() };
+  const fpB = v3();
+  /**
+   * Smallest distance (m) between the incoming ball and the racket head along the swing before the
+   * contact (held backswing + forward arc up to 60 ms before it), the ball taken at racket time minus
+   * the latency the game rewinds by. Below FOUL_CLEAR the racket would touch the ball early.
+   */
+  function swingClearance(p, pred) {
+    const S = pred.samples;
+    if (!S || !S.length) return Infinity;
+    const lag = p.tr - p.t;
+    let i = 0, min = Infinity;
+    for (let T = p.tr - ARC_IN - 0.25; T <= p.tr - 0.06; T += 1 / 120) {
+      const tb = T - lag;
+      while (i < S.length - 1 && S[i + 1].t <= tb) i++;
+      if (S[i].t > tb || i >= S.length - 1) continue;
+      const a = S[i], b = S[i + 1];
+      const u = (tb - a.t) / Math.max(1e-6, b.t - a.t);
+      fpB.lerpVectors(a.pos, b.pos, u);
+      arcPose(p, Math.max(T, p.tr - ARC_IN), fpA);
+      // Distance to the head's centre line (face centre ± half its length).
+      let best = Infinity;
+      for (const y of [RACKET.faceCenterY - RACKET.faceSemiY, RACKET.faceCenterY, RACKET.faceCenterY + RACKET.faceSemiY]) {
+        const dx = fpA.grip.x + fpA.axis.x * y - fpB.x, dy = fpA.grip.y + fpA.axis.y * y - fpB.y, dz = fpA.grip.z + fpA.axis.z * y - fpB.z;
+        best = Math.min(best, Math.hypot(dx, dy, dz));
+      }
+      min = Math.min(min, best);
+    }
+    return min;
   }
 
   /** Racket pose (court) on the swing arc at racket time T. */
@@ -546,6 +603,25 @@ export function createAutopilot({ handed = 'right', skill = 0.9, rng = createRng
   }
 
   const outPose = { grip: v3(), axis: v3(), normal: v3() };
+  const encSide = v3();
+
+  /** Translates a racket pose so its frame stays ENCLOSURE_GAP inside the back and side glass. */
+  function keepInsideEnclosure(pose) {
+    const zMax = COURT.halfLength - ENCLOSURE_GAP, xMax = COURT.halfWidth - ENCLOSURE_GAP;
+    encSide.crossVectors(pose.axis, pose.normal).normalize();
+    let dz = 0, dxp = 0, dxn = 0;
+    const g = pose.grip, a = pose.axis;
+    for (const [y, w] of [[RACKET.buttY, 0], [RACKET.length + RACKET.buttY, 0], [RACKET.faceCenterY, RACKET.headWidth / 2], [RACKET.faceCenterY, -RACKET.headWidth / 2]]) {
+      const x = g.x + a.x * y + encSide.x * w, z = g.z + a.z * y + encSide.z * w;
+      dz = Math.max(dz, Math.abs(z) - zMax);
+      dxp = Math.max(dxp, x - xMax);
+      dxn = Math.max(dxn, -xMax - x);
+    }
+    if (dz > 0) g.z -= Math.sign(g.z || 1) * dz;
+    if (dxp > 0) g.x -= dxp;
+    else if (dxn > 0) g.x += dxn;
+    return pose;
+  }
 
   /** Learns from the player's last shot: realised physical launch vs the planned one. */
   function learn(world) {
@@ -593,8 +669,10 @@ export function createAutopilot({ handed = 'right', skill = 0.9, rng = createRng
     if (turn) turnBody(body, turn);
     if (crouch > 1e-4) crouchBody(body, crouch);
 
-    // Racket -> hand target in U with the player's current court position.
+    // Racket -> hand target in U with the player's current court position. Near the glass a player
+    // shortens the backswing rather than swing through it.
     racketPose(world, T, outPose);
+    keepInsideEnclosure(outPose);
     cur.grip.copy(outPose.grip);
     cur.axis.copy(outPose.axis);
     cur.normal.copy(outPose.normal);

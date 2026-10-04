@@ -83,7 +83,8 @@ export function createGame({
   };
   const offs = [
     world.bus.on('ball:hit', ({ shot }) => {
-      if (shot.by === 'player') {
+      // Provisional (predicted) hits are presentation: stats count the confirmed ones only.
+      if (shot.by === 'player' && !shot.provisional) {
         stats.playerHits++;
         stats.lastShot = shot;
       }
@@ -152,8 +153,12 @@ export function createGame({
     // A pointer only moves the racket on a plane in front of the eyes, so a raw flick has almost
     // no speed toward the ball (in tests 3 of 15 flicks connected, at 7-17 km/h). A fast flick
     // while a ball is coming therefore starts the timed swing that Space starts.
+    // The auto-swing's own racket speed (~11 m/s) must not re-trigger it around the contact.
     const b = world.ball;
-    if (r.racket && r.racket.vel.length() > FLICK_SWING && world.time - lastFlickSwing > 0.9
+    const swinging = !!(fallback.autoPlan && fallback.autoPlan.live);
+    // The pointer's own flick speed (fallback.flickSpeed): walking (keys, magnet) is not a flick.
+    const flick = r.flickSpeed ?? (r.racket ? r.racket.vel.length() : 0);
+    if (!swinging && r.racket && flick > FLICK_SWING && world.time - lastFlickSwing > 0.9
       && b && !b.atRest && world.flight.team !== 0 && b.vel.z > 0) {
       lastFlickSwing = world.time;
       fallback.triggerAutoSwing();

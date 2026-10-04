@@ -27,6 +27,18 @@ export const COACH_LEVELS = Object.freeze({
   pro: Object.freeze({ sigma: 0.25, kmh: [85, 100], topRpm: [900, 2200], maxSpeed: 5.5, accel: 14, reaction: 0.18, smash: 0.6, lob: 0.45, chiquita: 0.35, err: 0.025, kill: 0.55 }),
 });
 
+/**
+ * Underhand serve spin per level (rpm): slice (backspin) and sidespin windows; the side
+ * sign is random (cut inside-out or across). Real padel serves are sliced, rarely flat.
+ */
+export const SERVE_SPIN = Object.freeze({
+  rookie: Object.freeze({ slice: [200, 400], side: [300, 600] }),
+  club: Object.freeze({ slice: [250, 600], side: [300, 900] }),
+  pro: Object.freeze({ slice: [300, 800], side: [500, 1200] }),
+});
+/** Hand feeds carry a little sidespin (rpm, either way). */
+export const FEED_SIDE_RPM = 200;
+
 /** Ready depth (|z|, m) at the net and at the back. */
 export const NET_Z = 3.2;
 export const BACK_Z = 7.4;
@@ -174,6 +186,14 @@ export function createCoach({
     const sideRpm = (amp) => rng.range(-amp, amp) * (0.5 + lv);
     if (stroke === 'bandeja') {
       if (c.pos.y > 2.15 && Math.abs(c.pos.z) < 6 && rng() < L.smash) {
+        if (level === 'pro' && Math.abs(c.pos.z) < 4 && rng() < 0.4) {
+          // Por tres: flat and hard from near the net, bounced 2.4–3.4 m past it so it kicks
+          // up over the 4 m back wall (needs ~130 km/h+ on the sand-filled turf).
+          return {
+            kind: 'smash', stroke: 'smash', target: v3(rng.range(-1.5, 1.5), 0, tz(rng.range(2.4, 3.4))),
+            speed: (k1 * rng.range(1.35, 1.5)) / 3.6, top: rng.range(0, 400), side: sideRpm(250),
+          };
+        }
         return {
           kind: 'smash', stroke: 'smash', target: v3(rng.range(-SAFE_X, SAFE_X), 0, tz(rng.range(4.5, 6.2))),
           speed: (k1 * rng.range(1.15, 1.4)) / 3.6, top: rng.range(0, 700), side: sideRpm(400),
@@ -438,7 +458,7 @@ export function createCoach({
     const opp = opponentsOf(world)[0];
     const t = target ? v3(target.x, 0, target.z)
       : v3(clamp((opp ? opp.x : 0) + rng.range(-1.0, 1.2), -SAFE_X, SAFE_X), 0, -sz * rng.range(5.6, 6.6));
-    const spin = spinFromComponents(v3(t.x - from.x, 0, t.z - from.z), top, 0);
+    const spin = spinFromComponents(v3(t.x - from.x, 0, t.z - from.z), top, rng.range(-FEED_SIDE_RPM, FEED_SIDE_RPM));
     let res = solveShot({ from, target: t, spin, speed: kmh / 3.6 });
     if (!res.ok || !res.clearsNet) res = solveShot({ from, target: t, spin, apex: 2.2 });
     swing = { stroke: 'forehand', start: world.time - 0.5, dur: 0.9 };
@@ -466,7 +486,10 @@ export function createCoach({
     const target = v3(bx * rng.range(1.2, 3.2), 0, -sz * rng.range(5.0, 6.3));
     target.x += rng.normal(0, L.sigma * 0.5);
     target.z += rng.normal(0, L.sigma * 0.5);
-    const spin = spinFromComponents(v3(target.x - from.x, 0, target.z - from.z), -300, 0);
+    const sv = SERVE_SPIN[level] || SERVE_SPIN.club;
+    const top = -rng.range(sv.slice[0], sv.slice[1]);
+    const sideRpm = (rng() < 0.5 ? -1 : 1) * rng.range(sv.side[0], sv.side[1]);
+    const spin = spinFromComponents(v3(target.x - from.x, 0, target.z - from.z), top, sideRpm);
     let res = solveShot({ from, target, spin, speed: rng.range(L.kmh[0] * 0.85, L.kmh[1] * 0.85) / 3.6 });
     if (!res.ok || !res.clearsNet) res = solveShot({ from, target, spin, apex: 1.5 });
     swing = { stroke: 'serve', start: world.time - 0.6, dur: 1.0 };

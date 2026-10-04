@@ -52,7 +52,7 @@ export function isForehand({ contactU, racketVelU, handed = 'right', racketNorma
  */
 export function classifyStroke({
   contactU, racketVelU, handed = 'right', ballBounced = true, ballAfterWall = false, playerZ = 8, isServe = false,
-  racketNormalU = null, height = REF_HEIGHT,
+  racketNormalU = null, height = REF_HEIGHT, noLob = false,
 }) {
   if (isServe) return 'serve';
   const hs = height / REF_HEIGHT;
@@ -69,7 +69,7 @@ export function classifyStroke({
     if (across > STROKE_RULES.viboraSideRatio && speed >= STROKE_RULES.viboraMinSpeed && faceOpen) return 'vibora';
     return 'bandeja';
   }
-  if (pitch > STROKE_RULES.lobPitchDeg && speed > 2) return 'lob';
+  if (!noLob && pitch > STROKE_RULES.lobPitchDeg && speed > 2) return 'lob';
   if (
     ballBounced && speed < STROKE_RULES.chiquitaSpeed && contactU.y < STROKE_RULES.chiquitaHeight * hs
     && playerZ >= STROKE_RULES.chiquitaMinZ
@@ -78,6 +78,38 @@ export function classifyStroke({
   if (!ballBounced) return fh ? 'volley-fh' : 'volley-bh';
   if (ballAfterWall) return fh ? 'glass-fh' : 'glass-bh';
   return fh ? 'forehand' : 'backhand';
+}
+
+/**
+ * Lob read from the ball that left the racket (QA2): a lob climbs high (free-flight apex above
+ * 4 m) or leaves steeply at modest pace (> 25° at <= 70 km/h). A fast flat ball that the racket
+ * path called a lob is a drive (it hits the far glass on the full); a high ball from a flat
+ * racket path is a lob. Inside a narrow band around the thresholds the racket-path rule decides.
+ */
+export const LOB_TRAJECTORY = Object.freeze({ apex: 4.0, launchDeg: 25, maxSpeed: 70 / 3.6, apexBand: 0.35, launchBand: 3 });
+
+const NO_RELABEL = new Set(['bandeja', 'vibora', 'smash', 'serve']);
+
+/**
+ * @param stroke label from classifyStroke (racket path)
+ * @param out { apex (m, ball centre, free flight), launchDeg, speed (m/s) } of the outgoing ball
+ * @param groundStroke the label without the lob rule (classifyStroke({..., noLob: true}))
+ * @returns the label for the shot
+ */
+export function relabelByTrajectory(stroke, { apex, launchDeg, speed }, groundStroke) {
+  if (NO_RELABEL.has(stroke)) return stroke;
+  const L = LOB_TRAJECTORY;
+  if (!Number.isFinite(apex) || !Number.isFinite(launchDeg)) return stroke;
+  const slow = speed <= L.maxSpeed;
+  const steep = slow && launchDeg > L.launchDeg;
+  const lob = apex > L.apex || steep;
+  // Borderline: within the bands of the deciding threshold(s), the racket path decides.
+  const apexEdge = Math.abs(apex - L.apex) <= L.apexBand;
+  const launchEdge = slow && Math.abs(launchDeg - L.launchDeg) <= L.launchBand;
+  const borderline = lob ? (apex > L.apex ? apexEdge && !steep : launchEdge && apex <= L.apex) : apexEdge || launchEdge;
+  if (borderline) return stroke;
+  if (lob) return 'lob';
+  return stroke === 'lob' ? groundStroke || stroke : stroke;
 }
 
 /**

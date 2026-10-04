@@ -25,6 +25,7 @@ import { createRecorder, createReplayPlayer } from './app/replay.js';
 import { createTracking, bodyVisibility, createMotionWatch, createFrameWatch } from './app/tracking.js';
 import { createDebugOverlay } from './app/debug.js';
 import { installPrivacyGuard } from './app/privacy.js';
+import { initPwa } from './app/pwa.js';
 
 installPrivacyGuard();
 
@@ -57,6 +58,7 @@ let tracking = null;
 let human = null;
 let fallback = null;
 let debug = null;
+let pwa = null; // app packaging: service worker, install button, display mode
 const recorder = createRecorder({ seconds: 6, hz: 60 });
 const aids = createAids();
 const motion = createMotionWatch();
@@ -100,6 +102,10 @@ function applySettings(patch) {
     human.bodyTracker.setOptions({ handed: S.handed, userHeight: S.height, hfovDeg: S.hfovDeg });
     if (fallback) fallback.setHanded(S.handed);
   }
+  // The lens preset also sets the capture-time offset used when the browser gives no
+  // capture timestamps (Safari); the off-axis yaw correction is an experimental toggle.
+  if (keys.includes('cameraPreset') && tracking) tracking.setCameraPreset(S.cameraPreset);
+  if (keys.includes('offAxisYaw') && tracking) tracking.setYawCorrection(!!S.offAxisYaw);
   if (keys.includes('gainLateral') || keys.includes('gainDepth')) {
     human.locomotion.config.gainLateral = S.gainLateral;
     human.locomotion.config.gainDepth = S.gainDepth;
@@ -457,6 +463,8 @@ function onPoseFrame(frame) {
       tracking: people ? 'ok' : trackingSeen ? 'lost' : 'searching',
       offset: cal && cal.ok && sample && sample.valid ? sample.offset : null,
       swingAt: m.swingAt,
+      // No capture timestamps from the browser (Safari): the latency step becomes recommended.
+      needsLatencyTest: !!(tracking && tracking.needsLatencyTest),
     });
   }
   // Hand cursor in menus; the both-hands-up pause gesture works everywhere.
@@ -623,12 +631,8 @@ function stepGame(nowMs, dtReal) {
     stage.effects.landingMarker(a.landing);
     stage.effects.contactGhost(a.ghost);
   }
-  // Racket display extrapolation: the age of the newest tracked pose (<= 60 ms).
-  let extrapolate = 0;
-  if (g.input !== 'fallback') {
-    const latest = g.human.racketTrack.latest();
-    if (latest) extrapolate = clamp(w.time - latest.t, 0, 0.06);
-  }
+  // The live racket is drawn as predicted for this frame (player.renderRacket, game/swingPredict.js),
+  // so no display extrapolation is passed here (fpRig's extrapolation only serves replay frames).
   let selfActor = null;
   if (g.attract && g.feed) {
     const st = g.feed.actorStroke(w);
@@ -638,7 +642,7 @@ function stepGame(nowMs, dtReal) {
       stroke: st ? st.stroke : null, swingPhase: st ? st.swingPhase : 0, holding: st ? 'swing' : sp > 0.6 ? 'run' : 'ready',
     };
   }
-  stage.syncWorld(w, dtView, { alpha, extrapolate, selfActor, showRig: !g.attract });
+  stage.syncWorld(w, dtView, { alpha, selfActor, showRig: !g.attract });
   // HUD at 10 Hz.
   hudAcc += dtReal;
   if (!g.attract && hudAcc >= 0.1 && (ui.screen === 'play' || ui.screen === 'pause')) {
@@ -751,6 +755,11 @@ function installGestureUnlock() {
 async function boot() {
   ui = createUI(uiRoot, handlers);
   ui.settings(S);
+  pwa = initPwa({
+    ui,
+    isPlaying: () => !!game && !game.attract && ui.screen === 'play' && !paused && !replay,
+    onFullscreenExit: () => pause(),
+  });
   ui.setLoading(0.04, 'Loading fonts…');
   replayBadge = document.createElement('div');
   replayBadge.className = 'vp-replay';
@@ -783,8 +792,15 @@ async function boot() {
   installGestureUnlock();
 
   human = createHumanController({ settings: S });
-  tracking = createTracking({ video, onFrame: onPoseFrame, onStatus: onPoseStatus, model: TRACKING.model });
-  cursor = createHandCursor({ root: uiRoot, ui, onPause: () => handlers.onPause() });
+  tracking = createTracking({
+    video, onFrame: onPoseFrame, onStatus: onPoseStatus, model: TRACKING.model,
+    cameraPreset: S.cameraPreset, yawCorrection: !!S.offAxisYaw,
+  });
+  // The both-hands-up pause gesture is ignored while a ball is live (overhead preparation).
+  cursor = createHandCursor({
+    root: uiRoot, ui, onPause: () => handlers.onPause(),
+    isLive: () => !!(game && !game.attract && ui.screen === 'play' && game.inPlay()),
+  });
   if (P.debug) debug = createDebugOverlay();
   window.addEventListener('keydown', onKey);
   document.addEventListener('visibilitychange', () => {
@@ -820,6 +836,16 @@ async function boot() {
 // ---------------------------------------------------------------------------------------
 // Test / debug handle
 
+/** Counters of game/world.js specStats (the per-hit arrays summarised as medians). */
+function specSummary(st) {
+  if (!st) return null;
+  const med = (a) => (a && a.length ? a.slice().sort((x, y) => x - y)[a.length >> 1] : null);
+  return {
+    strikes: st.strikes, confirmed: st.confirmed, reverted: st.reverted, cancelled: st.cancelled,
+    lateOnly: st.lateOnly, heldDropped: st.heldDropped, dirDiffDegMedian: med(st.dirDiffDeg), dtContactMedian: med(st.dtContact),
+  };
+}
+
 const vibora = {
   ready: false,
   params: P,
@@ -832,6 +858,7 @@ const vibora = {
   get stage() { return stage; },
   get fallback() { return fallback; },
   get errors() { return errors.slice(); },
+  get pwa() { return pwa; },
   get stats() {
     const s = game && !game.attract ? game.stats : null;
     return {
@@ -844,6 +871,8 @@ const vibora = {
       rallies: s ? s.rallies : 0,
       outcomes: s ? { ...s.outcomes } : {},
       lateHits: game && !game.attract ? game.world.hitRejects.late : 0,
+      // Predictive hitting: strikes shown, confirmed, reverted (game/world.js specStats).
+      speculative: game && !game.attract ? specSummary(game.world.specStats) : null,
       judgeMargin: game ? judgeMargin(game.world) : null,
       errors: errors.length,
       simTime: game ? game.world.time : null,
@@ -868,14 +897,18 @@ const vibora = {
   },
   /**
    * Deterministic freeze for screenshots: 'contact' stops `offset` s before the autopilot's
-   * next planned contact, 'hit' stops `offset` s after the next player hit's contact time.
+   * next planned contact, 'hit' stops `offset` s after the next player hit's contact time,
+   * 'strike' stops on the tick a predicted hit is shown (the racket meets the ball on screen).
    */
   freezeOn(kind, offset = 0.06) {
     if (!game) return;
     const w = game.world;
     const t0 = w.time;
     frozen = false;
-    if (kind === 'contact') {
+    if (kind === 'strike') {
+      const s0 = w.specStats.strikes;
+      freezeRule = (ww) => ww.specStats.strikes > s0;
+    } else if (kind === 'contact') {
       freezeRule = (ww) => {
         const c = game && game.feed ? game.feed.nextContact : null;
         const incoming = ww.ball && ww.flight.team !== 0;

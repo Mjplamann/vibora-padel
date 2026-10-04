@@ -1,5 +1,9 @@
 # Deploys the repository root (a static site: index.html + ES modules, no build step) to
-# GitHub Pages. In the repository settings choose Pages → Source: "GitHub Actions".
+# GitHub Pages as an installable app (manifest.webmanifest, sw.js, icons/). In the repository
+# settings choose Pages → Source: "GitHub Actions".
+# Before uploading, tools/precache.mjs rewrites the service worker's precache list and version
+# from the files being deployed, so every deploy that changes a file reaches installed apps as
+# an "Update ready — Restart" notice, and only the changed files are downloaded again.
 name: Deploy to GitHub Pages
 
 on:
@@ -25,6 +29,19 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Unit tests
+        run: npm test
+      - name: Refresh the service worker precache list
+        run: node tools/precache.mjs --write
+      - name: Check the app files are present
+        run: |
+          for f in index.html manifest.webmanifest sw.js icons/icon-192.png icons/icon-512.png icons/icon-maskable-512.png icons/apple-touch-icon.png icons/icon.svg models/pose_landmarker_full.task vendor/mediapipe/wasm/vision_wasm_internal.wasm; do
+            test -s "$f" || { echo "missing $f"; exit 1; }
+          done
       - name: Configure Pages
         uses: actions/configure-pages@v5
       - name: Upload site

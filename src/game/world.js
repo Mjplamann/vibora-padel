@@ -21,7 +21,7 @@ import { createCourt } from '../physics/court.js';
 import { createBallHistory } from '../physics/history.js';
 import { predict, solveShot, netClearance, firstBounce } from '../physics/predict.js';
 import { racketImpact, blendTowardIntent, spinComponents } from '../physics/racket.js';
-import { classifyStroke, contactQuality } from '../tracking/swing.js';
+import { classifyStroke, contactQuality, relabelByTrajectory } from '../tracking/swing.js';
 
 const R = BALL.radius;
 const UP = new Vec3(0, 1, 0);
@@ -55,6 +55,9 @@ export const DEFAULT_SETTINGS = Object.freeze({
   quality: 'high',
   voice: 'en',
   volumes: Object.freeze({ master: 0.9, sfx: 1, ambience: 0.5 }),
+  // Predictive hitting: the racket shown meets the ball the player sees (swingPredict.js) and
+  // the hit is played at once, then confirmed (or undone) by the lag-compensated detector.
+  hitPrediction: true,
 });
 
 /** Merges a partial settings object over DEFAULT_SETTINGS (volumes merged too). */
@@ -86,6 +89,7 @@ function createPlayer(settings) {
     body: null,
     bodyCourt: null,
     racket: null,
+    renderRacket: null, // racket to draw this frame: predicted (human.afterStep / swingPredict.js)
     lastHitAt: -Infinity,
     team: 0,
     magnet: null, // {x, z} assist stance point or null
@@ -129,6 +133,17 @@ export function createWorld({ settings = {}, rng = createRng(1), court = null } 
     ballCorrection: null, // { seq, ballId, contactT, at, contact }
     // Player contacts the game refused, by reason (debug overlay, tests).
     hitRejects: { late: 0, rules: 0, other: 0, lastLate: null },
+    // Speculative (predicted) player hit awaiting the camera's confirmation, or null. The live
+    // ball stays the authoritative, unhit one; spec.ball is what is shown (see viewBall()).
+    spec: null,
+    // Discontinuities of the SHOWN ball (strike / confirm / revert / late): the renderer's cue.
+    viewCorrection: null, // { seq, kind, ballId, contactT, at, contact }
+    // Bus (presentation) events of the live ball held back because a hit may still erase them.
+    held: [],
+    // Ball within the player's reach recently (late hits can only erase events after that).
+    reach: { key: null, lastIn: -Infinity },
+    nextSpecId: 1000001,
+    specStats: { strikes: 0, confirmed: 0, reverted: 0, cancelled: 0, lateOnly: 0, heldDropped: 0, dirDiffDeg: [], dtContact: [] },
   };
 }
 
@@ -136,6 +151,19 @@ export function createWorld({ settings = {}, rng = createRng(1), court = null } 
 export function emit(world, type, payload) {
   world.bus.emit(type, payload);
   if (world.mode && world.mode.onBus) world.mode.onBus(type, payload, world);
+}
+
+/**
+ * Presentation-only emit (render, audio, UI): speculative hits and the shown ball's events.
+ * The mode never sees these; rules and scoring follow the authoritative timeline only.
+ */
+export function emitView(world, type, payload) {
+  world.bus.emit(type, payload);
+}
+
+/** The ball to draw: the speculatively struck ball while a predicted hit awaits confirmation. */
+export function viewBall(world) {
+  return world.spec ? world.spec.ball : world.ball;
 }
 
 // ---------------------------------------------------------------------------
@@ -193,12 +221,124 @@ const BUS_TYPE = {
   ceiling: 'ball:ceiling', 'outside-bounce': 'ball:outside-bounce', rest: 'ball:rest',
 };
 
-function recordEvent(world, evt) {
+/**
+ * Physics event of the live ball: logged, queued for the judge and announced on the bus.
+ * opts.silent: judged but not announced (the speculative ball already showed that stretch).
+ */
+function recordEvent(world, evt, opts = {}) {
   world.ballEvents.push(evt);
   world.flight.events.push(evt);
   const type = BUS_TYPE[evt.type];
-  if (type) emit(world, type, { evt });
+  if (type && !opts.silent) {
+    const release = holdUntil(world, evt);
+    if (release === null) emit(world, type, { evt });
+    else world.held.push({ type, evt, release, spec: release === Infinity });
+  }
   queueJudge(world, { kind: 'event', t: evt.t, evt });
+}
+
+// ---------------------------------------------------------------------------
+// Held presentation events
+//
+// A late (lag-compensated) player hit erases the incoming ball's path after its contact. The
+// sounds, glass shimmer and felt marks of that path must not play first. Events of the
+// incoming ball close to the player are therefore announced a little late (<= the judge
+// margin) and dropped if a hit erases them. Far-side events and events before any possible
+// contact are announced at once.
+
+/** Reach (m, 1.75 m player) from the hitting shoulder within which a contact is possible. */
+export const HOLD_REACH = 1.3;
+/** Longest hold (s) of a near-side event that a late hit might still erase. */
+export const HOLD_MAX = 0.25;
+
+const flightKeyOf = (world) => (world.ball ? `${world.ball.id}:${world.flight.startT}` : null);
+
+function incomingToPlayer(world) {
+  const f = world.flight;
+  if (f.team === 0 && f.by !== 'drop') return false;
+  const lh = world.lastHit;
+  return !(lh && lh.team === 0 && lh.t >= f.startT - 1e-9);
+}
+
+/** Loop delay (s) between a contact and its detection: rewind latency + camera pipeline. */
+export function detectionDelay(world) {
+  const tr = world.tracking || {};
+  return (world.settings.latency ?? 0) + (tr.delay || 0) + 2 * (tr.frameDt || 1 / 30);
+}
+
+/** Release time of a live-ball event (Infinity: until the pending prediction resolves) or null (now). */
+function holdUntil(world, evt) {
+  if (!world.human || !world.ball) return null;
+  if (world.spec && world.spec.ballId === world.ball.id && evt.t > world.spec.t - 1e-9) return Infinity;
+  if (!incomingToPlayer(world) || evt.side !== 'near') return null;
+  // Mouse controls (no latency, no camera pipeline): hits are found within a frame.
+  if ((world.settings.latency ?? 0) + ((world.tracking && world.tracking.delay) || 0) < 0.04) return null;
+  const loop = detectionDelay(world);
+  const r = world.reach;
+  if (r.key !== flightKeyOf(world) || evt.t - r.lastIn > loop) return null;
+  // The player is waiting for a later contact (predicted swing): this event stands.
+  const tc = world.human.predictedContact ? world.human.predictedContact(world) : null;
+  if (tc !== null && tc > evt.t + 0.03) return null;
+  return evt.t + Math.min(judgeMargin(world), loop, HOLD_MAX);
+}
+
+/** Tracks whether the incoming ball is within the player's reach (once per tick). */
+function trackReach(world) {
+  const b = world.ball;
+  if (!b || b.atRest || !incomingToPlayer(world)) return;
+  const pl = world.player;
+  const k = (pl.height || PLAYER.defaultHeight) / PLAYER.defaultHeight;
+  const dom = (world.settings.handed || pl.handed) === 'left' ? -1 : 1;
+  const dx = b.pos.x - (pl.pos.x + dom * 0.18 * k);
+  const dy = b.pos.y - PLAYER.shoulderHeightRatio * (pl.height || PLAYER.defaultHeight);
+  const dz = b.pos.z - pl.pos.z;
+  const key = flightKeyOf(world);
+  if (world.reach.key !== key) {
+    world.reach.key = key;
+    world.reach.lastIn = -Infinity;
+  }
+  if (b.pos.y > 0.12 && dx * dx + dy * dy + dz * dz <= (HOLD_REACH * k) ** 2) world.reach.lastIn = world.time;
+}
+
+/** Announces held events that are due (time-ordered). */
+function releaseHeld(world, now = world.time) {
+  const h = world.held;
+  if (!h.length) return;
+  let keep = 0;
+  for (let i = 0; i < h.length; i++) {
+    const it = h[i];
+    if (it.release <= now + 1e-9) emitView(world, it.type, { evt: it.evt });
+    else h[keep++] = it;
+  }
+  h.length = keep;
+}
+
+/** A hit at contactT erased the live ball's path after it: its held events never happened. */
+function dropHeldAfter(world, contactT) {
+  const h = world.held;
+  let keep = 0;
+  for (let i = 0; i < h.length; i++) {
+    if (h[i].evt.t > contactT + 1e-9) world.specStats.heldDropped++;
+    else h[keep++] = h[i];
+  }
+  h.length = keep;
+}
+
+/** Releases events held for a speculative hit (recent ones now, stale ones dropped). */
+function releaseSpecHeld(world, maxAge = 0.35) {
+  for (const it of world.held) {
+    if (!it.spec) continue;
+    it.spec = false;
+    it.release = world.time - it.evt.t <= maxAge ? world.time : -1;
+  }
+  const h = world.held;
+  let keep = 0;
+  for (let i = 0; i < h.length; i++) {
+    if (h[i].release < 0) world.specStats.heldDropped++;
+    else h[keep++] = h[i];
+  }
+  h.length = keep;
+  releaseHeld(world);
 }
 
 // ---------------------------------------------------------------------------
@@ -212,6 +352,11 @@ function recordEvent(world, evt) {
 export function launchBall(world, { pos, vel = v3(), spin = v3(), by = 'machine', team = null, strike = null }) {
   const ball = createBall(pos, vel, spin);
   ball.t = world.time;
+  if (world.spec) cancelSpeculative(world);
+  // A new ball: what is still held of the old one plays now (it can no longer be erased).
+  for (const it of world.held) it.release = it.spec ? -1 : world.time;
+  world.held = world.held.filter((it) => it.release >= 0);
+  releaseHeld(world);
   world.ball = ball;
   world.ballHistory.clear();
   world.ballHistory.push(ball);
@@ -262,6 +407,11 @@ export function stepWorld(world, dt = 1 / SIM.tickRate) {
   }
   world.time = t1;
   if (ball) world.ballHistory.push(ball);
+  trackReach(world);
+  if (world.spec) stepSpeculative(world);
+  // Swing prediction, speculative contacts and their resolution (human controller).
+  if (world.human && world.human.afterStep) world.human.afterStep(world, dt);
+  releaseHeld(world);
   flushJudge(world, world.time - judgeDelay(world));
   return world;
 }
@@ -344,7 +494,8 @@ export const SHOT_INTENT = Object.freeze({
   lob: { depth: [7.5, 9.3], apex: [5.5, 7.0] },
   bandeja: { depth: [7.0, 9.3], maxSpeed: 85 / 3.6 },
   vibora: { depth: [6.5, 9.3] },
-  smash: { depth: [3.0, 6.0] },
+  // Por tres needs a bounce 2-3.5 m past the net at >= 120 km/h (turf crater model, court.js).
+  smash: { depth: [2.0, 4.5] },
   chiquita: { depth: [1.5, 5.0], maxSpeed: 45 / 3.6 },
   serve: { depth: [3.0, 6.6] },
 });
@@ -452,27 +603,12 @@ function flightContext(world, t, side) {
 }
 
 /**
- * Lag-compensated player hit (SPEC §5.1). Rewinds the ball to contactTime, applies the
- * racket impact, the assist (intent blend + net safety), re-simulates to world.time and
- * emits 'ball:hit'. Returns the ShotRecord, or null when the hit is not allowed.
- * @param contact sweptContact() result (local, face, ...)
- * @param poseAtContact RacketPose at the contact (court frame, with vel / angVel)
- * @param contactTime sim time of the contact (ball clock)
- * @param extra optional { playerPos: {x,z} at contact, swing: {...} }
+ * Racket impact, stroke analysis and assist of a player contact. Mutates `ball` (at the
+ * contact) into the outgoing ball. Shared by the authoritative and the speculative hit so
+ * both see exactly the same physics. Returns the analysis (shot fields) or null (no hit).
  */
-export function applyPlayerHit(world, contact, poseAtContact, contactTime, extra = {}) {
+function strikeAnalysis(world, ball, contact, poseAtContact, contactTime, extra, assist) {
   const s = world.settings;
-  const assist = ASSIST[s.assist] || ASSIST[DEFAULT_ASSIST];
-  if (!world.ball || contactTime > world.time + 1e-9) return null;
-  if (!playerMayHit(world, contactTime)) return null;
-
-  const snap = world.ballHistory.rewindTo(contactTime);
-  if (!snap || snap.id !== world.ball.id) return null;
-  const ball = snap;
-  if (contactTime > ball.t) stepBall(ball, contactTime - ball.t, world.court, null, null, { deterministic: true });
-  ball.t = contactTime;
-  if (ball.atRest) return null;
-
   const ref = world.referee;
   const isServe = !!(ref && ref.state.awaitingServe && ref.state.serving && ref.state.serving.team === 0);
   const ctx = flightContext(world, contactTime, 'near');
@@ -491,20 +627,106 @@ export function applyPlayerHit(world, contact, poseAtContact, contactTime, extra
   const nrm = poseAtContact.normal;
   const racketNormalU = v3(nrm.x, nrm.y, -nrm.z);
   const handed = s.handed || pl.handed;
-  const stroke = classifyStroke({
+  const strokeArgs = {
     contactU, racketVelU, handed, ballBounced: ctx.afterBounce, ballAfterWall: ctx.afterWall,
     playerZ: pp.z, isServe, racketNormalU, height: s.height,
-  });
-  const q = contactQuality({ contactU, handed, stroke, height: s.height });
+  };
+  const pathStroke = classifyStroke(strokeArgs);
+  const groundStroke = pathStroke === 'lob' ? classifyStroke({ ...strokeArgs, noLob: true }) : pathStroke;
 
   // Assist: blend toward the intended shot, then net safety.
   const physVel = ball.vel.clone();
   let intent = null;
   if (assist.shotBlend > 0) {
-    intent = intendedShot(ball.pos, physVel, ball.spin, stroke, { dirZ: -1, serveBox: isServe ? ref.state.serving.box : null });
+    // The intent follows the ball the racket physically produced, like the label below (merge
+    // pass): a rising racket path on a flat 65-75 km/h drive made the intent a 5.5 m-apex lob,
+    // and blending toward it at the drive's pace sent the ball onto the far glass on the full.
+    const pf = freeFlight(ball.pos, physVel, ball.spin, 3);
+    const physLaunch = (Math.atan2(physVel.y, Math.hypot(physVel.x, physVel.z)) * 180) / Math.PI;
+    const intentStroke = relabelByTrajectory(pathStroke, { apex: pf.apex, launchDeg: physLaunch, speed: physVel.length() }, groundStroke);
+    intent = intendedShot(ball.pos, physVel, ball.spin, intentStroke, { dirZ: -1, serveBox: isServe ? ref.state.serving.box : null });
     if (intent) blendTowardIntent(physVel, intent.vel, assist.shotBlend, ball.vel);
   }
   const lift = applyNetSafety(ball, assist.netSafety, -1);
+
+  // Lob or drive is read from the ball that left the racket (racket path as tie-breaker).
+  const v = ball.vel;
+  const ff = freeFlight(ball.pos, v, ball.spin, 3);
+  const launchDeg = (Math.atan2(v.y, Math.hypot(v.x, v.z)) * 180) / Math.PI;
+  const stroke = relabelByTrajectory(pathStroke, { apex: ff.apex, launchDeg, speed: v.length() }, groundStroke);
+  const q = contactQuality({ contactU, handed, stroke, height: s.height });
+  return { info, stroke, pathStroke, q, ctx, isServe, contactPos, contactU, speedIn, physVel, intent, lift };
+}
+
+function makePlayerShot(world, a, ball, fl, contactTime, extra, id) {
+  return {
+    id,
+    t: contactTime,
+    by: 'player',
+    team: 0,
+    stroke: a.stroke,
+    contact: a.contactPos,
+    contactU: a.contactU,
+    racketSpeed: a.info.racketSpeed,
+    speedIn: a.speedIn,
+    speedOut: ball.vel.length(),
+    spinRpm: spinComponents(ball.vel, ball.spin),
+    offCenter: a.info.offCenter,
+    quality: a.info.quality,
+    assist: world.settings.assist,
+    timing: a.q.timing,
+    spacing: a.q.spacing,
+    netClearance: fl.netClearance,
+    predictedLanding: fl.predictedLanding,
+    afterBounce: a.ctx.afterBounce,
+    afterWall: a.ctx.afterWall,
+    // Extensions
+    isServe: a.isServe,
+    volley: !a.ctx.afterBounce,
+    face: a.info.face,
+    contactScore: a.q.score,
+    contactFront: a.q.front,
+    contactSide: a.q.side,
+    contactHeight: a.q.height,
+    physSpeedOut: a.info.speedOut,
+    physVel: a.physVel.clone(),
+    assistLiftDeg: (a.lift * 180) / Math.PI,
+    intentTarget: a.intent ? a.intent.target : null,
+    apex: fl.apex,
+    eA: a.info.eA,
+    racketStroke: a.pathStroke,
+    swing: extra.swing || null,
+  };
+}
+
+/**
+ * Lag-compensated player hit (SPEC §5.1). Rewinds the ball to contactTime, applies the
+ * racket impact, the assist (intent blend + net safety), re-simulates to world.time and
+ * emits 'ball:hit'. Returns the ShotRecord, or null when the hit is not allowed.
+ * With a speculative hit of the same ball pending, this is its confirmation: the shown ball
+ * blends from the speculative path onto this one, and the shot carries `confirms` (the
+ * provisional shot's id; its sound and effects have already played).
+ * @param contact sweptContact() result (local, face, ...)
+ * @param poseAtContact RacketPose at the contact (court frame, with vel / angVel)
+ * @param contactTime sim time of the contact (ball clock)
+ * @param extra optional { playerPos: {x,z} at contact, swing: {...} }
+ */
+export function applyPlayerHit(world, contact, poseAtContact, contactTime, extra = {}) {
+  const s = world.settings;
+  const assist = ASSIST[s.assist] || ASSIST[DEFAULT_ASSIST];
+  if (!world.ball || contactTime > world.time + 1e-9) return null;
+  if (!playerMayHit(world, contactTime)) return null;
+
+  const snap = world.ballHistory.rewindTo(contactTime);
+  if (!snap || snap.id !== world.ball.id) return null;
+  const ball = snap;
+  if (contactTime > ball.t) stepBall(ball, contactTime - ball.t, world.court, null, null, { deterministic: true });
+  ball.t = contactTime;
+  if (ball.atRest) return null;
+
+  const a = strikeAnalysis(world, ball, contact, poseAtContact, contactTime, extra, assist);
+  if (!a) return null;
+  const outVel = ball.vel.clone();
 
   // Commit: the old trajectory after contactTime never happened.
   world.ballHistory.truncateAfter(contactTime);
@@ -524,66 +746,178 @@ export function applyPlayerHit(world, contact, poseAtContact, contactTime, extra
   while (fe.length && fe[fe.length - 1].t > contactTime + 1e-9) fe.pop();
 
   const fl = analyseFlight(world, ball);
-  const shot = {
-    id: world.nextShotId++,
-    t: contactTime,
-    by: 'player',
-    team: 0,
-    stroke,
-    contact: contactPos,
-    contactU,
-    racketSpeed: info.racketSpeed,
-    speedIn,
-    speedOut: ball.vel.length(),
-    spinRpm: spinComponents(ball.vel, ball.spin),
-    offCenter: info.offCenter,
-    quality: info.quality,
-    assist: s.assist,
-    timing: q.timing,
-    spacing: q.spacing,
-    netClearance: fl.netClearance,
-    predictedLanding: fl.predictedLanding,
-    afterBounce: ctx.afterBounce,
-    afterWall: ctx.afterWall,
-    // Extensions
-    isServe,
-    volley: !ctx.afterBounce,
-    face: info.face,
-    contactScore: q.score,
-    contactFront: q.front,
-    contactSide: q.side,
-    contactHeight: q.height,
-    physSpeedOut: info.speedOut,
-    physVel: physVel.clone(),
-    assistLiftDeg: (lift * 180) / Math.PI,
-    intentTarget: intent ? intent.target : null,
-    apex: fl.apex,
-    eA: info.eA,
-    swing: extra.swing || null,
-  };
+  const shot = makePlayerShot(world, a, ball, fl, contactTime, extra, world.nextShotId++);
+  const pl = world.player;
+
+  // A pending prediction of this ball: this hit confirms it.
+  const spec = world.spec && world.spec.ballId === ball.id ? world.spec : null;
+  if (spec) {
+    shot.confirms = spec.id;
+    shot.provisionalT = spec.t;
+    const st = world.specStats;
+    st.confirmed++;
+    const c = (outVel.dot(spec.outVel) / Math.max(1e-9, outVel.length() * spec.outVel.length()));
+    st.dirDiffDeg.push((Math.acos(clamp(c, -1, 1)) * 180) / Math.PI);
+    st.dtContact.push(spec.t - contactTime);
+    if (st.detail) {
+      const ang = (a, b) => (Math.acos(clamp(a.dot(b) / Math.max(1e-9, a.length() * b.length()), -1, 1)) * 180) / Math.PI;
+      const pv = poseAtContact.vel || v3();
+      st.detail.push({
+        normal: Math.min(ang(spec.pose.normal, poseAtContact.normal), 180 - ang(spec.pose.normal, poseAtContact.normal)),
+        velDir: ang(spec.pose.vel, pv), speedRatio: spec.pose.vel.length() / Math.max(1e-9, pv.length()),
+        pos: spec.contact.distanceTo(a.contactPos), dt: spec.t - contactTime, out: st.dirDiffDeg[st.dirDiffDeg.length - 1],
+        stroke: shot.stroke, plan: spec.plan || null, specC: spec.contact.clone(), authC: a.contactPos.clone(), pl: { x: world.player.pos.x, z: world.player.pos.z },
+      });
+    }
+    world.spec = null;
+  } else if (world.spec) {
+    cancelSpeculative(world);
+  } else world.specStats.lateOnly++;
+  dropHeldAfter(world, contactTime);
+  if (spec) releaseSpecHeld(world);
 
   pl.lastHitAt = contactTime;
   world.ball = ball;
   world.ballCorrection = {
     seq: ++correctionSeq,
-    ballId: ball.id, contactT: contactTime, at: world.time, contact: contactPos,
+    ballId: ball.id, contactT: contactTime, at: world.time, contact: a.contactPos,
+  };
+  world.viewCorrection = {
+    seq: correctionSeq, kind: spec ? 'confirm' : 'late', ballId: ball.id, contactT: contactTime, at: world.time, contact: a.contactPos,
   };
   world.flight = { by: 'player', team: 0, startT: contactTime, events: [] };
   world.lastHit = { by: 'player', team: 0, t: contactTime };
   world.shots.push(shot);
-  queueJudge(world, { kind: 'hit', t: contactTime, team: 0, by: 'player', isServe, volley: shot.volley, shot });
+  queueJudge(world, { kind: 'hit', t: contactTime, team: 0, by: 'player', isServe: a.isServe, volley: shot.volley, shot });
   emit(world, 'ball:hit', { shot });
 
-  // Re-simulate to the present; the new events keep their real times.
+  // Re-simulate to the present; the new events keep their real times. After a confirmed
+  // prediction the shown (speculative) ball has already played this stretch.
   for (const t of tickTimes) {
     const evs = [];
     if (t > ball.t) stepBall(ball, t - ball.t, world.court, world.rng, evs);
     ball.t = t;
     world.ballHistory.push(ball);
-    for (const e of evs) recordEvent(world, e);
+    for (const e of evs) recordEvent(world, e, { silent: !!spec });
   }
   flushJudge(world, Math.min(contactTime, world.time - judgeDelay(world)));
   return shot;
+}
+
+// ---------------------------------------------------------------------------
+// Speculative (predicted) hits
+
+/** Whether the live ball may be struck speculatively now (no judge flush: rules as known). */
+export function mayStrikeSpeculatively(world, t) {
+  const b = world.ball;
+  if (!b || b.atRest || b.outside || world.spec) return false;
+  if (world.settings.hitPrediction === false) return false;
+  if (!incomingToPlayer(world)) return false;
+  if (t - world.player.lastHitAt < HIT_COOLDOWN) return false;
+  const f = world.flight;
+  let nearBounces = 0;
+  for (const e of f.events) {
+    if (e.t > t + 1e-9) break;
+    if (e.type === 'exit' || e.type === 'outside-bounce' || e.type === 'rest') return false;
+    if (e.type === 'bounce' && e.side === 'near' && ++nearBounces >= 2) return false;
+  }
+  const ref = world.referee;
+  if (!ref) return true;
+  // The opponent's stroke may still be in the judge queue: then it is theirs to have hit.
+  const q = world.judge.queue;
+  for (let i = 0; i < q.length; i++) if (q[i].kind === 'hit' && q[i].team !== 0 && q[i].t >= f.startT - 1e-9) return true;
+  return ref.canContact ? ref.canContact(0) : ref.canHit(0);
+}
+
+/**
+ * Speculative player hit (predicted swing met the shown ball): the shown ball is struck at
+ * contact time t (<= now) with the predicted racket pose, the usual assist, and flown to the
+ * present. The authoritative ball, its history and the judge are untouched: the camera's
+ * swing confirms it (applyPlayerHit) or the prediction is undone (revertSpeculative).
+ * Emits 'ball:hit' with shot.provisional = true on the bus only (not to the mode).
+ * extra: { playerPos, cStar (racket capture time of the predicted contact) }
+ */
+export function applySpeculativeHit(world, contact, poseAtContact, t, extra = {}) {
+  if (t > world.time + 1e-9 || !mayStrikeSpeculatively(world, t)) return null;
+  const assist = ASSIST[world.settings.assist] || ASSIST[DEFAULT_ASSIST];
+  const at = world.ballHistory.at(t);
+  if (!at || at.id !== world.ball.id || at.atRest) return null;
+  const ball = cloneBall(at);
+  ball.t = t;
+  const a = strikeAnalysis(world, ball, contact, poseAtContact, t, extra, assist);
+  if (!a) return null;
+  const outVel = ball.vel.clone();
+  const fl = analyseFlight(world, ball);
+  const shot = makePlayerShot(world, a, ball, fl, t, extra, world.nextSpecId++);
+  shot.provisional = true;
+  // Fly to the present (deterministic: the authoritative simulation's rng is not touched).
+  const evs = [];
+  if (world.time > ball.t) stepBall(ball, world.time - ball.t, world.court, null, evs, { deterministic: true });
+  ball.t = world.time;
+  const pose = {
+    grip: poseAtContact.grip.clone(), axis: poseAtContact.axis.clone(), normal: poseAtContact.normal.clone(),
+    vel: (poseAtContact.vel || v3()).clone(), angVel: (poseAtContact.angVel || v3()).clone(), t,
+  };
+  world.spec = {
+    id: shot.id, ballId: world.ball.id, flightStartT: world.flight.startT, t, ball, shot, outVel, pose,
+    contact: a.contactPos, cStar: extra.cStar ?? t + (world.settings.latency ?? 0), at: world.time, plan: extra.plan || null,
+  };
+  world.viewCorrection = { seq: ++correctionSeq, kind: 'strike', ballId: ball.id, contactT: t, at: world.time, contact: a.contactPos, pose };
+  world.specStats.strikes++;
+  emitView(world, 'ball:hit', { shot });
+  for (const e of evs) announceSpecEvent(world, e);
+  return shot;
+}
+
+function announceSpecEvent(world, e) {
+  const type = BUS_TYPE[e.type];
+  e.speculative = true;
+  if (type) emitView(world, type, { evt: e });
+}
+
+/** Advances the shown speculative ball to world.time (its events are presentation only). */
+function stepSpeculative(world) {
+  const sp = world.spec;
+  if (!world.ball || world.ball.id !== sp.ballId) {
+    cancelSpeculative(world);
+    return;
+  }
+  const b = sp.ball;
+  if (world.time > b.t) {
+    const evs = [];
+    stepBall(b, world.time - b.t, world.court, null, evs, { deterministic: true });
+    b.t = world.time;
+    for (const e of evs) announceSpecEvent(world, e);
+  }
+}
+
+/**
+ * The camera saw no contact where the prediction struck (a whiff, or a swing stopped short):
+ * the shown ball returns to the real one, the held sounds of its path play, and
+ * 'ball:unhit' { shot } cancels the provisional shot.
+ */
+export function revertSpeculative(world, reason = 'whiff') {
+  const sp = world.spec;
+  if (!sp) return false;
+  world.spec = null;
+  world.specStats.reverted++;
+  world.viewCorrection = { seq: ++correctionSeq, kind: 'revert', ballId: sp.ballId, contactT: sp.t, at: world.time, contact: sp.contact };
+  emitView(world, 'ball:unhit', { shot: sp.shot, reason });
+  releaseSpecHeld(world);
+  return true;
+}
+
+/** Drops a pending prediction without a visual blend (the ball itself was replaced or taken). */
+function cancelSpeculative(world) {
+  const sp = world.spec;
+  if (!sp) return;
+  world.spec = null;
+  world.specStats.cancelled++;
+  if (world.ball && world.ball.id === sp.ballId) {
+    world.viewCorrection = { seq: ++correctionSeq, kind: 'revert', ballId: sp.ballId, contactT: sp.t, at: world.time, contact: sp.contact };
+  }
+  emitView(world, 'ball:unhit', { shot: sp.shot, reason: 'cancelled' });
+  releaseSpecHeld(world);
 }
 
 /**
@@ -601,6 +935,7 @@ export function applyAiHit(world, opts) {
   flushJudge(world, world.time);
   const ref = world.referee;
   if (ref && !opts.force && !ref.canHit(team)) return null;
+  if (world.spec) cancelSpeculative(world); // somebody else (AI partner) played it
   const side = team === 0 ? 'near' : 'far';
   const ctx = flightContext(world, world.time, side);
   const contact = ball.pos.clone();

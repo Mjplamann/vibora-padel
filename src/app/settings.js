@@ -16,6 +16,13 @@ export const STORAGE_KEY = 'vibora.settings.v1';
  */
 export const VIEW_DEFAULTS = Object.freeze({ fov: 74, viewPitch: -14, eyeOffset: Object.freeze({ back: 0.12, down: 0.06 }) });
 
+/**
+ * App-only settings: offAxisYaw is the experimental off-axis arm correction of the MediaPipe
+ * world landmarks (app/tracking.js correctOffAxisYaw), off until verified on real footage.
+ * hitPrediction (predictive hitting) is a world default (game/world.js DEFAULT_SETTINGS).
+ */
+export const APP_DEFAULTS = Object.freeze({ offAxisYaw: false });
+
 /** Safe localStorage wrapper ({getItem,setItem} or null). */
 export function safeStorage() {
   try {
@@ -44,6 +51,8 @@ function clampSettings(s) {
   s.gainLateral = num(s.gainLateral, 1, 4, TRACKING.gainLateral);
   s.gainDepth = num(s.gainDepth, 1, 4, TRACKING.gainDepth);
   if (s.handed !== 'left') s.handed = 'right';
+  s.offAxisYaw = s.offAxisYaw === true;
+  s.hitPrediction = s.hitPrediction !== false;
   if (!['rookie', 'club', 'pro'].includes(s.assist)) s.assist = 'club';
   if (!['ultra', 'high', 'balanced'].includes(s.quality)) s.quality = 'high';
   if (!TRACKING.cameraPresets[s.cameraPreset]) s.cameraPreset = TRACKING.defaultCamera;
@@ -60,7 +69,7 @@ export function loadSettings(storage) {
   } catch {
     stored = {};
   }
-  const base = resolveSettings({ ...UI_DEFAULT_SETTINGS, ...VIEW_DEFAULTS, ...stored });
+  const base = resolveSettings({ ...UI_DEFAULT_SETTINGS, ...VIEW_DEFAULTS, ...APP_DEFAULTS, ...stored });
   base.volumes = { ...UI_DEFAULT_SETTINGS.volumes, ...(stored.volumes || {}) };
   return clampSettings(base);
 }

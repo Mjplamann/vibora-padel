@@ -482,6 +482,9 @@ function makeZone(zone) {
   };
 }
 
+/** Clearance (screen fraction) kept between a zone label and a HUD block. */
+const LABEL_MARGIN = Object.freeze({ x: 0.012, y: 0.018 });
+
 function createTargets(root) {
   const group = new THREE.Group();
   group.name = 'target-zones';
@@ -531,18 +534,39 @@ function createTargets(root) {
         if (need > 0) b.lift += need;
       }
     }
+    // HUD blocks are hard exclusions (QA2: labels slipped under the REP / drill-title blocks): a
+    // label that would touch one (plus a margin) drops below it, or hides when it cannot.
+    const rectOf = (it, yc) => [(it.x - it.wN / 2 + 1) / 2, (1 - (yc + it.hN / 2)) / 2, (it.x + it.wN / 2 + 1) / 2, (1 - (yc - it.hN / 2)) / 2];
+    const hits = (q) => occluders.find((r) => q[2] > r[0] - LABEL_MARGIN.x && q[0] < r[2] + LABEL_MARGIN.x && q[3] > r[1] - LABEL_MARGIN.y && q[1] < r[3] + LABEL_MARGIN.y) || null;
     for (const it of items) {
+      let yc = it.y + it.lift;
+      let rect = rectOf(it, yc);
+      let hidden = false;
+      for (let guard = 0; guard < 3 && it.front; guard++) {
+        const r = hits(rect);
+        if (!r) break;
+        // Top of the label just below the block's bottom edge (NDC, y up).
+        const ycNew = 1 - 2 * (r[3] + LABEL_MARGIN.y) - it.hN / 2;
+        if (ycNew - it.hN / 2 < -0.96 || ycNew >= yc) {
+          hidden = true;
+          break;
+        }
+        it.lift += ycNew - yc;
+        yc = ycNew;
+        rect = rectOf(it, yc);
+      }
+      if (!hidden && it.front && hits(rect)) hidden = true;
       const sp = it.z.sprite;
       sp.scale.set(it.h * it.z.aspect, it.h, 1);
       sp.position.set(it.z.cx, LABEL_Y + it.h * 0.5 + it.lift * it.dist * tanH, it.z.cz);
       sp.updateMatrixWorld();
-      const yc = it.y + it.lift;
-      const sx0 = (it.x - it.wN / 2 + 1) / 2, sx1 = (it.x + it.wN / 2 + 1) / 2;
-      const sy0 = (1 - (yc + it.hN / 2)) / 2, sy1 = (1 - (yc - it.hN / 2)) / 2;
-      let under = false;
-      for (const r of occluders) if (sx1 > r[0] && sx0 < r[2] && sy1 > r[1] && sy0 < r[3]) under = true;
-      it.z.rect = [sx0, sy0, sx1, sy1];
-      it.z.hudFade = under ? 0.1 : 1;
+      it.z.rect = rect;
+      it.z.hudFade = hidden ? 0 : 1;
+      // A hidden label goes at once (no fade-out under the block).
+      if (hidden) {
+        it.z.fade = 0;
+        sp.material.opacity = 0;
+      }
     }
   }
 

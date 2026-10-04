@@ -10,7 +10,7 @@ import { createHumanoid } from '../render/humanoid.js';
 import { buildRacket } from '../render/racket.js';
 import { createFirstPersonRig } from '../render/fpRig.js';
 import { createFirstPersonCamera } from '../render/fpCamera.js';
-import { createBallReconciler } from '../render/reconcile.js';
+import { createViewSync, elbowForRacket } from '../render/reconcile.js';
 import { setActorQuality } from '../render/actorKit.js';
 import { RACKET, COURT } from '../config.js';
 
@@ -167,17 +167,66 @@ export async function createStage({ canvas, settings, quality, progress = () => 
     if (v === 'fp') fpCam.snap();
   }
 
+  // What is shown of the ball and racket (render/reconcile.js): the speculatively struck ball
+  // and the predicted racket of a live world, a smooth blend over every path correction, and the
+  // strike frame (ball on the strings, racket at the contact pose).
+  const viewSync = createViewSync();
+  const reconciler = viewSync.reconciler;
+  let shownBall = null;
+
+  // First-person body to draw: the player with the shown (predicted) racket and an arm that
+  // follows it. One proxy per player object, reused every frame.
+  let rigFor = null, rigProxy = null, rigBody = null;
+  const elbowOut = { x: 0, y: 0, z: 0 };
+  function rigPlayer(player, racket) {
+    if (!racket || racket === player.racket || !player.racket) return player;
+    if (rigFor !== player) {
+      rigFor = player;
+      rigProxy = Object.create(player);
+      rigBody = null;
+    }
+    rigProxy.racket = racket;
+    const bc = player.bodyCourt;
+    rigProxy.bodyCourt = bc;
+    if (bc && bc.joints) {
+      const side = bc.dominant === 'L' ? 'L' : 'R';
+      const S = bc.joints[`shoulder${side}`], E = bc.joints[`elbow${side}`], W = bc.joints[`wrist${side}`];
+      if (S && E && W && elbowForRacket(S, E, W, player.racket, racket, elbowOut)) {
+        if (!rigBody || rigBody.src !== bc || rigBody.side !== side) {
+          rigBody = { src: bc, side, joints: Object.create(bc.joints), handFrames: bc.handFrames, dominant: bc.dominant, eye: bc.eye, elbow: new THREE.Vector3() };
+          rigBody.joints[`elbow${side}`] = rigBody.elbow;
+        }
+        rigBody.dominant = bc.dominant;
+        rigBody.elbow.set(elbowOut.x, elbowOut.y, elbowOut.z);
+        rigProxy.bodyCourt = rigBody;
+      }
+    }
+    return rigProxy;
+  }
+  // Camera / gaze follow the shown ball.
+  let camFor = null, camWorld = null;
+  function cameraWorld(w) {
+    if (!w || !shownBall || shownBall === w.ball) return w;
+    if (camFor !== w) {
+      camFor = w;
+      camWorld = Object.create(w);
+    }
+    camWorld.ball = shownBall;
+    return camWorld;
+  }
+
   /**
    * @param {object} w World (or replay frame: {time, ball, player, coach, ai, machine, mode})
    * @param {number} dt display dt (s, already scaled for slow motion)
    * @param {object} o { alpha, extrapolate, selfActor: actorState|null, showRig, racketPath: [{x,y,z}], ghostPose }
    */
-  const reconciler = createBallReconciler();
-
   function syncWorld(w, dt, o = {}) {
-    // Lag-compensated hits rewrite the ball's path; the reconciler hides the jump.
-    const rb = reconciler.update(w ? w.ball : null, w ? w.ballCorrection || null : null, dt);
-    ballView.update(rb, dt, o.alpha ?? 1);
+    // Speculative hits, their confirmation and lag-compensated rewrites change the ball's path;
+    // the view sync hides the jumps and pairs the shown ball with the predicted racket.
+    const vs = viewSync.update(w, dt);
+    const rb = vs.ball;
+    shownBall = rb;
+    ballView.update(rb, dt, vs.hitFrame ? 1 : o.alpha ?? 1);
     syncActors(actorEntries(w, o.skipActor), dt);
     // Machine.
     const m = w && w.machine;
@@ -194,8 +243,11 @@ export async function createStage({ canvas, settings, quality, progress = () => 
       const e = w.player.eye, off = viewSettings.eyeOffset;
       viewEye = tmpEye.set(e.x, e.y - (off ? off.down || 0 : 0), e.z + (off ? off.back || 0 : 0));
     }
-    rig.update(showRig ? w.player : null, dt, {
-      extrapolate: o.extrapolate || 0, visible: !!showRig, eye: viewEye, eye2: showRig ? w.player.eye : null, ball: rb && !rb.atRest ? rb.pos : null,
+    // A live world's racket is already predicted for this frame (game/swingPredict.js); a
+    // replay frame's recorded one may still be extrapolated by the caller.
+    const predicted = !!(showRig && vs.racket && w.player.renderRacket !== undefined);
+    rig.update(showRig ? (predicted ? rigPlayer(w.player, vs.racket) : w.player) : null, dt, {
+      extrapolate: predicted ? 0 : o.extrapolate || 0, visible: !!showRig, eye: viewEye, eye2: showRig ? w.player.eye : null, ball: rb && !rb.atRest ? rb.pos : null,
     });
     if (o.selfActor) {
       self.root.visible = true;
@@ -226,7 +278,7 @@ export async function createStage({ canvas, settings, quality, progress = () => 
       const x = fwdV.crossVectors(y, z);
       ghostRacket.quaternion.setFromRotationMatrix(new THREE.Matrix4().makeBasis(x, y, z));
     } else ghostRacket.visible = false;
-    fpCam.update(w, dt, o.dtReal ?? dt);
+    fpCam.update(cameraWorld(w), dt, o.dtReal ?? dt);
     setCutaway(view === 'replay' ? fpCam.replayView : null);
     effects.update(dt);
     env.update(dt);
@@ -237,6 +289,8 @@ export async function createStage({ canvas, settings, quality, progress = () => 
    * while the ball is inside the view.
    */
   function ballIndicator(ball) {
+    // The live ball's arrow points at the ball as shown (speculative / reconciled).
+    if (ball && shownBall && shownBall.id === ball.id) ball = shownBall;
     if (!ball || ball.atRest || ball.outside) return null;
     const cam = app.camera;
     tmpV.set(ball.pos.x, ball.pos.y, ball.pos.z);
@@ -291,6 +345,9 @@ export async function createStage({ canvas, settings, quality, progress = () => 
     effects,
     ballView,
     reconciler,
+    viewSync,
+    /** The ball as drawn this frame (null without one). */
+    get shownBall() { return shownBall; },
     machine,
     rig,
     fpCam,

@@ -38,6 +38,82 @@ export function copyRacketPose(dst, src) {
   return dst;
 }
 
+/** out = v rotated about the unit axis by angle (rad), Rodrigues. out may alias v. */
+export function rotateAboutAxis(v, axis, angle, out) {
+  const c = Math.cos(angle), s = Math.sin(angle);
+  const d = axis.x * v.x + axis.y * v.y + axis.z * v.z;
+  const cx = axis.y * v.z - axis.z * v.y, cy = axis.z * v.x - axis.x * v.z, cz = axis.x * v.y - axis.y * v.x;
+  return out.set(
+    v.x * c + cx * s + axis.x * d * (1 - c),
+    v.y * c + cy * s + axis.y * d * (1 - c),
+    v.z * c + cz * s + axis.z * d * (1 - c),
+  );
+}
+
+/** Display extrapolation defaults: velocity decay rate (1/s) and the cap on sweet-spot travel (m). */
+export const EXTRAPOLATE = Object.freeze({ damping: 6, maxTravel: 0.35, maxAngle: 1.2 });
+
+const _ax = new Vec3(), _c = new Vec3(), _r = new Vec3();
+
+/**
+ * Racket pose `E` s after `src`, for display: rigid screw motion with the pose's sweet-spot
+ * velocity and angular velocity (a swing is a rotation about the shoulder, so the sweet spot
+ * follows an arc instead of shooting off along its tangent), both decaying as exp(-damping t)
+ * so a decelerating racket does not overshoot. Sweet-spot travel is capped at maxTravel and
+ * the rotation at maxAngle. Returns out (with vel / angVel at the extrapolated instant).
+ */
+export function extrapolatePose(src, E, out = createRacketPose(), { damping = EXTRAPOLATE.damping, maxTravel = EXTRAPOLATE.maxTravel, maxAngle = EXTRAPOLATE.maxAngle } = {}) {
+  if (out !== src) copyRacketPose(out, src);
+  if (!(E > 0)) return out;
+  let fe = damping > 0 ? (1 - Math.exp(-damping * E)) / damping : E;
+  const om = src.angVel, wl = om.length();
+  const speed = src.vel.length();
+  if (wl * fe > maxAngle) fe = maxAngle / wl;
+  if (speed * fe > maxTravel) fe = maxTravel / speed;
+  const sx = src.sweet.x, sy = src.sweet.y, sz = src.sweet.z;
+  if (wl > 1e-6) {
+    _ax.copy(om).scale(1 / wl);
+    const ang = wl * fe;
+    rotateAboutAxis(src.axis, _ax, ang, out.axis);
+    rotateAboutAxis(src.normal, _ax, ang, out.normal);
+    // Instantaneous screw axis through c = s + (w x v) / |w|^2; translation along it.
+    _c.crossVectors(om, src.vel).scale(1 / (wl * wl));
+    _r.copy(_c).scale(-1);
+    rotateAboutAxis(_r, _ax, ang, _r);
+    const along = src.vel.dot(_ax) * fe;
+    out.sweet.set(sx + _c.x + _r.x + _ax.x * along, sy + _c.y + _r.y + _ax.y * along, sz + _c.z + _r.z + _ax.z * along);
+    rotateAboutAxis(src.vel, _ax, ang, out.vel);
+  } else {
+    out.sweet.set(sx + src.vel.x * fe, sy + src.vel.y * fe, sz + src.vel.z * fe);
+    out.vel.copy(src.vel);
+  }
+  const decay = damping > 0 ? Math.exp(-damping * E) : 1;
+  out.vel.scale(decay);
+  out.angVel.copy(om).scale(decay);
+  out.grip.copy(out.sweet).addScaled(out.axis, -RACKET.sweetSpotY);
+  out.t = src.t + E;
+  return out;
+}
+
+/** out = a blended toward b by w (sweet spot lerp, nlerp of axis / normal, lerp of velocities). */
+export function blendRacketPose(a, b, w, out = createRacketPose()) {
+  if (w <= 0) return out === a ? out : copyRacketPose(out, a);
+  if (w >= 1) return out === b ? out : copyRacketPose(out, b);
+  out.sweet.lerpVectors(a.sweet, b.sweet, w);
+  out.axis.lerpVectors(a.axis, b.axis, w);
+  if (out.axis.lengthSq() < 1e-10) out.axis.copy(w < 0.5 ? a.axis : b.axis);
+  out.axis.normalize();
+  out.normal.lerpVectors(a.normal, b.normal, w);
+  out.normal.addScaled(out.axis, -out.normal.dot(out.axis));
+  if (out.normal.lengthSq() < 1e-10) out.normal.copy(b.normal).addScaled(out.axis, -b.normal.dot(out.axis));
+  out.normal.normalize();
+  out.vel.lerpVectors(a.vel, b.vel, w);
+  out.angVel.lerpVectors(a.angVel, b.angVel, w);
+  out.grip.copy(out.sweet).addScaled(out.axis, -RACKET.sweetSpotY);
+  out.t = a.t + (b.t - a.t) * w;
+  return out;
+}
+
 // --- Quaternions as plain {x,y,z,w} ------------------------------------------
 
 /** Rotation of the racket frame: columns X = Y × Z, Y = axis, Z = normal. */

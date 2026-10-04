@@ -11,6 +11,12 @@
 //   return  ball behind the eye coming back off the glass (or slowing there): snap back toward
 //           the expected contact beside the body (±30°) with a stiffer spring.
 // Every phase shares a yaw-rate cap (150°/s): no whip pans on a big TV.
+//
+// Contact framing (QA2): when the predicted contact of the incoming ball is known (opts.contact,
+// the tactical home's intercept), the view blends over the last CONTACT_LEAD s from following the
+// ball to framing the contact point in the lower-middle of the picture (up to CONTACT_DROP below
+// the centre; never by tilting up past a chest-high contact), so racket and ball meet on screen. Overheads cap the upward pitch (OVERHEAD_PITCH_MAX): the view
+// does not stare at the ceiling and the racket rising from behind the head enters the frame.
 
 const DEG = Math.PI / 180;
 
@@ -29,6 +35,12 @@ export const GAZE = Object.freeze({
   UP_BAND: 8 * DEG, // balls above the base direction are followed only beyond this band
   PITCH_MIN: -55 * DEG,
   PITCH_MAX: 50 * DEG,
+  CONTACT_DROP: 17 * DEG, // the predicted contact sits this far below the view centre
+  CONTACT_YAW_GAIN: 0.75, // share of the contact's bearing the head turns toward (within CONTACT_LIMIT)
+  OVERHEAD_PITCH_MAX: 25 * DEG,
+  CONTACT_LEAD: Object.freeze([0.25, 0.8]), // s before the contact: full framing .. framing starts
+  CONTACT_BLEND_FAR: 4.0, // m (ball to contact, horizontal), when the contact has no time
+  CONTACT_BLEND_NEAR: 1.5,
 });
 
 const clamp = (v, lo, hi) => (v < lo ? lo : v > hi ? hi : v);
@@ -51,7 +63,8 @@ export function springCapped(s, target, lambda, dt, maxRate) {
 
 /**
  * @returns {{ update(ball, eye, dt, opts): {yaw, pitch, phase}, reset(basePitch), yaw, pitch, phase }}
- *   ball: BallState|null; eye: {x,y,z}; opts: { basePitch (rad), follow = true }
+ *   ball: BallState|null; eye: {x,y,z}; opts: { basePitch (rad), follow = true, contact = null }
+ *   contact: predicted contact {x, y, z, t?} (court; t in ball time) for the incoming ball, or null.
  *   yaw: 0 = looking toward -z, + = turned to the player's left (three.js Y rotation).
  */
 export function createGaze() {
@@ -67,7 +80,7 @@ export function createGaze() {
     phase = 'front';
   }
 
-  function update(ball, eye, dt, { basePitch = 0, follow = true } = {}) {
+  function update(ball, eye, dt, { basePitch = 0, follow = true, contact = null } = {}) {
     if (!pitchInit) reset(basePitch);
     let tYaw = 0, tPitch = basePitch;
     let lambda = GAZE.LAMBDA;
@@ -104,6 +117,29 @@ export function createGaze() {
       const d = ballPitch - basePitch;
       const followP = d < 0 ? 0.6 * d : 0.7 * Math.max(0, d - GAZE.UP_BAND);
       tPitch = clamp(basePitch + followP, GAZE.PITCH_MIN, GAZE.PITCH_MAX);
+      // Contact framing for the stroke itself.
+      if (contact && phase === 'front') {
+        const cx = contact.x - eye.x, cy = contact.y - eye.y, cz = contact.z - eye.z;
+        // Blend in over the last CONTACT_LEAD s before the contact (by distance without a time).
+        const tl = Number.isFinite(contact.t) && Number.isFinite(ball.t) ? contact.t - ball.t : null;
+        const w = tl !== null
+          ? (tl < -0.15 ? 0 : 1 - smoothstep(GAZE.CONTACT_LEAD[0], GAZE.CONTACT_LEAD[1], tl))
+          : 1 - smoothstep(GAZE.CONTACT_BLEND_NEAR, GAZE.CONTACT_BLEND_FAR, Math.hypot(ball.pos.x - contact.x, ball.pos.z - contact.z));
+        if (w > 0) {
+          const cH = Math.max(0.25, Math.hypot(cx, cz));
+          const cYaw = clamp(Math.atan2(-cx, -cz) * GAZE.CONTACT_YAW_GAIN, -GAZE.CONTACT_LIMIT, GAZE.CONTACT_LIMIT);
+          // Contact CONTACT_DROP below the centre, but never by looking up past the contact (a
+          // chest-high ball is framed at the centre rather than with the ceiling).
+          const e = Math.atan2(cy, cH);
+          const cPitch = clamp(Math.min(e + GAZE.CONTACT_DROP, Math.max(basePitch, e)), GAZE.PITCH_MIN, GAZE.OVERHEAD_PITCH_MAX);
+          tYaw = tYaw + (cYaw - tYaw) * w;
+          tPitch = tPitch + (cPitch - tPitch) * w;
+          lambda = Math.max(lambda, GAZE.LAMBDA_NEAR);
+          phase = 'contact';
+        }
+      }
+      // Overheads: never stare at the ceiling.
+      if (tPitch > GAZE.OVERHEAD_PITCH_MAX && phase !== 'out') tPitch = GAZE.OVERHEAD_PITCH_MAX;
     } else if (Math.abs(yaw.x) > GAZE.CONTACT_LIMIT) {
       lambda = GAZE.LAMBDA_RETURN;
     }

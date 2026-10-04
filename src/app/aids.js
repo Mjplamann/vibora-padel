@@ -3,6 +3,7 @@
 // every 0.3 s, so mesh scatter or a net cord is picked up. Pure module.
 import { predictFlight } from '../game/world.js';
 import { interceptCandidates } from '../physics/predict.js';
+import { playableCandidates, pickGlassContact } from '../game/intercept.js';
 
 export function createAids() {
   let key = null;
@@ -24,6 +25,9 @@ export function createAids() {
     const f = world.flight;
     const incoming = ball && !ball.atRest && !ball.outside && f && f.team !== 0 && f.by !== 'drop';
     if (!incoming || (!wantLanding && !wantGhost)) return clear();
+    // A predicted hit is showing (game/world.js world.spec): the incoming ball is struck on
+    // screen, so its bounce marker and contact ghost would point at a path the player left.
+    if (world.spec) return clear();
     const k = `${ball.id}:${f.startT}`;
     if (k !== key || world.time - at > 0.3) {
       key = k;
@@ -40,10 +44,13 @@ export function createAids() {
       ghost = null;
       if (wantGhost) {
         const pl = world.player;
-        const cands = interceptCandidates(pred, {
+        // Never a ghost against the glass: the contacts a player can swing at (game/intercept.js),
+        // off the glass once it has come out when the drill plays the glass.
+        const cands = playableCandidates(interceptCandidates(pred, {
           playerPos: pl.pos, side: 'near', now: world.time, minHeight: 0.3, maxHeight: 2.4 * ((pl.height || 1.75) / 1.75),
-        });
-        const c = cands.find((x) => x.t > world.time + 0.05);
+        })).filter((x) => x.t > world.time + 0.05);
+        const hint = world.mode && world.mode.apHints;
+        const c = (hint && hint.contact === 'glass' && pickGlassContact(cands, pl.height)) || cands[0];
         if (c) ghost = { x: c.pos.x, y: c.pos.y, z: c.pos.z, t: c.t };
       }
     }

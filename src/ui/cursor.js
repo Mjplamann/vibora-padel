@@ -10,7 +10,8 @@
 import { OneEuro, clamp } from '../util/math.js';
 
 export const DWELL_MS = 1000;
-export const PAUSE_HOLD_MS = 1500;
+// QA2: overhead preparation (racket up, off hand pointing at the lob) held the old 1.5 s gesture.
+export const PAUSE_HOLD_MS = 2000;
 export const DWELL_SELECTOR = 'button:not([disabled]):not([aria-disabled="true"]), [data-dwell]:not([aria-disabled="true"]), [role="slider"]';
 
 // Reach box around the active shoulder, in meters for a 0.38 m shoulder width.
@@ -35,7 +36,9 @@ const REARM_MS = 600;
  * @param {(state:object) => void} [o.onCursor] called with the state on every update
  * @param {(el:Element, state:object) => void} [o.onDwellClick] called after a dwell click
  * @param {number} [o.dwellMs=1000]
- * @param {number} [o.pauseHoldMs=1500]
+ * @param {number} [o.pauseHoldMs=2000]
+ * @param {() => boolean} [o.isLive] true while a ball is in play (world.ball live and the referee
+ *   phase not 'dead'): the pause gesture is ignored then, so an overhead cannot pause the game
  * @param {() => number} [o.now=performance.now]
  */
 export function createHandCursor({
@@ -47,7 +50,9 @@ export function createHandCursor({
   dwellMs = DWELL_MS,
   pauseHoldMs = PAUSE_HOLD_MS,
   now = () => performance.now(),
+  isLive = null,
 } = {}) {
+  let liveGate = isLive;
   let enabled = true;
   const fx = new OneEuro(1.1, 4.0, 1.0);
   const fy = new OneEuro(1.1, 4.0, 1.0);
@@ -182,8 +187,11 @@ export function createHandCursor({
     const j = sample.joints;
     const tSec = Number.isFinite(sample.t) ? sample.t / 1000 : tNow / 1000;
 
-    // Pause gesture works even when the cursor is disabled (e.g. during play).
-    if (bothAboveHead(j) && tNow >= pauseCooldownUntil) {
+    // Pause gesture works even when the cursor is disabled (e.g. during play), but not while a ball
+    // is live: bandeja / smash preparation looks the same.
+    let live = false;
+    try { live = !!(liveGate && liveGate()); } catch { live = false; }
+    if (!live && bothAboveHead(j) && tNow >= pauseCooldownUntil) {
       if (pauseSince == null) pauseSince = tNow;
       state.pauseProgress = clamp((tNow - pauseSince) / pauseHoldMs, 0, 1);
       if (state.pauseProgress >= 1) {
@@ -261,6 +269,8 @@ export function createHandCursor({
     setEnabled,
     reset,
     get enabled() { return enabled; },
+    /** Sets the live-ball gate (see o.isLive); null removes it. */
+    setLiveGate(fn) { liveGate = typeof fn === 'function' ? fn : null; },
     get state() { return state; },
     dispose() { reset(); },
   };
