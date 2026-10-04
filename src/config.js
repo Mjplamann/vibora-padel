@@ -125,10 +125,23 @@ export const TRACKING = {
 // Assist presets. Contact margin enlarges the racket face for hit detection,
 // shotBlend pulls the outgoing velocity toward the intended shot, magnet nudges
 // the player's court position toward the ideal contact spot.
+//
+// mode (round 3, first real-world session: "like hitting a fruit fly"): 'physical' hits need the
+// tracked racket face to meet the ball; 'timing' hits need a swing on time (game/swingAssist.js):
+// a detected swing (body-relative sweet-spot speed >= minSpeed m/s, moving forward) whose peak
+// falls in [t* - early, t* + late] (s, t* = the ideal contact moment) and whose racket path passes
+// within `reach` m of the ball strikes it where it is; the player is glided toward the ideal
+// stance with weight `position` (1 = fully placed, own steps ignored during the ball).
 export const ASSIST = {
-  pro: { label: 'Pro', contactMargin: 0.02, shotBlend: 0.0, magnet: 0.0, netSafety: 0.0 },
-  club: { label: 'Club', contactMargin: 0.1, shotBlend: 0.35, magnet: 0.35, netSafety: 0.5 },
-  rookie: { label: 'Rookie', contactMargin: 0.2, shotBlend: 0.65, magnet: 0.7, netSafety: 0.9 },
+  pro: { label: 'Pro', mode: 'physical', contactMargin: 0.02, shotBlend: 0.0, magnet: 0.0, netSafety: 0.0 },
+  club: {
+    label: 'Club', mode: 'timing', contactMargin: 0.1, shotBlend: 0.35, magnet: 0.35, netSafety: 0.5,
+    timing: { early: 0.2, late: 0.22, reach: 0.75, minSpeed: 4.0, position: 0.75 },
+  },
+  rookie: {
+    label: 'Rookie', mode: 'timing', contactMargin: 0.2, shotBlend: 0.65, magnet: 0.7, netSafety: 0.9,
+    timing: { early: 0.32, late: 0.35, reach: Infinity, minSpeed: 3.0, position: 1.0 },
+  },
 };
 export const DEFAULT_ASSIST = 'club';
 

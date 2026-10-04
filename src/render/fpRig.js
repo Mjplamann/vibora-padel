@@ -6,8 +6,9 @@ import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { clone as cloneSkinned } from 'three/addons/utils/SkeletonUtils.js';
 import { buildRacket } from './racket.js';
 import { RACKET } from '../config.js';
-import { ARM_FADE, ARM_RADIUS, segmentAlpha, stubStart, stubRaiseFactor, besideEyeFactor } from './armFade.js';
+import { ARM_FADE, ARM_RADIUS, segmentAlpha, stubStart, stubRaiseFactor, besideEyeFactor, sideOnAlpha } from './armFade.js';
 import { racketEnclosureShift } from './viewClamp.js';
+import { isFiniteVec, frameOk, segmentOk } from './safeView.js';
 import { createSkinMaterial, createFabricMaterial, limbGeometry, quatFromYZ, canvasTexture, cached } from './actorKit.js';
 import {
   RIGHT_BIND, analyzeBind, poseHand, handleInArmature, handInRacketMatrix, chainNames,
@@ -191,15 +192,36 @@ function addNearFade(m, radius) {
 
 
 
-/** Orients an arm segment group (built along -Y) from a to b; zHint sets its twist. */
+/**
+ * Orients an arm segment group (built along -Y) from a to b; zHint sets its twist. Returns the
+ * length, or 0 for a degenerate segment (non-finite or shorter than 1 mm): the caller hides it.
+ * A zero-length segment scaled to 0 has a singular matrix whose NaN normals blacked out the whole
+ * picture through the bloom (real-world session, side-on play: the hidden arm collapses).
+ */
 function placeSegment(seg, a, b, zHint, nominal, skinMesh) {
+  if (!isFiniteVec(a) || !isFiniteVec(b)) return 0;
   const len = a.distanceTo(b);
+  if (!(len > 1e-3)) return 0;
   seg.position.copy(a);
-  _t1.subVectors(a, b).normalize(); // local +Y points back toward the segment origin
-  quatFromYZ(_t1, zHint, seg.quaternion);
+  _t1.subVectors(a, b).multiplyScalar(1 / len); // local +Y points back toward the segment origin
+  if (!safeQuatFromYZ(_t1, zHint, seg.quaternion)) return 0;
   if (skinMesh) skinMesh.scale.y = len / nominal;
   return len;
 }
+
+/** quatFromYZ that leaves `out` untouched (returns false) for a zero / non-finite axis or hint. */
+function safeQuatFromYZ(y, zHint, out) {
+  if (!isFiniteVec(y) || !(y.lengthSq() > 1e-12)) return false;
+  _sq.copy(out);
+  quatFromYZ(y, isFiniteVec(zHint) ? zHint : _zFallback, out);
+  if (!(Number.isFinite(out.x) && Number.isFinite(out.y) && Number.isFinite(out.z) && Number.isFinite(out.w)) || Math.abs(out.lengthSq() - 1) > 1e-3) {
+    out.copy(_sq);
+    return false;
+  }
+  return true;
+}
+const _sq = new THREE.Quaternion();
+const _zFallback = new THREE.Vector3(0, 0, 1);
 
 /** Two-bone IK: elbow position for shoulder S, wrist T and a pole direction. */
 export function solveElbow(S, T, l1, l2, pole, out = new THREE.Vector3()) {
@@ -217,6 +239,10 @@ const _ik2 = new THREE.Vector3();
 // of the eye and would fill the screen; like a VR rig, it is hidden closer than NEAR_RACKET to
 // renderOpts.eye / eye2. Arm segments fade by angular size instead (armFade.js).
 const NEAR_RACKET = 0.2;
+/** Racket face near the view centre (cos of the angle from the view axis) and closer than `far` (m) fades to `min`. */
+const CENTRE_FADE = Object.freeze({ cosOuter: Math.cos((38 * Math.PI) / 180), cosInner: Math.cos((14 * Math.PI) / 180), near: 0.32, far: 0.58, min: 0.3 });
+/** Torso yaw (rad, shoulder line vs the court x axis) beyond which arms fade by their nearest point. */
+const SIDE_ON_FADE = (45 * Math.PI) / 180;
 // QA framing pass: the racket head fades out between these distances (face centre to eye),
 // unless the ball is near the racket (then it must stay solid: that is the contact).
 const FADE_RACKET_FAR = 0.35;
@@ -260,6 +286,8 @@ export function createFirstPersonRig({ handed = 'right', skinTone = '#c58c6a', s
     }
   });
   let racketFade = 1;
+  /** Robustness counters: racket poses that were not a valid frame, arm segments not drawn. */
+  const stats = { racketRejected: 0, segmentsHidden: 0 };
   function setRacketFade(f) {
     if (Math.abs(f - racketFade) < 0.01 && (f === 1) === (racketFade === 1)) return;
     racketFade = f;
@@ -412,7 +440,12 @@ export function createFirstPersonRig({ handed = 'right', skinTone = '#c58c6a', s
       return;
     }
     if ((player.handed === 'left' || player.handed === 'right') && player.handed !== state.handed) setHanded(player.handed);
-    const rp = racketPoseFrom(player);
+    // A racket pose that is not a finite, orthogonal frame is not drawn (never a degenerate matrix).
+    let rp = racketPoseFrom(player);
+    if (rp && !frameOk(rp)) {
+      rp = null;
+      stats.racketRejected++;
+    }
     const bc = player.bodyCourt;
     if (!rp && !bc) {
       root.visible = false;
@@ -423,6 +456,7 @@ export function createFirstPersonRig({ handed = 'right', skinTone = '#c58c6a', s
     const scale = (player.height || 1.75) / 1.75;
     const ex = THREE.MathUtils.clamp(renderOpts.extrapolate || 0, 0, 0.06);
     bodyFacing(player);
+    const sideOn = Math.abs(Math.atan2(right.z, right.x)) > SIDE_ON_FADE;
     const dom = dominantSide();
     const off = dom === 'R' ? 'L' : 'R';
 
@@ -446,7 +480,8 @@ export function createFirstPersonRig({ handed = 'right', skinTone = '#c58c6a', s
       const sh = racketEnclosureShift(vGrip, vAxis, vNorm);
       vGrip.x += sh.dx;
       vGrip.z += sh.dz;
-      quatFromYZ(vAxis, vNorm, qRacket);
+      if (!(Number.isFinite(sh.dx) && Number.isFinite(sh.dz))) vGrip.set(rp.grip.x, rp.grip.y, rp.grip.z);
+      safeQuatFromYZ(vAxis, vNorm, qRacket);
       racketMesh.position.copy(vGrip);
       racketMesh.quaternion.copy(qRacket);
       racketMesh.updateMatrix();
@@ -472,6 +507,16 @@ export function createFirstPersonRig({ handed = 'right', skinTone = '#c58c6a', s
         if (!ballNear) {
           const d = tmp.distanceTo(ce);
           fade = THREE.MathUtils.smoothstep(d, NEAR_RACKET, FADE_RACKET_FAR) * 0.85 + 0.15;
+          // A dark racket face held across the line of sight half a metre away (side-on, a high
+          // ready position) covers the middle of the picture: fade it when it sits near the
+          // view centre, down to CENTRE_FADE.min opacity inside CENTRE_FADE.near.
+          const vd = renderOpts.viewDir;
+          if (vd && d > 1e-6) {
+            const cosA = ((tmp.x - ce.x) * vd.x + (tmp.y - ce.y) * vd.y + (tmp.z - ce.z) * vd.z) / d;
+            const central = THREE.MathUtils.smoothstep(cosA, CENTRE_FADE.cosOuter, CENTRE_FADE.cosInner);
+            const far = THREE.MathUtils.smoothstep(d, CENTRE_FADE.near, CENTRE_FADE.far);
+            fade = Math.min(fade, 1 - central * (1 - far) * (1 - CENTRE_FADE.min));
+          }
         }
       }
       setRacketFade(fade);
@@ -479,11 +524,11 @@ export function createFirstPersonRig({ handed = 'right', skinTone = '#c58c6a', s
 
     // --- joints (tracked, or synthesized for mouse/fallback control)
     const j = bc?.joints;
-    const eye = player.eye || tmp.set(player.pos.x, (player.height || 1.75) * 0.936, player.pos.z);
+    const eye = player.eye && isFiniteVec(player.eye) ? player.eye : tmp.set(player.pos.x, (player.height || 1.75) * 0.936, player.pos.z);
     for (const side of ['L', 'R']) {
       const sgn = side === 'R' ? 1 : -1;
       const S = j?.[`shoulder${side}`];
-      if (S) shoulder.set(S.x, S.y, S.z);
+      if (S && isFiniteVec(S)) shoulder.set(S.x, S.y, S.z);
       else shoulder.set(eye.x, eye.y - 0.21 * scale, eye.z).addScaledVector(right, 0.19 * scale * sgn).addScaledVector(fwd, -0.06);
 
       if (side === off || !rp) {
@@ -492,9 +537,16 @@ export function createFirstPersonRig({ handed = 'right', skinTone = '#c58c6a', s
         const I = j?.[`index${side}`];
         const P = j?.[`pinky${side}`];
         const holder = holders[side];
-        if (W && I && P) {
+        if (W && I && P && isFiniteVec(W) && isFiniteVec(I) && isFiniteVec(P)) {
           wristVis[side].set(W.x, W.y, W.z);
-          tmp.set((I.x + P.x) / 2 - W.x, (I.y + P.y) / 2 - W.y, (I.z + P.z) / 2 - W.z).normalize();
+          tmp.set((I.x + P.x) / 2 - W.x, (I.y + P.y) / 2 - W.y, (I.z + P.z) / 2 - W.z);
+          // Collapsed hand landmarks (hidden hand): the hand continues the forearm.
+          if (tmp.lengthSq() < 1e-6) {
+            const Ej = j?.[`elbow${side}`];
+            if (Ej && isFiniteVec(Ej)) tmp.set(W.x - Ej.x, W.y - Ej.y, W.z - Ej.z);
+            if (tmp.lengthSq() < 1e-6) tmp.set(0, -0.6, 0).addScaledVector(fwd, 0.8);
+          }
+          tmp.normalize();
           // Palm normal from the knuckle triangle (right: (I-W)x(P-W), left: negated).
           tmp2.set(I.x - W.x, I.y - W.y, I.z - W.z).cross(_t2.set(P.x - W.x, P.y - W.y, P.z - W.z));
           if (side === 'L') tmp2.negate();
@@ -510,9 +562,9 @@ export function createFirstPersonRig({ handed = 'right', skinTone = '#c58c6a', s
           tmp2.copy(right).multiplyScalar(-sgn);
         }
         holder.position.copy(wristVis[side]);
-        quatFromYZ(tmp, tmp2, holder.quaternion);
+        holder.visible = safeQuatFromYZ(tmp, tmp2, holder.quaternion) || holder.userData.oriented === true;
+        holder.userData.oriented = holder.userData.oriented || holder.visible;
         palmN[side].copy(tmp2);
-        holder.visible = true;
         // Ready-position cradle: snap the off hand onto the throat when it is close.
         if (rp && side === off && renderOpts.cradle !== false) {
           vThroat.copy(throatLocal).applyMatrix4(mRacket);
@@ -533,7 +585,7 @@ export function createFirstPersonRig({ handed = 'right', skinTone = '#c58c6a', s
 
       // Elbow: tracked, else IK with the elbow down/out/back.
       const E = j?.[`elbow${side}`];
-      if (E) {
+      if (E && isFiniteVec(E)) {
         elbow.set(E.x, E.y, E.z);
         if (side === dom && rp && ex > 0 && rp.vel) elbow.addScaledVector(tmp.set(rp.vel.x, rp.vel.y, rp.vel.z), ex * 0.5);
       } else {
@@ -543,14 +595,18 @@ export function createFirstPersonRig({ handed = 'right', skinTone = '#c58c6a', s
 
       const arm = arms[side];
       tmp.copy(palmN[side]);
-      placeSegment(arm.fore, elbow, wristVis[side], tmp, FOREARM, arm.foreSkin);
+      // Side-on play collapses the hidden arm (elbow on the wrist or the shoulder): a segment of
+      // implausible length is not drawn (a squashed capsule reads as a disc in front of the eyes,
+      // and a zero-length one blacked out the whole picture).
+      const foreOk = segmentOk(elbow, wristVis[side], FOREARM * scale) && placeSegment(arm.fore, elbow, wristVis[side], tmp, FOREARM, arm.foreSkin) > 0;
       // Sweatband at the wrist end (unscaled), slightly overlapping the hand.
-      const foreLen = elbow.distanceTo(wristVis[side]);
+      const foreLen = foreOk ? elbow.distanceTo(wristVis[side]) : FOREARM * scale;
       arm.band.position.y = -(foreLen - 0.05);
       // Upper arm: only a stub from the elbow (VR style); twist so the elbow crease faces forward-ish.
       tmp2.copy(fwd).addScaledVector(right, -0.3 * sgn);
       stubStart(shoulder, elbow, scale, stubA);
-      placeSegment(arm.upper, stubA, elbow, tmp2, UPPER_ARM, arm.upperSkin);
+      const upperOk = segmentOk(shoulder, elbow, UPPER_ARM * scale) && placeSegment(arm.upper, stubA, elbow, tmp2, UPPER_ARM, arm.upperSkin) > 0;
+      if (!foreOk || !upperOk) stats.segmentsHidden++;
       // Fade by angular size from the nearer of the camera and the tracked eye (QA2: sleeves and
       // forearms filled 20-25% of the picture).
       eyes[0] = renderOpts.eye || null;
@@ -565,11 +621,18 @@ export function createFirstPersonRig({ handed = 'right', skinTone = '#c58c6a', s
       if (trueEye) {
         aU *= segmentAlpha(ARM_RADIUS.upper * scale, elbow, elbow, [trueEye]) * besideEyeFactor(stubA, elbow, trueEye, fwd);
         aF *= segmentAlpha(ARM_RADIUS.fore * scale, wristVis[side], wristVis[side], [trueEye]) * besideEyeFactor(elbow, wristVis[side], trueEye, fwd);
+        // Side-on (torso turned > SIDE_ON_FADE from the TV): the near arm folds across the chest a
+        // hand's width below the eyes and its elbow end filled the bottom of the picture. Then
+        // the whole segment fades by its nearest point, not only by its distal end.
+        if (sideOn) {
+          aU *= sideOnAlpha(stubA, elbow, trueEye);
+          aF *= sideOnAlpha(elbow, wristVis[side], trueEye);
+        }
       }
       setSegmentAlpha(arm, 'upper', aU);
       setSegmentAlpha(arm, 'fore', aF);
-      arm.upper.visible = aU > 0.02;
-      arm.fore.visible = aF > 0.02;
+      arm.upper.visible = upperOk && aU > 0.02;
+      arm.fore.visible = foreOk && aF > 0.02;
       // A faded limb casting a full shadow on the glass reads as a ghost arm.
       arm.upperSkin.castShadow = aU > 0.6;
       arm.foreSkin.castShadow = arm.band.castShadow = aF > 0.6;
@@ -590,6 +653,7 @@ export function createFirstPersonRig({ handed = 'right', skinTone = '#c58c6a', s
   return {
     root,
     racketMesh,
+    stats,
     /** Current near-eye fade of the racket (1 = solid). */
     get racketFade() { return racketFade; },
     ready,

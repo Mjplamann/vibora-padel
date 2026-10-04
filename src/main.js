@@ -26,6 +26,8 @@ import { createTracking, bodyVisibility, createMotionWatch, createFrameWatch } f
 import { createDebugOverlay } from './app/debug.js';
 import { installPrivacyGuard } from './app/privacy.js';
 import { initPwa } from './app/pwa.js';
+import { buildDiagnostics, browserEnv } from './app/diagnostics.js';
+import { installGlasses } from './xr/boot.js';
 
 installPrivacyGuard();
 
@@ -35,6 +37,7 @@ const store = createSettingsStore(storage);
 const S = store.value;
 // URL overrides apply to this visit only (not persisted unless changed in Settings).
 if (P.quality) S.quality = P.quality;
+if (P.assist) S.assist = P.assist;
 if (P.pitch !== null) S.viewPitch = P.pitch;
 if (P.fov !== null) S.fov = P.fov;
 if (P.eyeBack !== null || P.eyeDown !== null) {
@@ -59,6 +62,7 @@ let human = null;
 let fallback = null;
 let debug = null;
 let pwa = null; // app packaging: service worker, install button, display mode
+let xrBoot = null; // glasses mode (src/xr/boot.js): app.xr, recentre keys, stereo HUD, panels
 const recorder = createRecorder({ seconds: 6, hz: 60 });
 const aids = createAids();
 const motion = createMotionWatch();
@@ -143,6 +147,7 @@ function endGame() {
     stage.effects.contactGhost(null);
   }
   if (!clock.running) clock.resume();
+  clock.setRate(1);
 }
 
 function ensureFallback() {
@@ -169,6 +174,9 @@ function startGame(spec, { attract = false } = {}) {
     seed: nextSeed(),
     apLatency: P.apLatency,
     apDelivery: P.apDelivery,
+    apProfile: P.apProfile,
+    apJitter: P.apJitter,
+    apNoise: P.apNoise,
     attract,
     onFrame: input === 'autopilot' && !attract ? (frame) => { lastPoseFrame = frame; ui.setSkeleton(frame); } : null,
   });
@@ -194,6 +202,8 @@ function startGame(spec, { attract = false } = {}) {
   ui.show('play', { mode: spec.kind, hud: g.hud() });
   if (input === 'fallback') ui.toast('Mouse moves the racket · flick or press Space as the ball comes · WASD moves');
   if (input === 'autopilot') ui.toast('Autopilot: a virtual player drives the tracking pipeline');
+  // Glasses: recentre the head-tracked view at every drill / rally / match start (setting).
+  if (xrBoot) xrBoot.onSessionStart();
   return g;
 }
 
@@ -251,6 +261,7 @@ function showResults() {
       targets: d.targets,
       tips: (sum.tips || []).map((t) => ({ text: t, es: noteEs(t) })),
       nextDrill: nd ? { id: nd.id, name: nd.name, es: nd.es } : null,
+      misses: sum.misses || null,
     };
   } else {
     const won = g.spec.kind === 'match' ? g.mode.match.winner === 0 : null;
@@ -262,6 +273,7 @@ function showResults() {
       points: sc ? sc.games[0] : sum.bestRally || 0,
       stars: g.spec.kind === 'match' ? (won ? 3 : 1) : 0,
       tips: [],
+      misses: sum.misses || null,
     };
   }
   stage.setView('orbit');
@@ -543,7 +555,13 @@ const handlers = {
   onCameraRetry() {
     enterCamera();
   },
+  /** Copy diagnostics (Pause, Settings, D on the pause screen): app/diagnostics.js. */
+  onDiagnostics() {
+    return diagnosticsData();
+  },
   onScreen(name, data) {
+    // Glasses panel in Settings and Help (idempotent; remounts after each re-render).
+    if (xrBoot) xrBoot.onScreen(name);
     if (name !== 'title' && game && game.attract) stopAttract();
     switch (name) {
       case 'title':
@@ -591,6 +609,8 @@ function stepGame(nowMs, dtReal) {
     w.tracking.frameDt = ts.fps > 1 ? clamp(1 / ts.fps, 1 / 120, 0.2) : 1 / 30;
   }
   if (!paused && !g.done) {
+    // Learning slow motion off the glass (game/swingAssist.js): the clock runs at speed × rate.
+    clock.setRate(g.attract ? 1 : g.timeScale());
     let target = clock.simTimeOf(nowMs);
     // Catch-up cap per display frame. Accelerated test runs (?speed > 1, often on software GL)
     // may catch up 0.5 s × speed so the sim keeps lockstep with the clock.
@@ -651,11 +671,14 @@ function stepGame(nowMs, dtReal) {
     // Arrow only for a ball well outside the picture (beside or behind you).
     const bi = ui.screen === 'play' ? stage.ballIndicator(w.ball) : null;
     h.ballIndicator = bi && Math.abs(bi.angle) > 1.1 ? bi : null;
+    // The rear-view mirror already shows a ball behind you: no duplicate arrow.
+    if (stage.rearView && stage.rearView.visible) h.ballIndicator = null;
     // Ball in play (until the ruling): HUD blocks near the action step back.
     h.live = g.inPlay();
     // Camera input: tell the player when the camera loses them (a living room is small).
     if (g.input === 'camera' && frameWarning && ui.screen === 'play') h.prompt = `${frameWarning.text}`;
     ui.hud(h);
+    if (xrBoot) xrBoot.hud(h);
     g.emitHud(h);
     // Zone labels in the 3D scene keep out from under the HUD blocks.
     stage.effects.setLabelOccluders(hudRects());
@@ -699,6 +722,9 @@ function frame(nowMs) {
   const dtReal = clamp((nowMs - lastMs) / 1000, 0, 0.1);
   lastMs = nowMs;
   try {
+    // Glasses: play context (3D side-by-side only renders during play) and the true eye position
+    // while head tracking runs; before syncWorld / render.
+    if (xrBoot) xrBoot.frame({ playing: !!game && !game.attract && ui.screen === 'play' && !replay });
     if (replay) stepReplay(dtReal);
     else if (game) stepGame(nowMs, dtReal);
     else stage.syncWorld(null, dtReal, {});
@@ -713,6 +739,8 @@ function frame(nowMs) {
         render: stage.app.stats, pose: tracking ? tracking.stats : null, poseStatus: tracking ? tracking.status.message : '',
         world: game ? game.world : null, stats: game ? game.stats : null, latency: game ? game.world.settings.latency : S.latency,
         speed: clock.speed, quality: S.quality, input: inputMode,
+        safety: stage.safety, tracker: activeHuman() ? activeHuman().bodyTracker.stats : null, timeRate: clock.rate,
+        glasses: glassesLine(),
       });
     }
   } catch (err) {
@@ -784,6 +812,13 @@ async function boot() {
     },
   });
   window.addEventListener('resize', () => stage.resize());
+  // Glasses mode (VITURE, experimental): settings under 'vibora.xr.v1', ?glasses=1 / ?stereo=1 / ?xrsim=1.
+  try {
+    xrBoot = installGlasses({ stage, settings: S, storage, uiRoot, toast: (t) => ui.toast(t) });
+  } catch (err) {
+    xrBoot = null;
+    errors.push(`glasses: ${String(err && err.message ? err.message : err)}`);
+  }
 
   audio = P.noAudio ? null : createAudio();
   if (audio) audio.setVolume(S.volumes);
@@ -834,6 +869,49 @@ async function boot() {
 }
 
 // ---------------------------------------------------------------------------------------
+// Diagnostics
+
+/** The human controller in use (a session's, else the shared camera one). */
+function activeHuman() {
+  return game && !game.attract ? game.human : human;
+}
+
+/** One-line glasses status for ?debug=1 (null when glasses mode is off). */
+function glassesLine() {
+  if (!xrBoot) return null;
+  const g = xrBoot.glasses;
+  if (!g || !g.enabled) return null;
+  const xr = stage && stage.xr;
+  const head = xr && xr.headTracking ? 'head on' : 'head off';
+  const st = xr && xr.stereo && xr.stereo.enabled ? '3D' : '2D';
+  return `${head} · ${st} · fov ${xr && xr.fov ? xr.fov.toFixed(1) : '—'}°`;
+}
+
+/** Copy diagnostics payload (app/diagnostics.js buildDiagnostics). */
+function diagnosticsData() {
+  const cam = tracking ? tracking.camera : null;
+  const h = activeHuman();
+  const bt = h ? h.bodyTracker : null;
+  const last = bt && bt.last ? bt.last : lastSample;
+  return buildDiagnostics({
+    world: game && !game.attract ? game.world : null,
+    settings: S,
+    tracking: tracking ? {
+      camera: cam ? { label: cam.label, kind: cam.kind, presetKey: cam.presetKey, settings: cam.settings || null } : null,
+      stats: tracking.stats,
+    } : null,
+    calibration: human ? human.bodyTracker.calibration : null,
+    pwa,
+    stats: vibora.stats,
+    params: P,
+    env: browserEnv(),
+    glasses: xrBoot ? xrBoot.diagnostics() : null,
+    safety: stage ? stage.safety : null,
+    robust: bt ? { stats: bt.stats, yawDeg: last ? last.yawDeg : null, sideOn: last ? last.sideOn : null } : null,
+  });
+}
+
+// ---------------------------------------------------------------------------------------
 // Test / debug handle
 
 /** Counters of game/world.js specStats (the per-hit arrays summarised as medians). */
@@ -879,8 +957,20 @@ const vibora = {
       finished: game ? game.isFinished() : false,
       fps: stage ? stage.app.stats.fps : 0,
       drawCalls: stage ? stage.app.stats.drawCalls : 0,
+      // Black-screen safety net (stage) and side-on tracker guards (tracking/body.js).
+      safety: stage ? stage.safety : null,
+      tracker: activeHuman() ? activeHuman().bodyTracker.stats : null,
+      timeRate: clock.rate,
     };
   },
+  /** Glasses mode diagnostics (src/xr) or null. */
+  get glasses() { return xrBoot ? xrBoot.diagnostics() : null; },
+  /** The glasses integration (src/xr/boot.js installGlasses) or null. */
+  get xr() { return xrBoot; },
+  /** Camera + pose tracker (Copy diagnostics). */
+  get tracking() { return tracking; },
+  /** The Copy diagnostics object (same as the Pause / Settings button). */
+  diagnostics() { return diagnosticsData(); },
   /** Sim time of the autopilot's next planned contact (or null). */
   nextContact() {
     return game && game.feed ? game.feed.nextContact : null;

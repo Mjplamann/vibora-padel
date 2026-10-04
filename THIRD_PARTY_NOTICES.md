@@ -13,6 +13,18 @@ by this project's own code.
 | Big Shoulders Display (800, 900) | `fonts/big-shoulders-display-*.woff2` | SIL Open Font License 1.1 — full text in `fonts/LICENSE-big-shoulders.txt` | The Big Shoulders Project Authors |
 | Barlow Semi Condensed (400, 600, 700) | `fonts/barlow-semi-condensed-*.woff2` | SIL Open Font License 1.1 — full text in `fonts/LICENSE-barlow.txt` | © 2017 The Barlow Project Authors |
 
+Protocol references for the experimental glasses mode (no code copied verbatim; the formats are
+re-implemented in `src/xr/protocol.js`):
+
+- (a) viture-webxr-extension `viture-hid.js` (MIT; built for watchroom.moe; protocol research after
+  wheaney/XRLinuxDriver and jakedowns/xreal-webxr): the legacy MCU/IMU packet layout, CRC-16-CCITT and
+  the IMU enable command 0x15.
+- (b) elasticjava/viture-v2 `PROTOCOL.md` (MIT, © 2026 Holger Bartnick,
+  https://github.com/elasticjava/viture-v2): the Gen2 frame format, 0x0301 IMU control and 0x7308 pose
+  events.
+- (c) AlexwellChen/beast-panorama hardware notes: Beast axes, Smooth Follow and 1200p60 observations
+  (informational).
+
 Notes
 
 - The Apache-2.0 components are redistributed in their original, unmodified form. If you redistribute
@@ -23,3 +35,5 @@ Notes
   answers those requests locally without sending them (`src/app/privacy.js`). The vendored file itself
   is unmodified.
 - "VÍBORA" and the racket graphics are this project's own designs; no real brand is depicted.
+  "VITURE" is named only to say which glasses work with the experimental glasses mode; no VITURE
+  logo or trade dress is used.

@@ -7,6 +7,34 @@ import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
 import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
 import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
 import { FXAAPass } from 'three/addons/postprocessing/FXAAPass.js';
+import { ShaderPass } from 'three/addons/postprocessing/ShaderPass.js';
+
+/**
+ * NaN / Inf guard between the scene render and the bloom (real-world session: "a black screen
+ * with image on the side"). One non-finite fragment (a degenerate matrix, a zero normal) is
+ * smeared over the whole picture by the bloom mip chain, so the WebGL view turns black while the
+ * HUD and camera PiP stay. This pass zeroes non-finite pixels; the test is on the float bits
+ * (exponent all ones), which survives GPU fast-math that may drop isnan().
+ */
+export const FINITE_GUARD_SHADER = {
+  name: 'FiniteGuardShader',
+  uniforms: { tDiffuse: { value: null } },
+  vertexShader: /* glsl */ `
+    varying vec2 vUv;
+    void main() {
+      vUv = uv;
+      gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+    }`,
+  fragmentShader: /* glsl */ `
+    uniform sampler2D tDiffuse;
+    varying vec2 vUv;
+    bool bad(float x) { return (floatBitsToUint(x) & 0x7f800000u) == 0x7f800000u; }
+    void main() {
+      vec4 c = texture2D(tDiffuse, vUv);
+      if (bad(c.r) || bad(c.g) || bad(c.b) || bad(c.a)) c = vec4(0.0, 0.0, 0.0, 1.0);
+      gl_FragColor = c;
+    }`,
+};
 
 /**
  * Quality tiers. `turfSize`/`envSize`/`neighbors`/`fillLights` are read by environment.js at
@@ -70,6 +98,7 @@ export function createRenderer(canvas, { quality = 'high', dynamicResolution = t
 
   let composer = null;
   let renderPass = null;
+  let guardPass = null;
   let bloomPass = null;
   let outputPass = null;
   let fxaaPass = null;
@@ -87,6 +116,8 @@ export function createRenderer(canvas, { quality = 'high', dynamicResolution = t
     composer.setSize(width, height);
     renderPass = new RenderPass(scene, camera);
     composer.addPass(renderPass);
+    guardPass = new ShaderPass(FINITE_GUARD_SHADER);
+    composer.addPass(guardPass);
     bloomPass = new UnrealBloomPass(new THREE.Vector2(width, height), q.bloomStrength, 0.12, BLOOM_THRESHOLD);
     bloomPass.enabled = q.bloom;
     composer.addPass(bloomPass);

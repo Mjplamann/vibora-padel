@@ -1,5 +1,10 @@
 // World bus -> audio, visual effects, UI and the voice coach (SPEC §5.1 event contract).
 import { strokeName } from '../ui/charts.js';
+import { reachRing } from '../game/swingAssist.js';
+
+/** Spoken miss reasons: at most one per MISS_VOICE_GAP s, the same reason again only after MISS_REPEAT_S. */
+export const MISS_VOICE_GAP = 2.5;
+export const MISS_REPEAT_S = 8;
 
 const EN_NUM = (n) => String(Math.round(n));
 
@@ -62,7 +67,40 @@ export function bindWorld(world, ctx) {
     if (by === 'machine') stage.machine.pulse();
   });
 
+  // Ball visibility aids (render/ballView.js): the setting and the reach ring of the timing plan.
+  if (stage && stage.ballView && stage.ballView.bind) {
+    stage.ballView.bind({
+      visibility: () => world.settings.ballVisibility || 'enhanced',
+      ring: () => (!quiet && stage.view === 'fp' ? reachRing(world) : null),
+    });
+    offs.push(() => stage.ballView.bind(null));
+  }
+
   if (!quiet) {
+    // Why a ball was not hit (game/swingAssist.js): HUD card via mode.hud, voice here, rate-limited.
+    let lastMissSay = -Infinity;
+    const missSaid = new Map();
+    on('player:miss', (m) => {
+      const now = world.time;
+      if (now - lastMissSay < MISS_VOICE_GAP) return;
+      if (now - (missSaid.get(m.reason) ?? -Infinity) < MISS_REPEAT_S && m.reason !== 'early' && m.reason !== 'late') return;
+      lastMissSay = now;
+      missSaid.set(m.reason, now);
+      if (voice) voice.say(m.text, { priority: 1, es: m.es });
+      if (ui && ui.missCard) ui.missCard(m);
+    });
+    // Timing cues of balls off the glass: the audio tick, "Let it come off the glass… now!".
+    on('timing:cue', (c) => {
+      if (c.kind === 'tick') {
+        if (audio && audio.ui) audio.ui('tick');
+      } else if (c.kind === 'glass') {
+        if (voice) voice.say(c.text, { priority: 1, es: c.es });
+      } else if (c.kind === 'now-voice') {
+        if (voice) voice.say(c.text, { priority: 3, es: c.es });
+      } else if (c.kind === 'now') {
+        if (ui && ui.timingCue) ui.timingCue('now');
+      }
+    });
     on('rally:outcome', (o) => {
       if (!audio) return;
       if (o.winner === 0 && (o.reason === 'por-tres' || o.reason === 'por-cuatro')) audio.cheer(1);

@@ -15,7 +15,14 @@
 //      service worker precaches the app, then OFFLINE: a relaunch boots with zero errors and a
 //      drill runs, and the camera path loads the pose model; finally a new service worker
 //      version shows "Update ready" and Restart activates it.
-// Usage: node tools/smoke.mjs [--only=autopilot|latency|fallback|camera|nocamera|subpath|pwa] [--width=1280 --height=720]
+//   5. Black screen (tools/blackscreen.mjs, its own browser): a degenerate mesh and side-on
+//      MediaPipe corruptions (hidden arm, label swaps, NaN / Infinity landmarks) never black out
+//      the 3D picture (first real-world session: "a black screen with image on the side").
+//   6. Glasses mode (dev/xr-shot.mjs --only=full, dev/xr-app-shot.mjs --only=stereo): stereo eye
+//      order and a simulated head sweep driving the camera, then the real app at 3840×1200 in
+//      3D side-by-side with simulated glasses (?xrsim=1&stereo=1) and the Mac-latency autopilot.
+// Usage: node tools/smoke.mjs [--only=autopilot|latency|fallback|camera|nocamera|subpath|pwa|blackscreen|xr] [--width=1280 --height=720]
+import { spawn } from 'node:child_process';
 import { mkdir, mkdtemp, rm } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
@@ -435,6 +442,35 @@ async function runPwa(chromium, port) {
   }
 }
 
+/** Runs a check script (exit code 0 = pass) and reports one smoke check with its summary lines. */
+function runScript(name, script, scriptArgs = [], timeoutMs = 900000) {
+  return new Promise((resolve) => {
+    const t0 = Date.now();
+    const child = spawn(process.execPath, [join(ROOT, script), ...scriptArgs], { cwd: ROOT, stdio: ['ignore', 'pipe', 'pipe'] });
+    let out = '';
+    child.stdout.on('data', (d) => { out += d; });
+    child.stderr.on('data', (d) => { out += d; });
+    const timer = setTimeout(() => child.kill('SIGKILL'), timeoutMs);
+    child.on('close', (code) => {
+      clearTimeout(timer);
+      const lines = out.split('\n').filter((l) => /^(PASS|FAIL)|\d+\/\d+ (checks )?passed|^\s*(ok|FAIL:)|^\w+ \d+×\d+/.test(l));
+      const fails = lines.filter((l) => /FAIL/.test(l));
+      const summary = lines.find((l) => /\d+\/\d+ (checks )?passed/.test(l)) || `${lines.filter((l) => /^\s*ok$/.test(l)).length} cases ok`;
+      check(name, code === 0, `${summary.trim()}, ${((Date.now() - t0) / 1000).toFixed(0)} s${fails.length ? ` · ${fails.slice(0, 3).join(' | ')}` : ''}`);
+      resolve(code === 0);
+    });
+  });
+}
+
+async function runBlackscreen() {
+  await runScript('black screen: degenerate meshes / side-on corrupt tracking never black out the picture (tools/blackscreen.mjs)', 'tools/blackscreen.mjs');
+}
+
+async function runXr() {
+  await runScript('glasses: stereo eye order + simulated head sweep drives the camera (dev/xr-shot.mjs --only=full)', 'dev/xr-shot.mjs', ['tools/out', '--only=full']);
+  await runScript('glasses: real app in 3D side-by-side with simulated glasses, not black, head tracked (dev/xr-app-shot.mjs --only=stereo)', 'dev/xr-app-shot.mjs', ['tools/out', '--only=stereo']);
+}
+
 async function main() {
   await mkdir(OUT, { recursive: true });
   const { chromium } = await loadPlaywright();
@@ -451,6 +487,8 @@ async function main() {
     if (!only || only === 'nocamera') await runNoCamera(chromium, port);
     if (!only || only === 'subpath') await runSubpath(browser, port);
     if (!only || only === 'pwa') await runPwa(chromium, port);
+    if (!only || only === 'blackscreen') await runBlackscreen();
+    if (!only || only === 'xr') await runXr();
   } catch (err) {
     check('smoke run completed', false, err.message);
   } finally {

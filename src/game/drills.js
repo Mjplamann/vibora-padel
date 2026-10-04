@@ -8,8 +8,9 @@
 // machine head, e.g. corner feeds and serves), launchHeight, drop (serve drill: the
 // mode drops the ball next to the player), drillId (live mix).
 //
-// `ap` holds hints for the autopilot (contact type, stroke family, aim) and `opponents`
-// optional static opponents for the renderer.
+// `ap` holds the drill's intent: for the autopilot (contact type, stroke family, aim) and for
+// timing hits (game/swingAssist.js: `shot` is the stroke the drill teaches, `aim` its target), and
+// `opponents` optional static opponents for the renderer.
 
 import { COURT } from '../config.js';
 
@@ -324,7 +325,7 @@ const ALL_DRILLS = [
       tips: ['Racket back as the ball crosses the net', 'Contact in front of your front hip', 'Low to high, finish over your shoulder'],
       tipsEs: ['Pala atrás cuando la bola pasa la red', 'Golpea delante de la cadera', 'De abajo arriba, termina sobre el hombro'],
     },
-    ap: { contact: 'ground', family: 'fh', aim: { x: -2.4, z: -8.2 }, speedKmh: 74, top: 1100 },
+    ap: { contact: 'ground', family: 'fh', shot: 'drive', aim: { x: -2.4, z: -8.2 }, speedKmh: 74, top: 1100 },
   },
   {
     id: 'bh-drive', name: 'Backhand Drive', es: 'Revés', skill: 'Groundstrokes', level: 1,
@@ -338,15 +339,18 @@ const ALL_DRILLS = [
       tips: ['Turn your shoulders before the bounce', 'Keep the racket face firm at contact', 'Finish toward the target'],
       tipsEs: ['Gira los hombros antes del bote', 'Cara de la pala firme al golpear', 'Termina hacia el objetivo'],
     },
-    ap: { contact: 'ground', family: 'bh', aim: { x: 2.4, z: -8.2 }, speedKmh: 66, top: 700 },
+    ap: { contact: 'ground', family: 'bh', shot: 'drive', aim: { x: 2.4, z: -8.2 }, speedKmh: 66, top: 700 },
   },
   {
     id: 'back-glass', name: 'Off the Back Glass', es: 'Salida de pared', skill: 'Walls', level: 2,
     home: { x: 2.0, z: 7.0 }, side: 'right', reps: 15, interval: 3.8, mirrorForLefty: true,
+    // Round 3: a loopy deep ball that peaks near the glass and comes off it descending, so it is
+    // played 1.8-2.5 m off the glass at 0.6-1.3 m (the old 7.6-8.6 m / 1.2 s feeds came off the
+    // glass still rising: shoulder height 1.2 m off it, or waist height 4 m out).
     feeds: (i, rng) => ({
-      target: { x: r2(rng, 1.2, 3.0), z: r2(rng, 7.6, 8.6) },
-      flightTime: r2(rng, 1.15, 1.3),
-      spinRpm: { top: r2(rng, 300, 700), side: feedSide(i) },
+      target: { x: r2(rng, 1.2, 3.0), z: r2(rng, 6.9, 7.2) },
+      flightTime: r2(rng, 1.55, 1.7),
+      spinRpm: { top: r2(rng, -300, 100), side: feedSide(i) },
     }),
     targets: [zone('deep', 'Deep', -5, 5, -10, -6.0, 100)],
     scoring: (shot, result) => scoreBackGlass(DRILL_BY_ID['back-glass'], shot, result),
@@ -356,15 +360,17 @@ const ALL_DRILLS = [
       tips: ['Don\'t rush – let it come off the glass', 'Side-on to the glass, racket low', 'Lift it deep, not hard'],
       tipsEs: ['Sin prisa: deja que salga del cristal', 'De lado al cristal, pala baja', 'Levántala profunda, no fuerte'],
     },
-    ap: { contact: 'glass', family: 'fh', aim: { x: -1.2, z: -7.4 }, speedKmh: 50, top: 700 },
+    ap: { contact: 'glass', family: 'fh', shot: 'glass', aim: { x: -1.2, z: -7.4 }, speedKmh: 50, top: 700 },
   },
   {
     id: 'double-wall', name: 'Corner Exit', es: 'Doble pared', skill: 'Walls', level: 3,
     home: { x: 2.4, z: 7.0 }, side: 'right', reps: 15, interval: 4.0, mirrorForLefty: true,
+    // Round 3: into the corner so it comes out of both glasses descending through waist height
+    // (1.2-2.2 m off the back glass, ~1 m off the side glass).
     feeds: (i, rng) => ({
-      target: { x: r2(rng, 3.4, 4.0), z: r2(rng, 7.8, 8.5) },
-      flightTime: r2(rng, 1.1, 1.25),
-      spinRpm: { top: r2(rng, 200, 600), side: feedSide(i) },
+      target: { x: r2(rng, 3.8, 4.0), z: r2(rng, 6.8, 7.2) },
+      flightTime: r2(rng, 1.55, 1.7),
+      spinRpm: { top: r2(rng, -300, -100), side: feedSide(i) },
       offsetX: -3.0,
     }),
     targets: [zone('deep', 'Deep', -5, 5, -10, -6.0, 100)],
@@ -377,12 +383,12 @@ const ALL_DRILLS = [
       return r;
     },
     cues: {
-      intro: 'Corner exit: the ball hits the back glass then the side glass. Read both rebounds, then lift it deep.',
-      introEs: 'Doble pared: la bola toca el fondo y luego el lateral. Lee los dos rebotes y levántala profunda.',
+      intro: 'Corner exit: the ball comes off both glasses in the corner. Read both rebounds, then lift it deep.',
+      introEs: 'Doble pared: la bola sale de los dos cristales de la esquina. Lee los dos rebotes y levántala profunda.',
       tips: ['Stay away from the corner – let it come out', 'Short steps to adjust', 'Play it as it leaves the side glass'],
       tipsEs: ['Aléjate de la esquina, deja que salga', 'Pasos cortos para ajustar', 'Juégala al salir del lateral'],
     },
-    ap: { contact: 'glass', family: 'fh', aim: { x: -1.0, z: -7.4 }, speedKmh: 50, top: 700 },
+    ap: { contact: 'glass', family: 'fh', shot: 'glass', aim: { x: -1.0, z: -7.4 }, speedKmh: 50, top: 700 },
   },
   {
     id: 'volleys', name: 'Net Volleys', es: 'Voleas', skill: 'Net', level: 1,
@@ -407,7 +413,7 @@ const ALL_DRILLS = [
       tips: ['No backswing – just block and punch', 'Contact in front of your body', 'Step toward the ball'],
       tipsEs: ['Sin armado: bloquea y empuja', 'Golpea delante del cuerpo', 'Da un paso hacia la bola'],
     },
-    ap: { contact: 'volley', family: 'auto', aim: { x: -3.6, z: -8.2 }, aimBh: { x: 3.6, z: -8.2 }, speedKmh: 50, top: 0 },
+    ap: { contact: 'volley', family: 'auto', shot: 'volley', aim: { x: -3.6, z: -8.2 }, aimBh: { x: 3.6, z: -8.2 }, speedKmh: 50, top: 0 },
   },
   {
     id: 'bandeja', name: 'Bandeja', es: 'Bandeja', skill: 'Overheads', level: 2,
@@ -425,7 +431,7 @@ const ALL_DRILLS = [
       tips: ['Turn sideways and point at the ball', 'Contact in front, above your head', 'Slice it deep – no more than 85 km/h'],
       tipsEs: ['Ponte de perfil y señala la bola', 'Golpe delante, por encima de la cabeza', 'Cortada y profunda, sin pasar de 85 km/h'],
     },
-    ap: { contact: 'overhead', family: 'oh', aim: { x: -1.2, z: -8.3 }, speedKmh: 62, top: -500 },
+    ap: { contact: 'overhead', family: 'oh', shot: 'bandeja', aim: { x: -1.2, z: -8.3 }, speedKmh: 62, top: -500 },
   },
   {
     id: 'vibora', name: 'Víbora', es: 'Víbora', skill: 'Overheads', level: 3,
@@ -446,7 +452,7 @@ const ALL_DRILLS = [
       tips: ['Contact a little to the side of your head', 'Cut across the ball, finish low on the left', 'Aim so it dies off the side glass'],
       tipsEs: ['Golpe algo al lado de la cabeza', 'Corta la bola y termina abajo a la izquierda', 'Que muera en el cristal lateral'],
     },
-    ap: { contact: 'overhead', family: 'oh', aim: { x: -3.9, z: -8.2 }, speedKmh: 72, top: -300 },
+    ap: { contact: 'overhead', family: 'oh', shot: 'vibora', aim: { x: -3.9, z: -8.2 }, speedKmh: 72, top: -300 },
   },
   {
     id: 'smash-x3', name: 'Smash Por Tres', es: 'Remate por tres', skill: 'Overheads', level: 3,
@@ -468,7 +474,7 @@ const ALL_DRILLS = [
       tips: ['Move back fast, side-on', 'Contact high and in front', 'Hit down and through – bounce it 2–3 m past the net'],
       tipsEs: ['Retrocede rápido, de perfil', 'Golpe alto y delante', 'Hacia abajo: bote a 2–3 m de la red'],
     },
-    ap: { contact: 'overhead', family: 'sm', aim: { x: 0.3, z: -2.6 }, speedKmh: 138, top: 300 },
+    ap: { contact: 'overhead', family: 'sm', shot: 'smash', aim: { x: 0.3, z: -2.6 }, speedKmh: 138, top: 300 },
   },
   {
     id: 'lob-defense', name: 'Defensive Lob', es: 'Globo', skill: 'Tactics', level: 2,
@@ -486,7 +492,7 @@ const ALL_DRILLS = [
       tips: ['Open the racket face', 'Long, slow swing from low to high', 'Deep – but not onto the glass on the full'],
       tipsEs: ['Abre la cara de la pala', 'Swing largo y lento de abajo arriba', 'Profundo, sin tocar el cristal directo'],
     },
-    ap: { contact: 'ground', family: 'fh', aim: { x: -1.0, z: -8.6 }, apex: 6.2, top: 300 },
+    ap: { contact: 'ground', family: 'fh', shot: 'lob', aim: { x: -1.0, z: -8.6 }, apex: 6.2, top: 300 },
     opponents: [{ x: -2.0, z: -3.0 }, { x: 2.0, z: -3.0 }],
   },
   {
@@ -505,7 +511,7 @@ const ALL_DRILLS = [
       tips: ['Short swing, soft hands', 'Just over the tape', 'Then move up to the net'],
       tipsEs: ['Swing corto, manos suaves', 'Justo por encima de la red', 'Y luego sube a la red'],
     },
-    ap: { contact: 'ground', family: 'fh', aim: { x: -1.0, z: -2.6 }, speedKmh: 37, maxClear: 0.3, top: 900 },
+    ap: { contact: 'ground', family: 'fh', shot: 'chiquita', aim: { x: -1.0, z: -2.6 }, speedKmh: 37, maxClear: 0.3, top: 900 },
     opponents: [{ x: -2.0, z: -3.0 }, { x: 2.0, z: -3.0 }],
   },
   {
@@ -525,7 +531,7 @@ const ALL_DRILLS = [
       tips: ['Drop the ball beside your front foot', 'Contact at waist height or lower', 'Aim deep, toward the glass'],
       tipsEs: ['Bota la bola junto al pie delantero', 'Golpe a la cintura o más bajo', 'Profundo, hacia el cristal'],
     },
-    ap: { contact: 'serve', family: 'fh', aim: { x: -2.6, z: -6.0 }, speedKmh: 68, top: -200 },
+    ap: { contact: 'serve', family: 'fh', shot: 'serve', aim: { x: -2.6, z: -6.0 }, speedKmh: 68, top: -200 },
   },
   {
     id: 'return', name: 'Return of Serve', es: 'Resto', skill: 'Serve', level: 2,
@@ -548,7 +554,7 @@ const ALL_DRILLS = [
       tips: ['Split-step as the server strikes', 'Compact swing – use the serve\'s pace', 'Cross-court deep, or lob'],
       tipsEs: ['Split-step cuando saca el rival', 'Swing compacto: usa la velocidad del saque', 'Cruzado profundo o globo'],
     },
-    ap: { contact: 'ground', family: 'fh', aim: { x: -2.4, z: -8.2 }, speedKmh: 66, top: 900 },
+    ap: { contact: 'ground', family: 'fh', shot: 'return', aim: { x: -2.4, z: -8.2 }, speedKmh: 66, top: 900 },
   },
   {
     id: 'live-mix', name: 'Live Ball Mix', es: 'Bola viva', skill: 'Tactics', level: 3,
@@ -664,6 +670,16 @@ export const NOTE_ES = Object.freeze({
   'Too long – it hit the fence on the full': 'Larga: tocó la reja sin botar',
   'Volley it – take the ball before it bounces': 'Volea: tómala antes del bote',
   'Watch the ball onto the sweet spot': 'Mira la bola hasta el centro de la pala',
+  // Round 3: advice by kind of miss (modes.js MISS_TIPS).
+  'Swing a bit faster – a full, quick swing counts': 'Golpea un poco más rápido: un swing completo y rápido',
+  'Wait for it – swing as the ring around the ball turns green': 'Espera: golpea cuando el aro de la bola se pone verde',
+  'Start your swing earlier – as the ball bounces': 'Empieza el golpe antes: cuando bota la bola',
+  'Swing through the ball, not under it': 'Golpea a través de la bola, no por debajo',
+  'Bend your knees for the low ball': 'Flexiona las rodillas para la bola baja',
+  'Step toward the ball before you swing': 'Acércate a la bola antes de golpear',
+  'Step in and meet the ball in front of you': 'Entra y golpea la bola delante de ti',
+  'Let it bounce – and off the glass – before you play it': 'Déjala botar, y salir del cristal, antes de jugarla',
+  'Stay in the camera picture, head to ankles': 'Quédate en el encuadre de la cámara, de la cabeza a los tobillos',
   '¡Por cuatro! Out over the side': '¡Por cuatro! Fuera por el lateral',
   '¡Por tres! Out over the back wall': '¡Por tres! Fuera por el fondo',
   '¡Víbora! It died off the side glass': '¡Víbora! Murió en el cristal lateral',

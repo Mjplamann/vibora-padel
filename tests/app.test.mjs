@@ -37,6 +37,39 @@ describe('sim clock', () => {
     now += 1000;
     assert.equal(fast.now(), 3);
   });
+
+  test('setRate (learning slow motion) re-anchors; earlier capture times keep their segment rate', () => {
+    let now = 0;
+    const c = createSimClock({ speed: 1, now: () => now });
+    now = 1000;
+    assert.equal(c.now(), 1);
+    c.setRate(0.5);
+    assert.equal(c.rate, 0.5);
+    now = 2000;
+    assert.ok(Math.abs(c.now() - 1.5) < 1e-9, 'half rate after the change');
+    // A pose frame captured at 800 ms (before the change) arriving now maps at rate 1.
+    assert.ok(Math.abs(c.simTimeOf(800) - 0.8) < 1e-9);
+    assert.ok(Math.abs(c.simTimeOf(1400) - 1.2) < 1e-9);
+    c.setRate(1);
+    now = 3000;
+    assert.ok(Math.abs(c.now() - 2.5) < 1e-9, 'continuous through both changes');
+    assert.ok(Math.abs(c.simTimeOf(1400) - 1.2) < 1e-9, 'middle segment still at 0.5×');
+    c.shift(-0.5);
+    assert.ok(Math.abs(c.now() - 2) < 1e-9);
+    assert.ok(Math.abs(c.simTimeOf(800) - 0.3) < 1e-9, 'a shift moves every segment');
+    c.setRate(NaN);
+    assert.equal(c.rate, 1, 'bad rates fall back to 1');
+    // Thousands of tiny changes stay bounded and continuous.
+    let prev = c.now();
+    for (let i = 0; i < 5000; i++) {
+      now += 16;
+      c.setRate(0.7 + 0.3 * Math.abs(Math.sin(i / 30)));
+      const v = c.now();
+      assert.ok(v >= prev - 1e-9, 'monotonic');
+      prev = v;
+    }
+    assert.ok(Number.isFinite(c.simTimeOf(now - 250)));
+  });
 });
 
 describe('settings', () => {
@@ -74,6 +107,29 @@ describe('settings', () => {
     assert.equal(p.quality, 'balanced');
     assert.equal(p.pitch, -15);
     assert.equal(parseParams('').speed, 1);
+  });
+
+  test('round 3 URL flags: human-like autopilot, webcam-like feed, assist for this visit', () => {
+    const p = parseParams('?approfile=human&apjitter=0.02&apnoise=1&assist=rookie');
+    assert.equal(p.apProfile, 'human');
+    assert.equal(p.apJitter, 0.02);
+    assert.equal(p.apNoise, 1);
+    assert.equal(p.assist, 'rookie');
+    const d = parseParams('?approfile=robot&apjitter=x&assist=legend');
+    assert.equal(d.apProfile, null, 'unknown profiles are ignored');
+    assert.equal(d.apJitter, null);
+    assert.equal(d.apNoise, null);
+    assert.equal(d.assist, null);
+    assert.equal(parseParams('?apnoise=99').apNoise, 4, 'clamped');
+  });
+
+  test('glassView (balls behind you) defaults to the mirror and only takes known modes', () => {
+    const st = memStorage();
+    assert.equal(loadSettings(st).glassView, 'mirror');
+    st.setItem(STORAGE_KEY, JSON.stringify({ glassView: 'turn' }));
+    assert.equal(loadSettings(st).glassView, 'turn');
+    st.setItem(STORAGE_KEY, JSON.stringify({ glassView: 'sideways' }));
+    assert.equal(loadSettings(st).glassView, 'mirror');
   });
 });
 

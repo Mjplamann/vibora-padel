@@ -83,10 +83,12 @@ const tmpA = new Vec3(), tmpB = new Vec3(), tmpC = new Vec3();
  * @param o.posAt (t) -> {x, z} player court position at sim time t (or null)
  * @param o.contactOffsets CONTACT_OFFSETS of human.js (ideal contact per family)
  * @param o.futurePos (world, ahead, out) -> {x, z} the player's court position `ahead` s from now
+ * @param o.contactPlan optional (world) -> { t, pos, vel, fam } | null: the contact the game has
+ *   planned (timing hits, game/swingAssist.js); when given, the swing is completed to it
  * @returns SwingPredictor = { update(world), detect(world, ballPrev, ballNow, margin) -> contact|null,
  *   strike(), learn(shot), reset(), renderPose, prevPose, plan, stats }
  */
-export function createSwingPredictor({ racketTrack, posAt, contactOffsets, futurePos }) {
+export function createSwingPredictor({ racketTrack, posAt, contactOffsets, futurePos, contactPlan = null }) {
   let cur = createRacketPose();
   let prev = createRacketPose();
   let hasCur = false, hasPrev = false;
@@ -229,6 +231,9 @@ export function createSwingPredictor({ racketTrack, posAt, contactOffsets, futur
     // Player court position at the racket capture time of ball time t (the follow spring).
     const fp = { x: 0, z: 0 };
     const at = (t) => futurePos(world, clamp(t + lat - T, 0, 0.4), fp);
+    // Timing hits: the game has planned the contact (moment, point, family); complete the swing to it.
+    const planned = contactPlan ? contactPlan(world) : null;
+    if (planned) return planToward(world, L, T, lat, planned, shU, dom, k, pr, serving, at, fp);
     // Each pass of the ball by the player's ideal contact spot is a candidate (a deep ball can
     // pass before the glass and again after it); the drill's intent picks among them.
     const minima = [];
@@ -371,6 +376,48 @@ export function createSwingPredictor({ racketTrack, posAt, contactOffsets, futur
     return {
       key: flightKey(world), fam, tStar, cStar, c0: L.t, C: best.pos.clone(), S0, S1, u0: u0.clone(), axisRot, offset0,
       D, rho0, rho1, n0: L.normal.clone(), a0: L.axis.clone(), omega, p, speed, struck: false, releaseAt: null, miss: bestCost, prepared,
+    };
+  }
+
+  /**
+   * Swing plan toward a contact planned by the game (timing hits): same arc about the shoulder as
+   * makePlan, no candidate search, no face / running rejections (the timing judge decides the hit).
+   */
+  function planToward(world, L, T, lat, c, shU, dom, k, pr, serving, at, fp) {
+    const pl = world.player;
+    const tStar = c.t;
+    const cStar = tStar + lat;
+    const span = cStar - L.t;
+    if (span < 0.02) return reject('span');
+    at(tStar);
+    const S1 = new Vec3(fp.x + shU.x, shU.y, fp.z - shU.z);
+    const r0 = new Vec3().subVectors(L.sweet, S1);
+    const rho0 = r0.length();
+    const r1 = new Vec3().subVectors(c.pos, S1);
+    const rho1 = r1.length();
+    if (rho0 < 0.15 || rho1 < 0.15 || rho1 > 1.6 * k) return reject('rho');
+    const u0 = r0.scale(1 / rho0);
+    const u1 = r1.scale(1 / rho1);
+    const axisRot = new Vec3().crossVectors(u0, u1);
+    const sinD = axisRot.length();
+    const D = Math.atan2(sinD, u0.dot(u1));
+    if (sinD > 1e-6) axisRot.scale(1 / sinD);
+    else axisRot.copy(L.normal).addScaled(u0, -L.normal.dot(u0)).normalize();
+    if (D / span > PREDICT.maxRate * 1.5) return reject('maxRate');
+    const vRel = tmpA.set(L.vel.x - pl.vel.x, L.vel.y, L.vel.z - pl.vel.z);
+    const vAbs = vRel.length();
+    const tangent = tmpB.crossVectors(axisRot, u0);
+    const toward = vRel.dot(tangent);
+    const prepared = vAbs < PREDICT.heldSpeed || (D > 0.2 && Math.abs(toward) > 0.6 * vAbs);
+    const continuing = plan && !plan.struck && plan.key === flightKey(world) && !plan.dead;
+    if (!prepared && !continuing) return reject('notPrepared');
+    const fam = famOf(c.fam, serving, tStar, pr, world);
+    const speed = swingSpeed(world, fam);
+    const omega = speed / rho1;
+    const p = clamp((omega * span) / Math.max(D, 1e-3), PREDICT.pMin, PREDICT.pMax);
+    return {
+      key: flightKey(world), fam, tStar, cStar, c0: L.t, C: c.pos.clone(), S0: S1.clone(), S1, u0: u0.clone(), axisRot, offset0: null,
+      D, rho0, rho1, n0: L.normal.clone(), a0: L.axis.clone(), omega, p, speed, struck: false, releaseAt: null, miss: 0, prepared, timing: true,
     };
   }
 

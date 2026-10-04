@@ -25,7 +25,11 @@ export function createDebugOverlay() {
         b ? `ball ${(Math.hypot(b.vel.x, b.vel.y, b.vel.z) * 3.6).toFixed(0)} km/h  y ${b.pos.y.toFixed(2)}  z ${b.pos.z.toFixed(2)}` : 'ball —',
         w ? `player x ${w.player.pos.x.toFixed(2)} z ${w.player.pos.z.toFixed(2)}  eye ${w.player.eye.y.toFixed(2)}` : '',
         w && w.hitRejects ? `judge +${Math.round(judgeMargin(w) * 1000)} ms  rejected hits: late ${w.hitRejects.late}${w.hitRejects.lastLate ? ` (last ${Math.round(w.hitRejects.lastLate.by * 1000)} ms after contact)` : ''}  rules ${w.hitRejects.rules}  other ${w.hitRejects.other}` : '',
-      ];
+        // Black-screen safety net (app/stage.js, render/fpCamera.js, render/fpRig.js) and the side-on tracker guards (tracking/body.js).
+        info.safety ? `safety hidden ${info.safety.meshesHidden} cam ${info.safety.camera.cameraRestored} eye ${info.safety.camera.eyeRestored} ball ${info.safety.ballHidden} rig ${info.safety.rig.racketRejected}/${info.safety.rig.segmentsHidden} · tracker swaps ${info.tracker ? info.tracker.swaps : 0} spikes ${info.tracker ? info.tracker.spikes : 0} rejected ${info.tracker ? info.tracker.rejectedLandmarks : 0} side-on ${info.tracker ? info.tracker.sideOnFrames : 0}` : '',
+        info.timeRate !== undefined && info.timeRate !== 1 ? `slow motion ×${info.timeRate.toFixed(2)}` : '',
+        info.glasses ? `glasses ${info.glasses}` : '',
+      ].filter((l) => l !== '');
       el.textContent = lines.join('\n');
     },
     dispose() { el.remove(); },

@@ -10,6 +10,7 @@
 import { TRACKING, ASSIST } from '../config.js';
 import { clamp, createRng } from '../util/math.js';
 import { courtDiagram, landingMap, strokeBars, strokeName, drawSkeleton, escapeHtml as esc, fitCanvas } from './charts.js';
+import { buildDiagnostics, browserEnv, copyText } from '../app/diagnostics.js';
 
 export const SCREENS = Object.freeze(['loading', 'title', 'camera', 'calibrate', 'hub', 'drill-intro', 'play', 'pause', 'results', 'settings', 'help']);
 
@@ -30,6 +31,8 @@ export const UI_DEFAULT_SETTINGS = Object.freeze({
   quality: 'high', voice: 'en', volumes: Object.freeze({ master: 0.9, sfx: 1, ambience: 0.5 }),
   skinTone: '#c58c6a', racketColor: '#e8572a', pip: true, skeleton: true,
   cameraPreset: TRACKING.defaultCamera,
+  // Round 3: ball visibility 'realistic' | 'enhanced' | 'max' (render/ballView.js BALL_VISIBILITY).
+  ballVisibility: 'enhanced',
 });
 
 const CAL_STEPS = [
@@ -122,8 +125,8 @@ function swatchHtml(name, colors, value, label) {
   }).join('')}</div>`;
 }
 
-function fieldHtml(label, es, control, { valueId = null, value = '' } = {}) {
-  return `<div class="field"><div class="field-head"><span class="field-label">${esc(label)}${es ? `<span class="es">${esc(es)}</span>` : ''}</span>${valueId ? `<output class="field-val" data-out="${esc(valueId)}">${esc(value)}</output>` : ''}</div>${control}</div>`;
+function fieldHtml(label, es, control, { valueId = null, value = '', hint = '' } = {}) {
+  return `<div class="field"><div class="field-head"><span class="field-label">${esc(label)}${es ? `<span class="es">${esc(es)}</span>` : ''}</span>${valueId ? `<output class="field-val" data-out="${esc(valueId)}">${esc(value)}</output>` : ''}</div>${control}${hint ? `<p class="field-hint">${esc(hint)}</p>` : ''}</div>`;
 }
 
 // ---------------------------------------------------------------------------
@@ -133,8 +136,17 @@ const SETTINGS_GROUPS = [
   {
     en: 'Play', es: 'Juego', items: [
       { key: 'assist', type: 'seg', en: 'Assist', es: 'Ayuda', options: [['rookie', 'Rookie'], ['club', 'Club'], ['pro', 'Pro']] },
+      // Round 3: Club / Rookie hit on timing (game/swingAssist.js), Pro physically.
+      { key: 'hitMode', type: 'seg', en: 'Hitting', es: 'Golpeo', options: [['auto', 'Auto', 'by assist'], ['timing', 'Timing'], ['physical', 'Contact', 'racket on ball']] },
       { key: 'hitPrediction', type: 'switch', en: 'Predictive hitting', es: 'Golpe predictivo' },
       { key: 'gazeFollow', type: 'switch', en: 'Gaze follows the ball', es: 'Mirada a la bola' },
+    ],
+  },
+  {
+    en: 'Ball & aids', es: 'Bola y ayudas', items: [
+      { key: 'ballVisibility', type: 'seg', en: 'Ball visibility', es: 'Visibilidad de la bola', options: [['realistic', 'Real'], ['enhanced', 'Enhanced'], ['max', 'Max']] },
+      { key: 'learningSlowmo', type: 'seg', en: 'Slow motion off the glass', es: 'Cámara lenta en el cristal', options: [['auto', 'Rookie'], ['on', 'On'], ['off', 'Off']] },
+      { key: 'timingTick', type: 'switch', en: 'Timing tick on every ball', es: 'Tic en cada bola' },
       { key: 'landingMarker', type: 'switch', en: 'Landing marker', es: 'Marca de bote' },
       { key: 'contactGhost', type: 'switch', en: 'Ideal contact ghost', es: 'Punto de impacto ideal' },
       { key: 'halo', type: 'switch', en: 'Ball halo', es: 'Halo de la bola' },
@@ -145,6 +157,9 @@ const SETTINGS_GROUPS = [
       { key: 'gainLateral', type: 'range', en: 'Side-step gain', es: 'Lateral', min: 1, max: 4, step: 0.1, fmt: (v) => `×${v.toFixed(1)}` },
       { key: 'gainDepth', type: 'range', en: 'Forward / back gain', es: 'Profundidad', min: 1, max: 4, step: 0.1, fmt: (v) => `×${v.toFixed(1)}` },
       { key: 'fov', type: 'range', en: 'Field of view', es: 'Campo de visión', min: 55, max: 100, step: 1, fmt: (v) => `${Math.round(v)}°` },
+      // Round 3 (render/gaze.js GLASS_VIEW, render/rearView.js): a ball going past you to the glass.
+      { key: 'glassView', type: 'seg', en: 'Balls behind you', es: 'Bolas detrás de ti', options: [['mirror', 'Mirror', 'Espejo retrovisor'], ['turn', 'Turn the view', 'Girar la vista'], ['fixed', 'Fixed', 'Fija']],
+        hint: 'Mirror: the view stays on the net; a rear-view mirror shows the glass. Turn: the view turns smoothly toward the glass, up to 75°. Fixed: no mirror, no turn.' },
       { key: 'latency', type: 'range', en: 'Latency compensation', es: 'Latencia', min: 0, max: 0.3, step: 0.005, fmt: (v) => `${Math.round(v * 1000)} ms` },
       { key: 'offAxisYaw', type: 'switch', en: 'Off-axis arm correction (experimental)', es: 'Corrección fuera de eje (experimental)' },
     ],
@@ -205,6 +220,9 @@ export function createUI(root, handlers = {}) {
     hud: null,
     hudKeyShot: null,
     hudKeyBanner: null,
+    hudKeyMiss: null,
+    hudKeyMeter: null,
+    lastDiagnostics: null,
     lastPoints: null,
     preview: null,
     skeleton: null,
@@ -312,6 +330,16 @@ export function createUI(root, handlers = {}) {
     root.dataset.input = 'keys';
     const k = e.key;
     const dirs = { ArrowLeft: 'left', ArrowRight: 'right', ArrowUp: 'up', ArrowDown: 'down' };
+    if (diagEl && !diagEl.hidden && k === 'Escape') {
+      e.preventDefault();
+      closeDiagnostics();
+      return;
+    }
+    if (state.screen === 'pause' && (k === 'd' || k === 'D')) {
+      e.preventDefault();
+      copyDiagnostics();
+      return;
+    }
     if (state.screen === 'play') {
       if (k === 'Escape' || k === 'p' || k === 'P') {
         e.preventDefault();
@@ -483,8 +511,59 @@ export function createUI(root, handlers = {}) {
       case 'next-drill': openDrill(d.drill); break;
       case 'pause-settings': state.returnTo.settings = 'pause'; goto('settings'); break;
       case 'pause-recal': state.returnTo.calibrate = 'pause'; goto('calibrate', { step: 'body' }); break;
+      case 'diagnostics': copyDiagnostics(); break;
+      case 'diag-close': closeDiagnostics(); break;
       default: break;
     }
+  }
+
+  // ---- Copy diagnostics (round 3) -------------------------------------------------
+  // A compact JSON of the setup and the last swings (app/diagnostics.js), copied from inside the
+  // click / key handler; when the clipboard refuses, a selectable text box instead.
+  let diagEl = null;
+  function diagnosticsText() {
+    try {
+      const data = typeof handlers.onDiagnostics === 'function' ? handlers.onDiagnostics() : null;
+      if (data) return typeof data === 'string' ? data : JSON.stringify(data);
+      const v = globalThis.__vibora || {};
+      return JSON.stringify(buildDiagnostics({
+        world: v.world || null, settings: v.settings || state.settings, tracking: v.tracking || null, calibration: v.calibration || null,
+        pwa: v.pwa || null, stats: v.stats || null, params: v.params || null, env: browserEnv(),
+        glasses: v.glasses || null, safety: v.stage ? v.stage.safety : null,
+      }));
+    } catch (err) {
+      return JSON.stringify({ kind: 'vibora-diagnostics', error: String(err && err.message ? err.message : err) });
+    }
+  }
+  function showDiagnosticsText(text) {
+    if (!diagEl) {
+      diagEl = document.createElement('div');
+      diagEl.className = 'vp-diag';
+      diagEl.setAttribute('role', 'dialog');
+      diagEl.setAttribute('aria-label', 'Diagnostics');
+      diagEl.innerHTML = `<div class="diag-panel panel"><p class="eyebrow">Diagnostics · Diagnóstico</p><p class="diag-hint">Select all and copy (⌘A, ⌘C), then paste it into a message.</p><textarea class="diag-text" readonly spellcheck="false"></textarea><button type="button" class="btn go" data-diag-close>Close<span class="es">Cerrar</span></button></div>`;
+      diagEl.querySelector('[data-diag-close]').addEventListener('click', () => closeDiagnostics());
+      root.appendChild(diagEl);
+    }
+    const ta = diagEl.querySelector('.diag-text');
+    ta.value = text;
+    diagEl.hidden = false;
+    try {
+      ta.focus({ preventScroll: true });
+      ta.select();
+    } catch { /* ignore */ }
+  }
+  function closeDiagnostics() {
+    if (diagEl) diagEl.hidden = true;
+    focusEl(defaultFocus());
+  }
+  function copyDiagnostics() {
+    const text = diagnosticsText();
+    state.lastDiagnostics = text;
+    return copyText(text, showDiagnosticsText).then((r) => {
+      if (r === 'copied') toast('Diagnostics copied · paste them into a message');
+      return r;
+    });
   }
 
   function openDrill(id) {
@@ -1307,8 +1386,9 @@ export function createUI(root, handlers = {}) {
           <button type="button" class="btn" data-action="pause-settings" data-focus-key="settings">Settings<span class="es">Ajustes</span></button>
           <button type="button" class="btn" data-action="pause-recal" data-focus-key="recal">Recalibrate<span class="es">Calibrar</span></button>
           <button type="button" class="btn" data-action="quit" data-focus-key="quit">Quit to drills<span class="es">Salir</span></button>
+          <button type="button" class="btn btn-ghost" data-action="diagnostics" data-focus-key="diag">Copy diagnostics<span class="es">Copiar diagnóstico</span></button>
         </div>
-        <p class="pause-hint">Both hands above your head for 2 s pauses play (between points) · Esc</p>
+        <p class="pause-hint">Both hands above your head for 2 s pauses play (between points) · Esc · D copies diagnostics</p>
       </div>`;
     return { el };
   }
@@ -1357,6 +1437,7 @@ export function createUI(root, handlers = {}) {
         <div class="res-side">
           <div class="res-strokes"><p class="eyebrow">Strokes · Golpes</p><div class="sb" data-strokes></div></div>
           <div class="res-tips"><p class="eyebrow">Coach's notes · Consejos</p><ol>${tips.map((t, i) => `<li><b>${i + 1}</b><span>${esc(typeof t === 'string' ? t : t.text)}${t && t.es ? `<small>${esc(t.es)}</small>` : ''}</span></li>`).join('')}</ol></div>
+          ${missesHtml(sum.misses)}
         </div>
       </div>
       <div class="btn-row res-btns">
@@ -1382,6 +1463,18 @@ export function createUI(root, handlers = {}) {
     show('results', summary);
   }
 
+  /** Balls not hit, by reason (timing hits): "3 late · 2 no swing". */
+  function missesHtml(misses) {
+    const LABEL = {
+      'no-swing': 'no swing', early: 'early', late: 'late', below: 'racket below', above: 'racket above', 'too-far': 'too far',
+      'too-close': 'too close', behind: 'behind the ball', 'in-front': 'in front', rules: 'rules', 'out-of-reach': 'out of reach',
+      tracking: 'out of frame', 'late-detect': 'seen late',
+    };
+    const items = Object.entries(misses || {}).filter(([, n]) => n > 0).sort((a, b) => b[1] - a[1]);
+    if (!items.length) return '';
+    return `<p class="res-misses"><span class="eyebrow">Missed balls · Fallos</span>${items.map(([k, n]) => `<span><b>${n}</b> ${esc(LABEL[k] || k)}</span>`).join('')}</p>`;
+  }
+
   // ---- Settings --------------------------------------------------------------------
   function controlFor(it, s) {
     const v = get(s, it.key);
@@ -1401,7 +1494,7 @@ export function createUI(root, handlers = {}) {
       <header class="screen-head">
         <button type="button" class="btn btn-ghost btn-back" data-action="back" aria-label="Back" data-focus-key="back">${ICON.back}<span>Back</span></button>
         <div><p class="eyebrow">Changes apply instantly · Se aplican al momento</p><h2 class="h-display">Settings<span class="es">Ajustes</span></h2></div>
-        <div class="head-actions"><button type="button" class="btn" data-action="camera" data-focus-key="camera">Camera</button><button type="button" class="btn" data-action="recalibrate" data-focus-key="recal">Recalibrate</button></div>
+        <div class="head-actions"><button type="button" class="btn" data-action="diagnostics" data-focus-key="diag">Copy diagnostics</button><button type="button" class="btn" data-action="camera" data-focus-key="camera">Camera</button><button type="button" class="btn" data-action="recalibrate" data-focus-key="recal">Recalibrate</button></div>
       </header>
       <div class="settings-grid">
         ${SETTINGS_GROUPS.map((g) => `<section class="set-group" aria-label="${esc(g.en)}">
@@ -1409,7 +1502,7 @@ export function createUI(root, handlers = {}) {
           ${g.items.map((it) => {
             const v = get(s, it.key);
             if (it.type === 'switch') return `<div class="field field-inline"><span class="field-label">${esc(it.en)}<span class="es">${esc(it.es)}</span></span>${controlFor(it, s)}</div>`;
-            return fieldHtml(it.en, it.es, controlFor(it, s), it.type === 'range' ? { valueId: it.key, value: it.fmt(v) } : {});
+            return fieldHtml(it.en, it.es, controlFor(it, s), it.type === 'range' ? { valueId: it.key, value: it.fmt(v) } : { hint: it.hint || '' });
           }).join('')}
         </section>`).join('')}
       </div>`;
@@ -1521,6 +1614,11 @@ export function createUI(root, handlers = {}) {
         <div class="hud-streak"><span class="hs-x"></span><span class="hs-lbl">streak · racha</span></div>
       </div>
       <div class="hud-prompt" hidden><span class="hp-ring"></span><span class="hp-text"></span></div>
+      <div class="hud-timing" hidden>
+        <div class="htm-miss" hidden aria-live="polite"><span class="htm-text"></span><span class="htm-es"></span></div>
+        <div class="htm-meter" hidden aria-hidden="true"><span class="htm-l">Early</span><span class="htm-track"><i class="htm-win"></i><i class="htm-zero"></i><i class="htm-mark"></i></span><span class="htm-l">Late</span><b class="htm-val"></b></div>
+      </div>
+      <div class="hud-now" hidden aria-hidden="true">Now!<small>¡Ya!</small></div>
       <div class="shotcard" hidden aria-live="polite"></div>
       <div class="ball-ind" hidden><span class="bi-arrow">${ICON.arrow}</span><span class="bi-text">Ball behind you<small>detrás</small></span></div>`;
     syncPip();
@@ -1617,6 +1715,69 @@ export function createUI(root, handlers = {}) {
       }
     } else state.hudKeyBanner = null;
     if (h.ballIndicator !== undefined) ballIndicator(h.ballIndicator);
+    timingHud(h.miss || null, h.meter || null);
+  }
+
+  // ---- Timing hits: miss reason card, timing meter, "Now!" (round 3) ------------------
+  /** Top-centre, compact, clear of the racket and hands at the bottom of the picture. */
+  function timingHud(miss, meter) {
+    const box = layerHud.querySelector('.hud-timing');
+    if (!box) return;
+    const mEl = box.querySelector('.htm-miss');
+    const key = miss ? `${miss.text}|${miss.at}` : '';
+    if (key !== state.hudKeyMiss) {
+      state.hudKeyMiss = key;
+      mEl.hidden = !miss;
+      if (miss) {
+        setText(mEl.querySelector('.htm-text'), miss.text);
+        setText(mEl.querySelector('.htm-es'), miss.es || '');
+        mEl.classList.remove('fresh');
+        if (!reducedMotion()) {
+          void mEl.offsetWidth;
+          mEl.classList.add('fresh');
+        }
+      }
+    }
+    const tEl = box.querySelector('.htm-meter');
+    const mk = meter ? `${meter.e}|${meter.at}` : '';
+    if (mk !== state.hudKeyMeter) {
+      state.hudKeyMeter = mk;
+      tEl.hidden = !meter;
+      if (meter) {
+        const span = 0.5; // the track shows ±0.5 s around the moment to swing
+        const pctOf = (v) => `${(clamp((v + span) / (2 * span), 0, 1) * 100).toFixed(1)}%`;
+        const win = tEl.querySelector('.htm-win');
+        win.style.left = pctOf(-meter.early);
+        win.style.width = `${(((meter.early + meter.late) / (2 * span)) * 100).toFixed(1)}%`;
+        const mark = tEl.querySelector('.htm-mark');
+        mark.style.left = pctOf(meter.e);
+        const onTime = Math.abs(meter.e) <= 0.06;
+        tEl.dataset.state = !meter.hit ? 'miss' : onTime ? 'good' : 'ok';
+        setText(tEl.querySelector('.htm-val'), meter.label || '');
+      }
+    }
+    box.hidden = !miss && !meter;
+    layerHud.classList.toggle('has-timing', !box.hidden);
+  }
+
+  /** Immediate miss card (the bus event; the HUD tick keeps it while recent). */
+  function missCard(m) {
+    if (!m) return;
+    const h = state.hud || {};
+    timingHud({ text: m.text, es: m.es, reason: m.reason, at: m.at }, h.meter || null);
+  }
+
+  /** 'now': the moment to swing at a ball off the glass (a short flash under the miss card). */
+  function timingCue(kind) {
+    if (kind !== 'now') return;
+    const el = layerHud.querySelector('.hud-now');
+    if (!el) return;
+    el.hidden = false;
+    el.classList.remove('flash');
+    void el.offsetWidth;
+    el.classList.add('flash');
+    clearTimeout(el._t);
+    el._t = setTimeout(() => { el.hidden = true; }, 650);
   }
 
   function renderScoreboard(sc) {
@@ -1940,6 +2101,10 @@ export function createUI(root, handlers = {}) {
     calibration,
     settings,
     ballIndicator,
+    missCard,
+    timingCue,
+    copyDiagnostics,
+    get diagnosticsText() { return state.lastDiagnostics || null; },
     get screen() { return state.screen; },
     get currentSettings() { return { ...state.settings, volumes: { ...state.settings.volumes } }; },
     focusDefault() { focusEl(defaultFocus()); },

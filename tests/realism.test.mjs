@@ -95,7 +95,10 @@ describe('spin variety: serves and feeds', () => {
       // 240 s (was 150): since the assist intent follows the ball the racket produced (merge pass),
       // the autopilot no longer gifts points by sending drives onto the far glass, so rallies are
       // longer and 150 s held only 4 AI serves at this seed. The serve assertions are unchanged.
-      while (w.time < 10 + 240 && !g.isFinished()) g.advanceTo(w.time + 0.1);
+      // Round 3: Club hits by timing (swingAssist), so the autopilot's rallies run longer still;
+      // play on (up to 600 s) until seven AI serves were seen, so the variety check has a sample.
+      // The serve assertions are unchanged.
+      while ((w.time < 10 + 240 || serves.length < 7) && w.time < 10 + 600 && !g.isFinished()) g.advanceTo(w.time + 0.1);
       assert.ok(serves.length >= 5, `${level}: ${serves.length} AI serves`);
       const sides = serves.map((s) => s.spinRpm.side);
       const tops = serves.map((s) => s.spinRpm.top);

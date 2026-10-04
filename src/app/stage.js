@@ -12,6 +12,9 @@ import { createFirstPersonRig } from '../render/fpRig.js';
 import { createFirstPersonCamera } from '../render/fpCamera.js';
 import { createViewSync, elbowForRacket } from '../render/reconcile.js';
 import { setActorQuality } from '../render/actorKit.js';
+import { createRearView } from '../render/rearView.js';
+import { isFiniteVec, ballOk, matrixOk } from '../render/safeView.js';
+import { GLASS_VIEW } from '../render/gaze.js';
 import { RACKET, COURT } from '../config.js';
 
 const KIT = {
@@ -27,6 +30,7 @@ const tmpEye = new THREE.Vector3();
 const tmpV2 = new THREE.Vector3();
 const fwdV = new THREE.Vector3();
 const upV = new THREE.Vector3();
+const viewDirV = new THREE.Vector3();
 
 /**
  * @param {object} o
@@ -87,8 +91,15 @@ export async function createStage({ canvas, settings, quality, progress = () => 
   ghostRacket.visible = false;
   app.scene.add(ghostRacket);
 
-  const viewSettings = { fov: settings.fov, gazeFollow: settings.gazeFollow, viewPitch: settings.viewPitch, eyeOffset: settings.eyeOffset };
-  const fpCam = createFirstPersonCamera(app.camera, viewSettings);
+  const viewSettings = {
+    fov: settings.fov, gazeFollow: settings.gazeFollow, viewPitch: settings.viewPitch, eyeOffset: settings.eyeOffset,
+    glassView: GLASS_VIEW.MODES.includes(settings.glassView) ? settings.glassView : GLASS_VIEW.DEFAULT,
+  };
+  // XR integration surface (glasses, src/xr/): app.xr = { getHeadQuaternion(), fov?, stereo? } or
+  // null; see fpCamera.js and render() below (SPEC §6.8).
+  if (app.xr === undefined) app.xr = null;
+  const fpCam = createFirstPersonCamera(app.camera, viewSettings, { getXR: () => app.xr });
+  const rearView = createRearView(app);
   fpCam.mode = 'orbit';
   fpCam.snap();
   app.refreshQuality();
@@ -224,7 +235,12 @@ export async function createStage({ canvas, settings, quality, progress = () => 
     // Speculative hits, their confirmation and lag-compensated rewrites change the ball's path;
     // the view sync hides the jumps and pairs the shown ball with the predicted racket.
     const vs = viewSync.update(w, dt);
-    const rb = vs.ball;
+    let rb = vs.ball;
+    // Safety net: a non-finite ball is not drawn (nor followed by the gaze / mirror).
+    if (rb && !ballOk(rb)) {
+      rb = null;
+      safety.ballHidden++;
+    }
     shownBall = rb;
     ballView.update(rb, dt, vs.hitFrame ? 1 : o.alpha ?? 1);
     syncActors(actorEntries(w, o.skipActor), dt);
@@ -239,15 +255,22 @@ export async function createStage({ canvas, settings, quality, progress = () => 
     const showRig = o.showRig !== false && view === 'fp' && w && w.player;
     // Near-eye culling / fading measures from the rendered viewpoint (tracked eye + view offset).
     let viewEye = null;
+    let rigOk = !!showRig;
     if (showRig) {
       const e = w.player.eye, off = viewSettings.eyeOffset;
-      viewEye = tmpEye.set(e.x, e.y - (off ? off.down || 0 : 0), e.z + (off ? off.back || 0 : 0));
+      if (isFiniteVec(e)) viewEye = tmpEye.set(e.x, e.y - (off ? off.down || 0 : 0), e.z + (off ? off.back || 0 : 0));
+      else {
+        // Non-finite tracking reached the eye: no rig this frame (the camera holds its last pose).
+        rigOk = false;
+        safety.rigHidden++;
+      }
     }
     // A live world's racket is already predicted for this frame (game/swingPredict.js); a
     // replay frame's recorded one may still be extrapolated by the caller.
-    const predicted = !!(showRig && vs.racket && w.player.renderRacket !== undefined);
-    rig.update(showRig ? (predicted ? rigPlayer(w.player, vs.racket) : w.player) : null, dt, {
-      extrapolate: predicted ? 0 : o.extrapolate || 0, visible: !!showRig, eye: viewEye, eye2: showRig ? w.player.eye : null, ball: rb && !rb.atRest ? rb.pos : null,
+    const predicted = !!(rigOk && vs.racket && w.player.renderRacket !== undefined);
+    rig.update(rigOk ? (predicted ? rigPlayer(w.player, vs.racket) : w.player) : null, dt, {
+      extrapolate: predicted ? 0 : o.extrapolate || 0, visible: rigOk, eye: viewEye, eye2: rigOk ? w.player.eye : null, ball: rb && !rb.atRest ? rb.pos : null,
+      viewDir: app.camera.getWorldDirection(viewDirV),
     });
     if (o.selfActor) {
       self.root.visible = true;
@@ -279,6 +302,12 @@ export async function createStage({ canvas, settings, quality, progress = () => 
       ghostRacket.quaternion.setFromRotationMatrix(new THREE.Matrix4().makeBasis(x, y, z));
     } else ghostRacket.visible = false;
     fpCam.update(cameraWorld(w), dt, o.dtReal ?? dt);
+    // Rear-view mirror (settings.glassView 'mirror'): while the ball is behind the eye in the
+    // first-person view, unless head tracking (glasses) drives the view.
+    const mirrorWanted = view === 'fp' && viewSettings.glassView === 'mirror' && viewSettings.gazeFollow !== false
+      && !fpCam.headTracking && !stereoOn() && fpCam.rear && !!showRig;
+    rearView.update(o.dtReal ?? dt, { want: mirrorWanted, eye: w && w.player && isFiniteVec(w.player.eye) ? w.player.eye : null, ball: rb });
+    if (view !== 'fp' || fpCam.headTracking || stereoOn()) rearView.update(10, { want: false });
     setCutaway(view === 'replay' ? fpCam.replayView : null);
     effects.update(dt);
     env.update(dt);
@@ -312,6 +341,7 @@ export async function createStage({ canvas, settings, quality, progress = () => 
   }
 
   function applySettings(keys, s) {
+    viewSettings.glassView = GLASS_VIEW.MODES.includes(s.glassView) ? s.glassView : GLASS_VIEW.DEFAULT;
     viewSettings.fov = s.fov;
     viewSettings.viewPitch = s.viewPitch;
     viewSettings.eyeOffset = s.eyeOffset;
@@ -333,6 +363,89 @@ export async function createStage({ canvas, settings, quality, progress = () => 
 
   function setGaze(on) {
     viewSettings.gazeFollow = !!on;
+  }
+
+  // ---- render safety net ------------------------------------------------------
+  // Reproduced (tests/robust.test.mjs, tools/blackscreen.mjs): ONE visible mesh with a singular or
+  // non-finite world matrix blacks out the whole WebGL picture (its NaN fragments are smeared by
+  // the bloom mip chain) while the HUD and camera PiP stay: "a black screen with image on the
+  // side". Before every frame the dynamic part of the scene (everything but the static hall) is
+  // checked and any such mesh is hidden for that frame; scene.js also zeroes non-finite pixels
+  // before the bloom. Counters: stage.safety (main.js puts them in __vibora.stats / ?debug=1).
+  const safety = { ballHidden: 0, rigHidden: 0, meshesHidden: 0, framesWithHidden: 0, lastHidden: null };
+  const hiddenNow = [];
+  const dynRoots = [];
+  function guardMeshes() {
+    dynRoots.length = 0;
+    for (const c of app.scene.children) if (c !== env.root && c.visible) dynRoots.push(c);
+    let n = 0;
+    for (const r of dynRoots) {
+      r.updateWorldMatrix(false, true);
+      r.traverseVisible((o) => {
+        if (!o.isMesh && !o.isLine && !o.isPoints && !o.isSprite) return;
+        let ok = matrixOk(o.matrixWorld.elements);
+        if (ok && o.isSkinnedMesh && o.skeleton) {
+          for (const b of o.skeleton.bones) {
+            if (!matrixOk(b.matrixWorld.elements)) { ok = false; break; }
+          }
+        }
+        if (!ok) {
+          hiddenNow.push(o);
+          n++;
+          safety.lastHidden = o.name || (o.parent && o.parent.name) || o.type;
+        }
+      });
+    }
+    for (const o of hiddenNow) o.visible = false;
+    if (n) {
+      safety.meshesHidden += n;
+      safety.framesWithHidden++;
+    }
+  }
+  function unguardMeshes() {
+    for (const o of hiddenNow) o.visible = true;
+    hiddenNow.length = 0;
+  }
+
+  /** XR stereo (3D side-by-side) renders this frame instead of the composer. */
+  function stereoOn() {
+    const st = app.xr && app.xr.stereo;
+    return !!(st && st.enabled && typeof st.render === 'function');
+  }
+
+  /**
+   * One frame: the composer render (or the XR stereo override app.xr.stereo.render(renderer,
+   * scene, camera, composer) when enabled), then the rear-view mirror inset.
+   */
+  let lastXrT = 0;
+  function render(dt) {
+    guardMeshes();
+    try {
+      const xr = app.xr;
+      const st = xr && xr.stereo;
+      if (st && st.enabled && typeof st.render === 'function') {
+        // The stereo branch skips app.render: keep the frame-rate stats (debug, diagnostics) alive.
+        const now = performance.now();
+        if (lastXrT) {
+          const d = (now - lastXrT) / 1000;
+          if (d > 0) app.stats.fps = app.stats.fps ? app.stats.fps + (1 / d - app.stats.fps) * 0.1 : 1 / d;
+        }
+        lastXrT = now;
+        st.render(app.renderer, app.scene, app.camera, app.composer);
+      } else {
+        lastXrT = 0;
+        app.render(dt);
+        if (rearView.visible && view === 'fp') rearView.render([rig.root]);
+      }
+    } finally {
+      unguardMeshes();
+    }
+  }
+
+  /** Installs (or removes with null) the XR integration object (SPEC §6.8). */
+  function setXR(x) {
+    app.xr = x || null;
+    fpCam.setFov(viewSettings.fov || app.camera.fov);
   }
 
   function resize() {
@@ -361,7 +474,15 @@ export async function createStage({ canvas, settings, quality, progress = () => 
     applySettings,
     setGaze,
     resize,
-    render(dt) { app.render(dt); },
+    render,
+    rearView,
+    setXR,
+    /** The XR integration object (app.xr) or null. */
+    get xr() { return app.xr; },
+    /** Render safety-net counters (stage, camera, rig, tracking-free). */
+    get safety() {
+      return { ...safety, camera: { ...fpCam.safety }, rig: { ...rig.stats }, mirrorFrames: rearView.stats.frames };
+    },
     /** Glass normal (into the court) for a wall event. */
     wallNormal(evt) {
       if (evt.wall === 'back') return { x: 0, y: 0, z: evt.pos.z > 0 ? -1 : 1 };

@@ -76,6 +76,106 @@ const ROT_SPEED_FLOOR = 4.0; // rad/s of hand rotation (a deliberate twist is fa
 const AIRBORNE_DEADBAND = 0.05; // m of ankle lift ignored (tracking noise, tilted cameras)
 const LOST_RESET_S = 0.5; // filters restart after a tracking gap this long
 
+/**
+ * Side-on robustness (first real-world session: turning far left / right blacked out the view).
+ * MediaPipe at 2-3 m from a MacBook camera, with the player turned side-on, overlaps shoulders and
+ * hips in the image, collapses the hidden arm and hand, swaps left / right labels for a few
+ * frames, and now and then returns a wild or non-finite landmark. Nothing of that may reach a
+ * filter (a One Euro filter that ingests NaN stays NaN forever) or the view.
+ *   worldMax / imageMax: plausible ranges of hip-centred world landmarks (model m) and normalised
+ *     image coordinates; anything outside (or non-finite) is a missing landmark.
+ *   jumpBody / jumpHand: largest believable change of a world landmark between two frames (model
+ *     m; a smash moves the hand ~1 m per 30 fps frame); imageJump / imageJumpHand: the same in
+ *     normalised image units (a smash crosses up to 0.6 of the picture per frame).
+ *     A bigger jump is held for up to spikeFrames frames, then accepted as real.
+ *   swapRatio / swapMin: a left/right label group is swapped back when the swapped assignment is
+ *     this much closer to the previous frame (and the plain one moved at least swapMin m per pair).
+ *   sideOnDeg: torso yaw beyond which the width segments (shoulders, hips) leave the distance
+ *     estimate; roomJump: largest believable change of room x / d per frame (m) + roomRate * dt.
+ */
+export const ROBUST = Object.freeze({
+  worldMax: 2.5,
+  imageMax: 2.5,
+  jumpBody: 0.45,
+  jumpHand: 1.5,
+  imageJump: 0.3,
+  imageJumpHand: 0.9,
+  spikeFrames: 2,
+  swapRatio: 0.5,
+  swapMin: 0.04,
+  sideOnDeg: 55,
+  roomJump: 0.3,
+  roomRate: 3,
+});
+
+const SWAP_GROUPS = Object.freeze([
+  Object.freeze([[1, 4], [2, 5], [3, 6], [7, 8], [9, 10]]), // face
+  Object.freeze([[11, 12], [13, 14], [15, 16], [17, 18], [19, 20], [21, 22]]), // arms
+  Object.freeze([[23, 24], [25, 26], [27, 28], [29, 30], [31, 32]]), // legs
+]);
+const HAND_LANDMARKS = new Set([15, 16, 17, 18, 19, 20, 21, 22]);
+/** [child, parent, longest plausible distance (model m, any adult)], parents before children. */
+const BONES = Object.freeze([
+  [13, 11, 0.5], [14, 12, 0.5], [15, 13, 0.45], [16, 14, 0.45],
+  [17, 15, 0.25], [19, 15, 0.25], [21, 15, 0.22], [18, 16, 0.25], [20, 16, 0.25], [22, 16, 0.22],
+  [25, 23, 0.65], [26, 24, 0.65], [27, 25, 0.65], [28, 26, 0.65],
+]);
+const CORE = [11, 12, 23, 24];
+const isNum = Number.isFinite;
+
+/** Smoothing-factor scale of an occluded (in-picture, low-visibility) landmark. */
+export const OCCLUDED_TRUST = 0.25;
+/** Trust of a sanitised image landmark: 1 when visible or outside the picture, down to OCCLUDED_TRUST when hidden inside it. */
+export function landmarkTrust(l) {
+  if (!l) return 1;
+  const inside = l.x > 0.02 && l.x < 0.98 && l.y > 0.02 && l.y < 0.98;
+  if (!inside) return 1;
+  const v = clamp((l.visibility - 0.1) / 0.4, 0, 1);
+  return OCCLUDED_TRUST + (1 - OCCLUDED_TRUST) * v * v * (3 - 2 * v);
+}
+
+const sq = (a, b) => (a.x - b.x) ** 2 + (a.y - b.y) ** 2 + (a.z - b.z) ** 2;
+
+/**
+ * Left / right label swap test for one group against the previous (accepted) world landmarks:
+ * true when swapping every pair of the group fits the previous frame much better.
+ */
+export function groupSwapped(world, prev, pairs, { ratio = ROBUST.swapRatio, min = ROBUST.swapMin } = {}) {
+  let same = 0, swap = 0;
+  for (const [a, b] of pairs) {
+    same += sq(world[a], prev[a]) + sq(world[b], prev[b]);
+    swap += sq(world[b], prev[a]) + sq(world[a], prev[b]);
+  }
+  return same > pairs.length * 2 * min * min && swap < ratio * same;
+}
+
+/**
+ * Facing-camera prior: a player who faces the TV has their left shoulder and hip on the image
+ * right (world +x) and the nose in front of the shoulders. When the frame clearly faces the
+ * camera but the labels say otherwise, they are swapped. null when the frame is not frontal enough
+ * to tell.
+ */
+export function frontalSwapped(world) {
+  const sL = world[11], sR = world[12], hL = world[23], hR = world[24], n = world[0];
+  const sdx = sL.x - sR.x, hdx = hL.x - hR.x;
+  const sz = Math.abs(sL.z - sR.z);
+  // Frontal: shoulders mostly across the image (yaw < ~40 deg) and the nose toward the camera.
+  if (Math.abs(sdx) < 0.2 || sz > 0.75 * Math.abs(sdx)) return null;
+  if (!(n.z < (sL.z + sR.z) / 2 - 0.03)) return null;
+  if (sdx < 0 && hdx < 0) return true;
+  if (sdx > 0 && hdx > 0) return false;
+  return null;
+}
+
+/** Torso yaw (deg) from world landmarks: 0 = facing the camera, + = turned to face the player's right. */
+export function torsoYawDeg(world) {
+  // In U: x = -world.x, z = -world.z. Right-minus-left of shoulders and hips.
+  const vx = -(world[12].x - world[11].x) - (world[24].x - world[23].x);
+  const vz = -(world[12].z - world[11].z) - (world[24].z - world[23].z);
+  if (Math.abs(vx) + Math.abs(vz) < 1e-6) return 0;
+  return Math.atan2(-vz, vx) / DEG;
+}
+
 /** Normalised focal length (image widths) for a horizontal field of view. */
 export const focalNorm = (hfovDeg) => 0.5 / Math.tan((hfovDeg * DEG) / 2);
 
@@ -113,17 +213,44 @@ export const createHandFrame = () => ({ grip: new Vec3(), axis: new Vec3(), norm
  * - grip = wrist + GRIP_ALONG*(knuckleMid - wrist) + palmDir*GRIP_PALM_OFFSET
  * - axis = nlerp(handDir, forearmDir, FOREARM_BLEND) rotated GRIP_RADIAL_DEG about palmDir toward the thumb
  * - normal (forehand face) = palmDir orthogonalised against axis
+ *
+ * Degenerate palm (side-on play: the hand is edge-on or hidden behind the body and MediaPipe
+ * collapses index / pinky onto the wrist, or their visibility drops): the palm normal of a
+ * near-zero cross product is noise that flips the racket face from frame to frame. The frame
+ * then falls back to the forearm (elbow -> wrist) as the hand direction and keeps the previous
+ * palm direction (opts.prevNormal) turned perpendicular to it; out.degenerate is set.
  * @param {'L'|'R'} side
+ * @param {{ prevNormal?: {x,y,z}|null, palmVis?: number, handLength?: number }} [opts]
+ *   palmVis: visibility of the hand landmarks (0..1); handLength: nominal wrist -> knuckles (m)
  */
-export function computeHandFrame(side, wrist, index, pinky, thumb, elbow, out = createHandFrame()) {
+export function computeHandFrame(side, wrist, index, pinky, thumb, elbow, out = createHandFrame(), opts = null) {
   _pw.subVectors(pinky, wrist);
   _iw.subVectors(index, wrist);
   if (side === 'L') _k.crossVectors(_iw, _pw);
   else _k.crossVectors(_pw, _iw);
   _mid.addVectors(index, pinky).scale(0.5);
   _h.subVectors(_mid, wrist);
-  const handLen = _h.length();
-  if (handLen < 1e-6) _h.set(0, 1, 0);
+  let handLen = _h.length();
+  // Forearm direction (needed by the blend and by the degenerate fallback).
+  let foreOk = false;
+  if (elbow) {
+    _f.subVectors(wrist, elbow);
+    foreOk = _f.lengthSq() > HAND_DEGENERATE.foreMin * HAND_DEGENERATE.foreMin;
+  }
+  const nominal = opts && opts.handLength > 0 ? opts.handLength : 0.09;
+  const palmArea = _k.length() / Math.max(1e-12, _pw.length() * _iw.length()); // sin of the knuckle spread angle
+  const degenerate = !!opts && (handLen < HAND_DEGENERATE.lenFrac * nominal || !(palmArea >= HAND_DEGENERATE.minSin)
+    || (opts.palmVis !== undefined && opts.palmVis < HAND_DEGENERATE.minVis && palmArea < HAND_DEGENERATE.lowVisSin));
+  out.degenerate = degenerate;
+  if (degenerate) {
+    // Hand along the forearm; palm direction carried over from the previous frame.
+    if (foreOk) _h.copy(_f).normalize();
+    else if (handLen > 1e-6) _h.scale(1 / handLen);
+    else _h.set(0, 1, 0);
+    handLen = nominal;
+    if (opts.prevNormal && Number.isFinite(opts.prevNormal.x)) _k.copy(opts.prevNormal);
+    else _k.set(0, 0, 1);
+  } else if (handLen < 1e-6) _h.set(0, 1, 0);
   else _h.scale(1 / handLen);
 
   if (_k.lengthSq() < 1e-14) {
@@ -132,13 +259,12 @@ export function computeHandFrame(side, wrist, index, pinky, thumb, elbow, out = 
   }
   _k.projectOnPlane(_h);
   if (_k.lengthSq() < 1e-14) _k.set(side === 'L' ? -1 : 1, 0, 0).projectOnPlane(_h);
+  if (_k.lengthSq() < 1e-14) _k.set(0, 0, 1).projectOnPlane(_h);
   _k.normalize();
 
-  if (elbow) {
-    _f.subVectors(wrist, elbow);
-    if (_f.lengthSq() < 1e-10) _f.copy(_h);
-    else _f.normalize();
-  } else _f.copy(_h);
+  if (elbow && foreOk) _f.normalize();
+  else if (elbow && _f.lengthSq() >= 1e-10) _f.normalize();
+  else _f.copy(_h);
   _b.copy(_h).lerp(_f, FOREARM_BLEND);
   if (_b.lengthSq() < 1e-10) _b.copy(_h);
   _b.normalize();
@@ -148,7 +274,7 @@ export function computeHandFrame(side, wrist, index, pinky, thumb, elbow, out = 
   // Thumb side: the part of (thumb - wrist) perpendicular to both palmDir and handDir.
   _kb.crossVectors(_k, _b);
   let sign = side === 'L' ? -1 : 1;
-  if (thumb) {
+  if (thumb && !degenerate) {
     _t.subVectors(thumb, wrist).projectOnPlane(_k).projectOnPlane(_h);
     const d = _t.dot(_kb);
     if (_t.lengthSq() > 1e-8 && Math.abs(d) > 1e-6) sign = d > 0 ? 1 : -1;
@@ -157,6 +283,15 @@ export function computeHandFrame(side, wrist, index, pinky, thumb, elbow, out = 
   out.normal.copy(_k).addScaled(out.axis, -_k.dot(out.axis)).normalize();
   return out;
 }
+
+/**
+ * When a palm counts as degenerate (computeHandFrame with opts): knuckle midpoint closer to the
+ * wrist than lenFrac x the nominal hand length, knuckle spread angle with sin below minSin, or a
+ * hidden hand (visibility below minVis) whose spread is below lowVisSin. A hand that is merely out
+ * of the picture (an overhead) keeps plausible landmarks and stays in use. foreMin: shortest
+ * usable forearm (m).
+ */
+export const HAND_DEGENERATE = Object.freeze({ lenFrac: 0.3, minSin: 0.08, minVis: 0.15, lowVisSin: 0.2, foreMin: 0.05 });
 
 // ---------------------------------------------------------------------------
 // Frame-level helpers
@@ -195,10 +330,13 @@ function weightedMedian(vals, weights, n) {
  * corrected by the segment's mean depth offset from the hips; visibility-weighted median.
  * @returns {number|null}
  */
-export function estimateDistance(landmarks, world, hfovDeg, aspect, scale) {
+export function estimateDistance(landmarks, world, hfovDeg, aspect, scale, { sideOn = false } = {}) {
   const fn = focalNorm(hfovDeg);
   let n = 0;
   for (let s = 0; s < DISTANCE_SEGMENTS.length; s++) {
+    // Side-on, the shoulder and hip widths are foreshortened to a few cm in the image and their
+    // world length rests on MediaPipe's depth guess: torso sides and thighs carry the estimate.
+    if (sideOn && s < 2) continue;
     const [ia, ib] = DISTANCE_SEGMENTS[s];
     const la = landmarks[ia], lb = landmarks[ib], wa = world[ia], wb = world[ib];
     if (!la || !lb || !wa || !wb) continue;
@@ -211,7 +349,9 @@ export function estimateDistance(landmarks, world, hfovDeg, aspect, scale) {
     if (lw < 0.08 || li < 1e-4) continue;
     // Camera depth of a point = D_hip + scale * world.z, so remove the segment's mean offset.
     const dz = clamp((scale * (wa.z + wb.z)) / 2, -0.4, 0.4);
-    _segD[n] = (fn * lw) / li - dz;
+    const di = (fn * lw) / li - dz;
+    if (!(di > 0.3 && di < 30) || !(w > 0)) continue; // non-finite / impossible
+    _segD[n] = di;
     _segW[n] = w;
     n++;
   }
@@ -339,7 +479,12 @@ class OneEuroVec {
     this.dx.set(0, 0, 0);
   }
 
-  filter(v, t, out) {
+  /** trust (0..1]: scales the smoothing factor (occluded landmarks follow the measurement slowly). */
+  filter(v, t, out, trust = 1) {
+    // Never ingest a non-finite sample (it would poison the state for good); a state that went
+    // non-finite anyway restarts from the measurement.
+    if (!(isNum(v.x) && isNum(v.y) && isNum(v.z)) || !isNum(t)) return this.t === null ? out.copy(v) : out.copy(this.x);
+    if (this.t !== null && !(isNum(this.x.x) && isNum(this.x.y) && isNum(this.x.z) && isNum(this.dx.x) && isNum(this.dx.y) && isNum(this.dx.z))) this.t = null;
     if (this.t === null) {
       this.x.copy(v);
       this.dx.set(0, 0, 0);
@@ -353,7 +498,7 @@ class OneEuroVec {
     this.dx.x += ((v.x - this.x.x) / dt - this.dx.x) * ad;
     this.dx.y += ((v.y - this.x.y) / dt - this.dx.y) * ad;
     this.dx.z += ((v.z - this.x.z) / dt - this.dx.z) * ad;
-    const a = OneEuro.alpha(this.minCutoff + this.beta * this.dx.length(), dt);
+    const a = OneEuro.alpha(this.minCutoff + this.beta * this.dx.length(), dt) * trust;
     this.x.lerp(v, a);
     return out.copy(this.x);
   }
@@ -428,10 +573,23 @@ class HandRotFilter {
 
   reset() {
     this.t = null;
+    this.w.set(0, 0, 0);
   }
 
   /** Filters frame.axis / frame.normal in place; wristSpeed (m/s) opens the filter during swings. */
-  filter(frame, t, wristSpeed = 0) {
+  filter(frame, t, wristSpeed = 0, trust = 1) {
+    const fa = frame.axis, fnn = frame.normal;
+    const inOk = isNum(fa.x) && isNum(fa.y) && isNum(fa.z) && isNum(fnn.x) && isNum(fnn.y) && isNum(fnn.z)
+      && fa.lengthSq() > 0.5 && fnn.lengthSq() > 0.5 && isNum(t);
+    if (!inOk) {
+      // Keep the last good orientation (or a neutral one) instead of passing garbage on.
+      frame.axis.copy(this.axis);
+      frame.normal.copy(this.normal);
+      return frame;
+    }
+    if (!isNum(wristSpeed)) wristSpeed = 0;
+    if (this.t !== null && !(isNum(this.axis.x) && isNum(this.axis.y) && isNum(this.axis.z) && isNum(this.normal.x)
+      && isNum(this.normal.y) && isNum(this.normal.z) && isNum(this.w.x) && isNum(this.w.y) && isNum(this.w.z))) this.t = null;
     if (this.t === null) {
       this.axis.copy(frame.axis);
       this.normal.copy(frame.normal);
@@ -457,7 +615,7 @@ class HandRotFilter {
       const swing = Math.max(0, wristSpeed - WRIST_SPEED_FLOOR);
       const twist = Math.max(0, this.w.length() - ROT_SPEED_FLOOR);
       const cutoff = this.minCutoff + this.beta * twist + this.betaWrist * swing;
-      const a = OneEuro.alpha(cutoff, dt);
+      const a = OneEuro.alpha(cutoff, dt) * trust;
       const ang = _delta.length();
       if (ang > 1e-12) {
         _rk.copy(_delta).scale(1 / ang);
@@ -473,6 +631,18 @@ class HandRotFilter {
 }
 
 const mkEuro = ([minCutoff, beta, dCutoff]) => new OneEuro(minCutoff, beta, dCutoff);
+
+/** Scalar One Euro step that never ingests (or keeps) a non-finite value. */
+function euro(f, v, t) {
+  if (!isNum(v) || !isNum(t)) return f.x;
+  if (f.x !== null && !(isNum(f.x) && isNum(f.dx))) f.reset();
+  const r = f.filter(v, t);
+  if (isNum(r)) return r;
+  f.reset();
+  return f.filter(v, t);
+}
+
+const blankLm = () => ({ x: 0, y: 0, z: 0, visibility: 0 });
 
 // ---------------------------------------------------------------------------
 
@@ -523,6 +693,7 @@ export function createBodyTracker({
     prevHipY = prevAnkleY = prevVT = null;
     hipVy = ankleVy = 0;
     floorY = null;
+    forgetLandmarks();
   }
 
   function currentScale() {
@@ -531,28 +702,187 @@ export function createBodyTracker({
     return 1;
   }
 
+  // --- side-on robustness (ROBUST): sanitised landmark copies, the last accepted (de-swapped)
+  // landmarks, per-landmark spike counters and diagnostics counters.
+  const cleanLm = Array.from({ length: 33 }, blankLm);
+  const cleanW = Array.from({ length: 33 }, blankLm);
+  const prevLm = Array.from({ length: 33 }, blankLm);
+  const prevW = Array.from({ length: 33 }, blankLm);
+  const okFlag = new Uint8Array(33);
+  const known = new Uint8Array(33);
+  const spikes = new Uint8Array(33);
+  let havePrev = false;
+  let roomSpikes = 0;
+  let lastDRaw = null, lastXRaw = null;
+  const stats = {
+    frames: 0, dropped: 0, rejectedLandmarks: 0, spikes: 0, swaps: 0, frontalSwaps: 0, degenerateHands: 0,
+    roomHeld: 0, sideOnFrames: 0, nonFinite: 0,
+  };
+  const copyLm = (d, q) => {
+    d.x = q.x; d.y = q.y; d.z = q.z; d.visibility = q.visibility;
+  };
+  function swapGroup(pairs) {
+    for (const arr of [cleanLm, cleanW]) {
+      for (const [i, j] of pairs) {
+        const tmp = arr[i];
+        arr[i] = arr[j];
+        arr[j] = tmp;
+      }
+    }
+    for (const [i, j] of pairs) {
+      const o = okFlag[i];
+      okFlag[i] = okFlag[j];
+      okFlag[j] = o;
+    }
+  }
+
+  /**
+   * Copies the person's landmarks into cleanLm / cleanW: non-finite or out-of-range landmarks are
+   * replaced by the last accepted ones (visibility 0), left / right label swaps are undone by
+   * temporal continuity and the facing-camera prior, single-frame spikes are held. false when the
+   * frame cannot be used (core landmarks missing with nothing to hold).
+   */
+  function sanitize(person, dt) {
+    const lm = person.landmarks, world = person.world;
+    for (let i = 0; i < 33; i++) {
+      const a = lm[i], b = world[i], cl = cleanLm[i], cw = cleanW[i];
+      const ok = !!(a && b) && isNum(a.x) && isNum(a.y) && isNum(b.x) && isNum(b.y) && isNum(b.z)
+        && Math.abs(a.x - 0.5) < ROBUST.imageMax && Math.abs(a.y - 0.5) < ROBUST.imageMax
+        && Math.abs(b.x) < ROBUST.worldMax && Math.abs(b.y) < ROBUST.worldMax && Math.abs(b.z) < ROBUST.worldMax;
+      okFlag[i] = ok ? 1 : 0;
+      if (ok) {
+        const va = vis(a), vb = vis(b);
+        cl.x = a.x; cl.y = a.y; cl.z = isNum(a.z) ? a.z : 0;
+        cl.visibility = isNum(va) ? clamp(va, 0, 1) : 0;
+        cw.x = b.x; cw.y = b.y; cw.z = b.z;
+        cw.visibility = isNum(vb) ? clamp(vb, 0, 1) : 0;
+      } else {
+        stats.rejectedLandmarks++;
+        if (known[i]) {
+          copyLm(cl, prevLm[i]);
+          copyLm(cw, prevW[i]);
+        } else {
+          cl.x = cl.y = 0.5; cl.z = 0;
+          cw.x = cw.y = cw.z = 0;
+        }
+        cl.visibility = cw.visibility = 0;
+      }
+    }
+    for (const i of CORE) if (!okFlag[i] && !known[i]) return false;
+    // Label swaps: continuity with the previous frame per group, then the facing-camera prior.
+    if (havePrev) {
+      for (const g of SWAP_GROUPS) {
+        if (groupSwapped(cleanW, prevW, g)) {
+          swapGroup(g);
+          stats.swaps++;
+        }
+      }
+    }
+    if (frontalSwapped(cleanW) === true) {
+      for (const g of SWAP_GROUPS) swapGroup(g);
+      stats.frontalSwaps++;
+    }
+    // Spikes: a landmark that jumps further than a body can move in one frame is held.
+    const k = Math.max(1, (dt > 0 ? dt : 0) / 0.034);
+    for (let i = 0; i < 33; i++) {
+      const cl = cleanLm[i], cw = cleanW[i];
+      if (havePrev && known[i] && okFlag[i]) {
+        const hand = HAND_LANDMARKS.has(i);
+        const lim = (hand ? ROBUST.jumpHand : ROBUST.jumpBody) * k;
+        const limI = (hand ? ROBUST.imageJumpHand : ROBUST.imageJump) * k;
+        const pl = prevLm[i], pw = prevW[i];
+        const jump = Math.sqrt(sq(cw, pw)) > lim || Math.hypot(cl.x - pl.x, cl.y - pl.y) > limI;
+        if (jump && spikes[i] < ROBUST.spikeFrames) {
+          spikes[i]++;
+          stats.spikes++;
+          const v = Math.min(cl.visibility, pl.visibility);
+          copyLm(cl, pl);
+          copyLm(cw, pw);
+          cl.visibility = cw.visibility = v;
+          continue;
+        }
+        spikes[i] = 0;
+      }
+      if (okFlag[i] || known[i]) {
+        copyLm(prevLm[i], cl);
+        copyLm(prevW[i], cw);
+        if (okFlag[i]) {
+          // Keep the measured visibility for the next comparison.
+          known[i] = 1;
+        }
+      }
+    }
+    // Anatomy: a landmark further from its parent joint than any body allows is a wild guess
+    // (single-frame hand outliers survive the jump test during fast swings): it is held, or pulled
+    // in to the longest plausible bone when there is nothing to hold.
+    for (const [c, p, maxLen] of BONES) {
+      const cw = cleanW[c], pw = cleanW[p];
+      const l = Math.sqrt(sq(cw, pw));
+      if (l <= maxLen) continue;
+      stats.spikes++;
+      if (known[c] && Math.sqrt(sq(prevW[c], pw)) <= maxLen) {
+        copyLm(cw, prevW[c]);
+        copyLm(cleanLm[c], prevLm[c]);
+      } else {
+        const f = maxLen / l;
+        cw.x = pw.x + (cw.x - pw.x) * f;
+        cw.y = pw.y + (cw.y - pw.y) * f;
+        cw.z = pw.z + (cw.z - pw.z) * f;
+      }
+      cw.visibility = Math.min(cw.visibility, 0.3);
+      copyLm(prevW[c], cw);
+      copyLm(prevLm[c], cleanLm[c]);
+    }
+    havePrev = true;
+    return true;
+  }
+
+  function forgetLandmarks() {
+    havePrev = false;
+    known.fill(0);
+    spikes.fill(0);
+    roomSpikes = 0;
+    lastDRaw = lastXRaw = null;
+  }
+
+  const finiteV = (v) => isNum(v.x) && isNum(v.y) && isNum(v.z);
+
   function update(frame) {
+    stats.frames++;
     const idx = selectPerson(frame, last);
     if (idx < 0) return null;
     const person = frame.people[idx];
-    const lm = person.landmarks, world = person.world;
-    if (!lm || !world || lm.length < 29 || world.length < 29) return null;
+    if (!person || !person.landmarks || !person.world || person.landmarks.length < 29 || person.world.length < 29) return null;
 
     const t = frame.t / 1000;
+    if (!isNum(t)) {
+      stats.dropped++;
+      return null;
+    }
     if (lastT !== null && (t - lastT > LOST_RESET_S || t < lastT)) resetFilters();
     const dt = lastT === null ? 0 : t - lastT;
+    if (!sanitize(person, dt)) {
+      stats.dropped++;
+      return null;
+    }
     lastT = t;
+    const lm = cleanLm, world = cleanW;
 
-    const aspect = frame.width && frame.height ? frame.width / frame.height : 16 / 9;
+    const aspect = frame.width > 0 && frame.height > 0 ? frame.width / frame.height : 16 / 9;
     const fn = focalNorm(opts.hfovDeg);
 
     let conf = 0;
     for (const i of CONFIDENCE_JOINTS) conf += vis(lm[i]);
     conf /= CONFIDENCE_JOINTS.length;
 
+    // Torso yaw: side-on frames rely on the torso sides and thighs for distance.
+    const yawDeg = torsoYawDeg(world);
+    const sideOn = Math.abs(yawDeg) > ROBUST.sideOnDeg;
+    if (sideOn) stats.sideOnFrames++;
+
     // Body scale: continuous estimate before calibration, frozen after.
     const nAnk = modelNoseToAnkle(world);
-    if (nAnk !== null) modelH = modelH === null || dt <= 0 ? nAnk : damp(modelH, nAnk, 1.5, dt);
+    if (nAnk !== null && isNum(nAnk)) modelH = modelH === null || dt <= 0 ? nAnk : damp(modelH, nAnk, 1.5, dt);
     const scale = currentScale();
 
     // Hip height from the ankles (keep the last value while the feet are out of view).
@@ -560,49 +890,71 @@ export function createBodyTracker({
     let hipH;
     if (ankleVis >= 0.3) hipH = hipHeightFromWorld(world, scale);
     else hipH = lastHipH ?? (calibration.ok ? calibration.hipHeight : opts.userHeight * PLAYER.hipHeightRatio);
+    if (!isNum(hipH)) hipH = lastHipH ?? opts.userHeight * PLAYER.hipHeightRatio;
     lastHipH = hipH;
 
-    // Room position: distance first, then lateral from the smoothed distance.
-    const dRaw = estimateDistance(lm, world, opts.hfovDeg, aspect, scale);
+    // Room position: distance first, then lateral from the smoothed distance. A step that no
+    // person can make in one frame (a wild landmark, a lost label) is held for up to
+    // ROBUST.spikeFrames frames.
+    const dRaw = estimateDistance(lm, world, opts.hfovDeg, aspect, scale, { sideOn });
     const hip = hipImage(lm);
     if (dRaw !== null && hip) {
-      const d = dF.filter(dRaw, t);
-      const x = xF.filter((-(hip.u - 0.5) * d) / fn, t);
-      room = { x, d };
+      const xRaw = (-(hip.u - 0.5) * dRaw) / fn;
+      const lim = ROBUST.roomJump + ROBUST.roomRate * Math.max(0, dt);
+      const spike = lastDRaw !== null && (Math.abs(dRaw - lastDRaw) > lim || Math.abs(xRaw - lastXRaw) > lim);
+      if (spike && roomSpikes < ROBUST.spikeFrames) {
+        roomSpikes++;
+        stats.roomHeld++;
+        room = { x: room.x, d: room.d };
+      } else {
+        roomSpikes = 0;
+        lastDRaw = dRaw;
+        lastXRaw = xRaw;
+        const d = euro(dF, dRaw, t);
+        const x = euro(xF, (-(hip.u - 0.5) * d) / fn, t);
+        room = isNum(d) && isNum(x) ? { x, d } : { x: room.x, d: room.d };
+      }
     } else room = { x: room.x, d: room.d };
 
     // Vertical motion from the image (world landmarks are hip-centred and cannot see jumps).
     let airborne = 0;
     let jump = false;
     if (hip && room.d > 0) {
-      const hipY = hipYF.filter((-(hip.v - 0.5) / aspect / fn) * room.d, t);
+      const hipY = euro(hipYF, (-(hip.v - 0.5) / aspect / fn) * room.d, t);
       let ankleY = null;
       if (ankleVis >= 0.3) {
         const lowV = Math.max(lm[27].y, lm[28].y); // lower foot
-        ankleY = ankleYF.filter((-(lowV - 0.5) / aspect / fn) * room.d, t);
+        ankleY = euro(ankleYF, (-(lowV - 0.5) / aspect / fn) * room.d, t);
       }
-      if (prevVT !== null && t > prevVT) {
+      if (prevVT !== null && t > prevVT && isNum(prevHipY)) {
         const vdt = t - prevVT;
         hipVy = (hipY - prevHipY) / vdt;
         ankleVy = ankleY !== null && prevAnkleY !== null ? (ankleY - prevAnkleY) / vdt : 0;
       }
+      if (!isNum(hipVy)) hipVy = 0;
+      if (!isNum(ankleVy)) ankleVy = 0;
       prevHipY = hipY;
       prevAnkleY = ankleY;
       prevVT = t;
-      if (ankleY !== null) {
-        if (floorY === null) floorY = ankleY;
+      if (ankleY !== null && isNum(ankleY)) {
+        if (floorY === null || !isNum(floorY)) floorY = ankleY;
         else if (dt > 0) floorY = damp(floorY, ankleY, ankleY < floorY ? 6 : 0.5, dt);
         const lift = ankleY - floorY;
         airborne = Math.max(0, lift - AIRBORNE_DEADBAND);
         jump = (hipVy > JUMP_HIP_SPEED && (lift > 0.03 || ankleVy > 0.5)) || lift > 0.1;
       } else jump = hipVy > JUMP_HIP_SPEED * 1.5;
     }
+    if (!isNum(airborne)) airborne = 0;
 
-    // Joints in U.
+    // Joints in U. An arm landmark MediaPipe reports as hidden while it is inside the picture
+    // (side-on: the far arm behind the torso) is a guess that wanders frame to frame; it is
+    // followed with OCCLUDED_TRUST of the usual smoothing factor. A hand that is merely out of the
+    // picture (overheads) is extrapolated plausibly and keeps full trust.
     toUserFrame(world, scale, hipH, rawJ);
     const joints = {};
     for (const name of JOINT_NAMES) {
-      const v = jointF[name].filter(rawJ[name], t, new Vec3());
+      const li = JOINT_INDEX[name];
+      const v = jointF[name].filter(rawJ[name], t, new Vec3(), li >= 13 && li <= 22 ? landmarkTrust(lm[li]) : 1);
       v.y += airborne;
       joints[name] = v;
     }
@@ -612,14 +964,33 @@ export function createBodyTracker({
     const hipRef = calibration.ok ? calibration.hipHeight : opts.userHeight * PLAYER.hipHeightRatio;
     const crouch = clamp(1 - hipHeight / hipRef, 0, 1);
 
-    const handFrames = {
-      L: handRotF.L.filter(
-        computeHandFrame('L', joints.wristL, joints.indexL, joints.pinkyL, joints.thumbL, joints.elbowL), t, jointF.wristL.dx.length(),
-      ),
-      R: handRotF.R.filter(
-        computeHandFrame('R', joints.wristR, joints.indexR, joints.pinkyR, joints.thumbR, joints.elbowR), t, jointF.wristR.dx.length(),
-      ),
+    // Hand frames; a degenerate palm (edge-on / hidden hand) keeps the previous palm direction.
+    const handLength = 0.09 * (opts.userHeight / PLAYER.defaultHeight);
+    const handFrame = (side) => {
+      const ii = side === 'L' ? [19, 17] : [20, 18];
+      const palmVis = Math.min(lm[ii[0]].visibility, lm[ii[1]].visibility);
+      const rf = handRotF[side];
+      const hf = computeHandFrame(side, joints['wrist' + side], joints['index' + side], joints['pinky' + side], joints['thumb' + side], joints['elbow' + side],
+        createHandFrame(), { prevNormal: rf.t !== null ? rf.normal : null, palmVis, handLength });
+      if (hf.degenerate) stats.degenerateHands++;
+      const out = rf.filter(hf, t, jointF['wrist' + side].dx.length(), Math.min(landmarkTrust(lm[ii[0]]), landmarkTrust(lm[ii[1]])));
+      out.degenerate = hf.degenerate;
+      return out;
     };
+    const handFrames = { L: handFrame('L'), R: handFrame('R') };
+
+    // Last line of defence: nothing non-finite leaves the tracker.
+    let finite = isNum(room.x) && isNum(room.d) && isNum(eyeHeight) && isNum(hipHeight);
+    for (const name of JOINT_NAMES) finite = finite && finiteV(joints[name]);
+    for (const side of ['L', 'R']) {
+      const hf = handFrames[side];
+      finite = finite && finiteV(hf.grip) && finiteV(hf.axis) && finiteV(hf.normal);
+    }
+    if (!finite) {
+      stats.nonFinite++;
+      resetFilters();
+      return null;
+    }
 
     const sample = {
       t: frame.t,
@@ -640,6 +1011,9 @@ export function createBodyTracker({
       scale,
       personIndex: idx,
       image: hip ? { hipU: hip.u, hipV: hip.v } : null,
+      // Side-on robustness (ROBUST): torso yaw (deg, + = facing the player's right) and its flag.
+      yawDeg,
+      sideOn,
     };
     last = sample;
     return sample;
@@ -714,6 +1088,10 @@ export function createBodyTracker({
     },
     get last() {
       return last;
+    },
+    /** Robustness counters (rejected / held landmarks, label swaps, degenerate hands, held room). */
+    get stats() {
+      return { ...stats };
     },
     get options() {
       return { ...opts };

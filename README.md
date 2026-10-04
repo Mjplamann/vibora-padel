@@ -15,7 +15,19 @@ leaves the device (MediaPipe's built-in usage logging to Google is blocked local
   serve, return, live mix), scored with real padel rules
 - **Rally with Coach** (an AI coach that plays drives, lobs, chiquitas and balls off the glass)
 - **2 v 2 Match** with an AI partner, real serves, golden point and tie-break
+- **Timing-based hitting** (Club and Rookie): swing on time and you hit it. Swing speed sets the pace,
+  early / late sets the direction, the swing path sets topspin or slice, and the ball flies with full
+  physics. Pro keeps true racket-on-ball contact.
+- **The ball is easy to see**: a minimum on-screen size, a glow, a shadow and a drop-line to the floor,
+  and a ring around the ball in reach that turns **green at the moment to swing**
+- **A reason for every miss**, on screen and by voice ("Swing was 0.3 s late", "No swing detected —
+  swing a bit faster", "Racket was 50 cm below the ball"), and **Copy diagnostics** to send a session's
+  numbers
+- Balls off the back glass: a **rear-view mirror** shows them while your view stays on the net, with a
+  "Let it come off the glass… now!" cue and an optional learning slow motion
 - Per-shot feedback: stroke, km/h, rpm (topspin / slice), net clearance, sweet spot, timing and spacing
+- **VITURE glasses mode** (experimental): true-scale view, compact HUD, head tracking from the glasses
+  in Chrome, optional 3D side-by-side
 - **Instant replay** (R) in slow motion from the broadcast camera, with your tracked racket path
 - Voice coach (English / Spanish), spatial sound, hand-cursor menus usable from 3 m away
 
@@ -90,6 +102,37 @@ floor. The calibration screen tells you when the framing and distance are right.
 - **USB webcam:** on top of the TV, centred.
 - Even light on you; avoid a bright window behind you. Clothes that contrast with the wall help.
 
+## Play with VITURE Beast glasses (experimental)
+
+Plug VITURE XR glasses (Beast, Luma, Pro, One) into the Mac's USB‑C port and they become a display. In
+**Settings → VITURE glasses** turn on **Glasses mode**: the view switches to true scale (33° × 50°:
+things appear their real size), and the HUD becomes compact. In **Chrome or Edge**, **Connect glasses**
+reads the glasses' motion sensor over WebHID: turn your head to look around the court, including back
+to the glass. Safari has no WebHID, so you get the true-scale view without head tracking.
+
+1. On the glasses use the standard, head-locked display: turn off their own 3DoF / anchored screen and
+   **Smooth Follow**. Víbora turns the view itself.
+2. **System Settings → Displays**: select the glasses, *Use as: Main display*, 1920 × 1200, 60 Hz.
+3. The cable keeps the Mac next to you, so use an **iPhone as a wireless Continuity Camera** 2.5–3 m
+   away at chest height (or a USB webcam on a long active cable).
+4. Set dimming to maximum. Clear the play area: you will not see the furniture.
+5. Face where you play, press **C** (or Home) to recentre. Every drill recentres by itself.
+6. If left / right is reversed, run **Axis test** (turn left, look up, tilt left) or press *Flip left /
+   right*.
+7. **3D (experimental):** switch the glasses to 3D side-by-side (3840 × 1200) and set *3D* to Auto or
+   On. The court then has real depth, with a small in-world HUD. Menus look split in 3D, so set up in 2D.
+
+Head tracking is new and untested on real Beast hardware. If it misbehaves, use *Copy glasses
+diagnostics* and send it.
+
+- "No data from the glasses": unplug, replug and *Connect* again, and close VITURE's own apps, which can
+  hold the device.
+- The view slides back to centre by itself: the glasses are in Smooth Follow; turn it off.
+
+Developer notes: `?glasses=1` (glasses mode for this visit), `?xrsim=1` (simulated glasses sweeping the
+head ±25°; `?xrsim=legacy` for the older protocol), `?stereo=1`; `node dev/xr-shot.mjs` (stereo eye
+order, layouts, head sweep); `node dev/xr-app-shot.mjs` (the real app with glasses).
+
 ## 1. What you need
 
 | | |
@@ -124,13 +167,15 @@ Allow camera access when the browser asks.
 
 | Action | How |
 |---|---|
-| Hit | Swing your real arm. Your hand is the racket grip; the face follows your palm (palm side = forehand face). |
+| Hit | Swing your real arm as the ball comes. Your hand is the racket grip; the face follows your palm (palm side = forehand face). On Club and Rookie a swing **on time** hits (the ring around the ball turns green: swing now); on Pro the racket must meet the ball. |
 | Move on court | Step sideways (×2.6) and toward / away from the TV (×2.2). Toward the TV = toward the net. A living room only allows about ±0.6 m of steps, so the game moves your court spot for the big moves (a short ball at your feet, a lob over your head; in rally and match it follows padel tactics and keeps you at the net after a volley, lob or serve) and your own steps do the rest. If the camera loses your head, hips or feet, the HUD tells you to step back. |
 | Menus | Raise a hand: a cursor appears; hover 1 s to click. Or arrows + Enter, or the mouse. On the title screen the hand works as soon as the camera is on (straight away if the browser already allows the camera). |
 | Start a drill | "Start drill", or raise your racket hand above your head for a moment |
 | Pause | Both hands above your head for 2 s (not while a ball is live), or Esc / P |
 | Instant replay | R (or *Pause → Instant replay*, or *Watch replay* on the results). V changes the view. |
-| Camera picture-in-picture / skeleton | C / K during play |
+| Camera picture-in-picture / skeleton | C / K during play (with glasses head tracking, C recentres the view: Shift+C toggles the picture-in-picture) |
+| Glasses: recentre view | C or Home while glasses head tracking runs (every drill also recentres) |
+| Copy diagnostics | *Pause → Copy diagnostics*, *Settings → Copy diagnostics*, or **D** on the pause screen. Paste it into a message when you report a problem. |
 | Full screen | F (or ⌃⌘F). In full screen a short Esc still pauses; hold Esc to leave full screen. Leaving full screen during play pauses the game. |
 | No camera? | "Play with mouse": the mouse moves the racket; flick the mouse (or press Space) as the ball comes and a timed swing plays it; WASD moves (otherwise Rookie/Club walk you to the ball) |
 
@@ -158,7 +203,7 @@ high. The shot card tells you if you were *early / late* and *cramped / stretche
 | Forehand Drive · *Derecha* | Groundstrokes | Deep cross-court drives; bonus for a flat, low net clearance |
 | Backhand Drive · *Revés* | Groundstrokes | The same on the backhand side |
 | Off the Back Glass · *Salida de pared* | Walls | Let a deep ball rebound off the back glass, then drive it deep |
-| Corner Exit · *Doble pared* | Walls | Back glass, then side glass, in the forehand corner |
+| Corner Exit · *Doble pared* | Walls | The ball comes off both glasses in the corner (back, then side) |
 | Net Volleys · *Voleas* | Net | Chest-high feeds alternating sides; punch them deep |
 | Bandeja | Overheads | Defensive lobs; controlled overhead deep (pace above 85 km/h is penalised) |
 | Víbora | Overheads | Cut overhead into the far side-glass corner |
@@ -169,6 +214,9 @@ high. The shot card tells you if you were *early / late* and *cramped / stretche
 | Return of Serve · *Resto* | Serve | The machine serves; return cross-court deep or lob |
 | Live Ball Mix · *Bola viva* | Tactics | Random feeds from all of the above |
 
+The glass drills are fed so the ball comes back off the glass to a comfortable contact: 0.6–1.3 m high
+and at least 1 m out of the glass. A *"Let it come off the glass… now!"* cue tells you when to swing.
+
 Every rep is judged by the referee with real padel rules (own glass is legal before the ball crosses;
 the ball must bounce on the far side before touching a wall; touching your own wire mesh loses the
 point; exits after the bounce are *por tres* / *por cuatro*). The machine never fires while your ball is
@@ -178,19 +226,55 @@ minimum). Stars and personal bests are saved in the browser.
 ## 4. Settings
 
 - **Assist** (Settings → Play):
-  - **Pro** — real physics only: the hit must meet the 2 cm face margin, no aim help, no movement help.
-  - **Club** (default) — 10 cm face margin, outgoing direction blended 35 % toward the shot you were
-    going for, half net-safety lift, and a gentle "magnet" that nudges you toward the ideal contact spot.
-  - **Rookie** — 20 cm margin, 65 % blend, 90 % net safety, strong magnet.
+  - **Pro** — real physics only: the racket must meet the ball within the 2 cm face margin, no aim
+    help, no movement help.
+  - **Club** (default) — **timing hitting** (below), outgoing direction blended 35 % toward the shot
+    you were going for, half net-safety lift, and auto-positioning that takes you 75 % of the way to a
+    good stance (your own steps do the rest).
+  - **Rookie** — timing hitting with a wider window and any reach, 65 % blend, 90 % net safety, and
+    auto-positioning all the way to the stance.
+- **Hitting** (Settings → Play → *Hitting: Auto / Timing / Contact*). *Auto* follows the assist (Club and
+  Rookie: timing, Pro: contact). With **timing**, a swing whose racket peak comes within the window
+  around the ideal contact moment hits the ball where it really is at that moment: the swing speed sets
+  the pace, early / late sets the direction (early pulls it cross-court, late pushes it down the line),
+  the swing path sets topspin (brushing up) or slice (cutting down), and the ball then flies with the
+  full physics. *Contact* needs the racket to meet the ball, as on Pro.
+
+  | Assist | Early | Late | Reach (racket to ball) | Swing speed to count |
+  |---|---|---|---|---|
+  | Club | −0.20 s | +0.22 s | 0.75 m | 4 m/s (volleys and chiquitas 2.4 m/s, serves 3 m/s) |
+  | Rookie | −0.32 s | +0.35 s | any | 3 m/s (volleys and chiquitas 1.8 m/s, serves 2.25 m/s) |
+
+  A swing is read from your tracked racket hand's speed relative to your body, so walking does not
+  count as a swing.
+- **Misses are explained.** Every ball you do not hit gets a reason at the top of the picture, under the
+  mirror, and from the voice coach: *Swing was 0.3 s late*, *No swing detected — swing a bit faster*,
+  *Racket was 50 cm below the ball*, *Ball was 30 cm out of reach — step left*, *Let it come off the
+  glass first*, *Let the serve bounce* or *Lost you on camera*. A timing meter shows how early or late each
+  swing was. The results screen lists your misses by reason.
+- **Ball & aids** (Settings → Ball & aids):
+  - **Ball visibility**: *Real*, *Enhanced* (default: the ball is never drawn smaller than 0.45° across,
+    with a glow, a contact shadow and a drop-line to the floor) or *Max* (0.8°).
+  - **Reach ring**: a ring around the ball when it is coming into your reach; it is yellow, then turns
+    **green at the moment to swing**. For a ball off the glass a marker shows the contact point.
+  - **Learning slow motion** off the glass (*Rookie* = on for Rookie only, *On*, *Off*): the game slows
+    to 0.7× around the glass rebound so you can read it.
+  - **Timing tick**: a short tick 0.15 s before the moment to swing on every ball (glass balls always
+    get the *now!* cue).
+  - **Landing marker** (predicted first bounce, Rookie/Club), **ideal contact ghost**, **ball halo**.
+- **Copy diagnostics** (Pause, Settings, or D on the pause screen) copies a compact report of your
+  setup (browser, display, camera, tracker, calibration, settings) and your last 40 swings (speed,
+  timing error, distance to the ball, result) and the misses per drill. If the browser blocks the
+  clipboard, a text box opens: select all, copy, and paste it into a message.
 - **Movement gains** (sideways / forward), **field of view**, **gaze follows the ball**, **latency**.
   The default view is tuned for a TV: a 74° vertical field of view, the head pitched 14° down and the
   viewpoint 12 cm behind / 6 cm below your tracked eyes, so in a ready position the hand holding the
   racket and your other hand sit at the bottom of the picture (like a VR headset's wider view) while the
   far glass stays in frame. Your real body faces the TV, so the view only turns a little: it follows the
-  ball by up to ±30° around your strokes, turns up to 80° to watch a ball go to the back glass, comes
-  back as soon as the ball rebounds and never turns faster than 150°/s (an arrow points at a ball
-  outside the picture). In the last 0.8 s before a contact the view frames the contact point in the
-  lower middle of the picture (overheads: it never looks more than 25° up). Forearms fade out where
+  ball gently (up to ±25°). When a ball goes past you to the back or side glass, a rear-view mirror at
+  the top of the picture shows the rebound (Settings → Movement & view → *Balls behind you*: **Mirror**
+  · **Turn the view**, a smooth head turn of up to 75° · **Fixed**). In the last 0.8 s before a contact
+  the view frames the contact point in the lower middle of the picture (overheads: it never looks more than 25° up). Forearms fade out where
   they would fill the picture (close to your eyes), the upper arm is only a short stub above the
   elbow, and the racket fades when it comes within ~35 cm of your eyes without the ball nearby. The
   racket is never drawn through the glass, and the game keeps you about 0.6 m off the back glass: a
@@ -209,7 +293,8 @@ minimum). Stars and personal bests are saved in the browser.
 - **Off-axis arm correction** (experimental, off): when you stand well to one side of the camera,
   rotates the tracked arms back toward the camera's axis. Leave it off unless your racket face looks
   turned when you step sideways.
-- **Landing marker** (predicted first bounce, Rookie/Club), **ideal contact ghost**, **ball halo**.
+- **VITURE glasses** (experimental): glasses mode, head tracking, 3D side-by-side, IPD, axis test and
+  flips; see [Play with VITURE Beast glasses](#play-with-viture-beast-glasses-experimental).
 - Handedness, height, skin tone, racket colour, graphics quality (Ultra / High / Balanced), voice coach
   (English / Español / off) and volumes. Everything is saved in this browser.
 
@@ -248,7 +333,9 @@ the same impact physics, then confirmed (or undone) by the lag-compensated detec
 | "Camera permission was denied" | Click the camera icon in the address bar → Allow, reload. |
 | iPhone not in the camera list | Same Apple ID on both, Wi‑Fi + Bluetooth on, iPhone locked, landscape and still, near the Mac. Press "Try again". |
 | "Camera is busy" | Quit FaceTime, Zoom, Teams, Photo Booth or other tabs using the camera. |
-| Hits feel late or early | Turn on the TV's Game Mode, then redo the latency test (Settings → Recalibrate). |
+| Hits feel late or early | Turn on the TV's Game Mode, then redo the latency test (Settings → Recalibrate). The timing meter and the miss reason tell you how early or late each swing was. |
+| You swing but never hit | Check the miss reason at the top of the picture. *No swing detected*: swing a little faster and fuller. *Too far / below*: take a step (or use Rookie, which reaches any ball). Use *Copy diagnostics* and send it if it keeps happening. |
+| The 3D view goes black when you turn sideways (HUD still visible) | Fixed in this version: bad tracking data can no longer reach the 3D view. If it ever happens, open `?debug=1` and copy the *safety* line (or *Copy diagnostics*) into a bug report. |
 | You move when standing still | Turn off Center Stage; make sure your whole body is in frame; recalibrate your spot. |
 | Racket jitters | More light on you; contrasting clothes; keep the camera still. |
 | Low frame rate | Settings → Graphics quality → Balanced. Close other tabs. Use Chrome. |
@@ -264,7 +351,7 @@ the same impact physics, then confirmed (or undone) by the lag-compensated detec
 
 ```
 npm start          # static server on http://localhost:5173
-npm test           # unit / end-to-end tests (node --test), deterministic
+npm test           # 446 unit / end-to-end tests (node --test), deterministic
 npm run smoke      # headless Chromium (SwiftShader) smoke test + screenshots in tools/out/smoke-*.png
 node tools/precache.mjs [--write]   # check / regenerate the service worker's precache list in sw.js
 node tools/icons.mjs                # regenerate icons/*.svg and every PNG size (headless Chromium)
@@ -281,16 +368,24 @@ installable app from that sub-path in a real Chrome profile: the manifest parses
 installability errors (DevTools Protocol `Page.getAppManifest` / `Page.getInstallabilityErrors`), the
 service worker precaches the app, then **offline** a relaunch boots with zero errors and a drill runs
 and the camera path loads the pose model, and finally a new service-worker version shows *Update ready*
-and *Restart* activates it (`--only=pwa` runs just that part).
+and *Restart* activates it (`--only=pwa` runs just that part). It ends with the black-screen check
+(`tools/blackscreen.mjs`: a degenerate mesh in view and the autopilot turning side-on to ±95° with
+hidden arms, label swaps and NaN / Infinity landmarks never black out the picture; `--only=blackscreen`)
+and the glasses checks (`dev/xr-shot.mjs`, `dev/xr-app-shot.mjs`: stereo eye order, a simulated head
+sweep driving the camera, the real app in 3D side-by-side; `--only=xr`).
 Software WebGL renders the full scene at only ~1–2 fps, so the smoke test freezes the simulation at
 chosen moments (`__vibora.freezeOn('contact' | 'hit')`) to take its screenshots.
 
 URL flags: `?autopilot=1` (a virtual player drives the real tracking pipeline through a synthetic
 camera; also the title-screen demo), `?drill=<id>`, `?mode=rally|match&level=rookie|club|pro`,
-`?fallback=1`, `?debug=1` (fps, draw calls, pose inference ms, latency), `?quality=ultra|high|balanced`,
+`?fallback=1`, `?debug=1` (fps, draw calls, pose inference ms, latency, safety net, tracker guards),
+`?quality=ultra|high|balanced`, `?assist=rookie|club|pro` (this visit only),
 `?speed=N` (sim seconds per real second, for headless tests), `?fov=` / `?pitch=` / `?eyeback=` /
 `?eyedown=` (view tuning), `?aplatency=` / `?apdelivery=` (the autopilot's display latency and
-capture-to-result delay, to test a realistic Mac pipeline), `?attract=0`, `?mute=1`, `?sw=0` (no
+capture-to-result delay, to test a realistic Mac pipeline), `?approfile=human` (the autopilot plays like
+a person: timing spread σ 90 ms, racket position error, partial steps, 5 % of balls with no swing),
+`?apjitter=` (extra random delivery delay of a 30 fps webcam-like feed) and `?apnoise=` (landmark noise,
+1 = a MacBook camera at 2.5 m), `?glasses=1` / `?stereo=1` / `?xrsim=1` (glasses mode), `?attract=0`, `?mute=1`, `?sw=0` (no
 service worker), `?source=app` (the installed app's start URL).
 
 **App packaging (PWA):** `manifest.webmanifest` (name, `start_url ./?source=app`, scope `./`, display
@@ -305,7 +400,8 @@ a V, and a ball, on court blue).
 Code map: `src/physics` (ball, court, racket impact, prediction), `src/rules` (referee, scoring),
 `src/tracking` (camera, MediaPipe, body model, locomotion, racket track, strokes, synthetic camera,
 autopilot), `src/game` (world, human controller, machine, coach, drills, modes, session),
-`src/render` (three.js scene, hall, rackets, hands, humanoids, effects), `src/audio`, `src/ui`, and
+`src/render` (three.js scene, hall, rackets, hands, humanoids, effects, rear-view mirror, render safety
+net), `src/xr` (glasses mode: WebHID driver, stereo renderer, panel), `src/audio`, `src/ui`, and
 `src/main.js` + `src/app/*` (boot, loop, flow, wiring, replay). The contract between modules is
 `docs/SPEC.md`. Every runtime path is relative, so the site works from any sub-path (GitHub Pages).
 

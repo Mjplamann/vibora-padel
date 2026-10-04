@@ -1,7 +1,18 @@
 // First-person camera with gaze assist, plus orbit (menus) and replay views.
+//
+// XR integration surface (smart glasses, src/xr/; documented in SPEC §6.8): `xr` is read live
+// from the third argument's getXR() (the stage passes stage.app.xr):
+//   xr.getHeadQuaternion() -> {x,y,z,w} | null   head rotation relative to the last recenter, in
+//       the three.js camera convention (yaw about +Y, pitch about +X, roll about +Z). While it
+//       returns a quaternion, head tracking is active: the gaze assist is off and the view is
+//       base * head, base = body forward (looking down -z, level: the head's own pitch replaces
+//       the TV framing pitch). The stage also hides the rear-view mirror inset.
+//   xr.fov (deg, optional)                         vertical field of view override (true scale).
+//   xr.stereo = { enabled, ipd, render(renderer, scene, camera, composer?) }   see stage.render.
 import * as THREE from 'three';
 import { PLAYER, COURT } from '../config.js';
-import { createGaze, GAZE } from './gaze.js';
+import { createGaze, GAZE, GLASS_VIEW } from './gaze.js';
+import { isFiniteVec, isFiniteQuat } from './safeView.js';
 
 const DEG = Math.PI / 180;
 const BASE_PITCH = -6 * DEG;
@@ -14,8 +25,17 @@ const BASE_PITCH = -6 * DEG;
  * @param {{fov?: number, gazeFollow?: boolean}} settings  (read live each frame)
  * @returns {{ update(world, dt), setFov(deg), mode: 'fp'|'replay'|'orbit', setReplayView(kind), replayView: string, snap() }}
  */
-export function createFirstPersonCamera(camera, settings = {}) {
+export function createFirstPersonCamera(camera, settings = {}, { getXR = () => null } = {}) {
   let mode = 'fp';
+  // Safety net: the last finite eye and camera pose (a NaN camera renders a black picture).
+  const lastEye = new THREE.Vector3(0, PLAYER.defaultHeight * PLAYER.eyeHeightRatio, 8);
+  const lastPos = new THREE.Vector3(0, 1.64, 8);
+  const lastQuat = new THREE.Quaternion();
+  const safety = { eyeRestored: 0, cameraRestored: 0 };
+  let headActive = false;
+  let fovBase = camera.fov;
+  const qHead = new THREE.Quaternion();
+  const qBase = new THREE.Quaternion();
   let replayView = 'broadcast';
   const gaze = createGaze();
   let orbitT = 0;
@@ -34,8 +54,35 @@ export function createFirstPersonCamera(camera, settings = {}) {
   if (settings.fov) setFov(settings.fov);
 
   function setFov(deg) {
-    camera.fov = deg;
+    if (!(deg > 1 && deg < 179)) return;
+    fovBase = deg;
+    const xr = getXR();
+    camera.fov = xr && xr.fov > 1 && xr.fov < 179 ? xr.fov : deg;
     camera.updateProjectionMatrix();
+  }
+
+  /** Applies an XR fov override (or restores the settings fov) when it changes. */
+  function syncFov() {
+    const xr = getXR();
+    const want = xr && xr.fov > 1 && xr.fov < 179 ? xr.fov : fovBase;
+    if (Math.abs(camera.fov - want) > 1e-6) {
+      camera.fov = want;
+      camera.updateProjectionMatrix();
+    }
+  }
+
+  /** XR head rotation (relative, three.js convention) or null when head tracking is off. */
+  function headQuat() {
+    const xr = getXR();
+    if (!xr || typeof xr.getHeadQuaternion !== 'function') return null;
+    let q = null;
+    try {
+      q = xr.getHeadQuaternion();
+    } catch {
+      q = null;
+    }
+    if (!q || !isFiniteQuat(q)) return null;
+    return qHead.set(q.x, q.y, q.z, q.w).normalize();
   }
 
   function beginBlend() {
@@ -50,8 +97,14 @@ export function createFirstPersonCamera(camera, settings = {}) {
   }
 
   function eyeOf(player, out) {
-    if (player?.eye) out.set(player.eye.x, player.eye.y, player.eye.z);
-    else {
+    if (player?.eye && isFiniteVec(player.eye)) {
+      out.set(player.eye.x, player.eye.y, player.eye.z);
+      lastEye.copy(out);
+    } else if (player?.eye) {
+      // Non-finite tracking output never reaches the camera: hold the last good eye.
+      safety.eyeRestored++;
+      out.copy(lastEye);
+    } else {
       const h = player?.height || PLAYER.defaultHeight;
       out.set(player?.pos?.x || 0, h * PLAYER.eyeHeightRatio, player?.pos?.z ?? 8);
     }
@@ -75,12 +128,29 @@ export function createFirstPersonCamera(camera, settings = {}) {
 
   const basePitch = () => (Number.isFinite(settings.viewPitch) ? settings.viewPitch * DEG : BASE_PITCH);
 
+  /** settings.glassView, defaulting to the rear-view mirror. */
+  const glassView = () => (GLASS_VIEW.MODES.includes(settings.glassView) ? settings.glassView : GLASS_VIEW.DEFAULT);
+
   function updateFp(world, dt) {
     const eye = eyeOf(world.player, toPos);
-    const g = gaze.update(world.ball, eye, dt, { basePitch: basePitch(), follow: settings.gazeFollow !== false, contact: predictedContact(world) });
+    const head = headQuat();
+    headActive = !!head;
+    if (head) {
+      // Head tracking (glasses): body-forward base, level, with the head rotation on top; no gaze.
+      qBase.identity();
+      toQuat.copy(qBase).multiply(head);
+      gaze.reset(0);
+      lastGaze.rear = false;
+      return;
+    }
+    const g = gaze.update(world.ball, eye, dt, {
+      basePitch: basePitch(), follow: settings.gazeFollow !== false, contact: predictedContact(world), glassView: glassView(),
+    });
+    lastGaze.rear = g.rear;
     euler.set(g.pitch, g.yaw, 0, 'YXZ'); // no roll
     toQuat.setFromEuler(euler);
   }
+  const lastGaze = { rear: false };
 
   function updateOrbit(dt) {
     orbitT += dt;
@@ -116,6 +186,11 @@ export function createFirstPersonCamera(camera, settings = {}) {
 
   /** dtReal: wall-clock dt for view transitions (slow-motion replays pass a scaled dt). */
   function update(world, dt = 1 / 60, dtReal = dt) {
+    syncFov();
+    if (!(dt >= 0)) dt = 0;
+    if (!(dtReal >= 0)) dtReal = dt;
+    headActive = false;
+    lastGaze.rear = false;
     if (mode === 'orbit' || !world) updateOrbit(dt);
     else if (mode === 'replay') updateReplay(world, dt);
     else updateFp(world, dt);
@@ -127,6 +202,16 @@ export function createFirstPersonCamera(camera, settings = {}) {
     } else {
       camera.position.copy(toPos);
       camera.quaternion.copy(toQuat);
+    }
+    // Final safety net: never hand three.js a non-finite camera (restore the last good pose).
+    if (isFiniteVec(camera.position) && isFiniteQuat(camera.quaternion)) {
+      lastPos.copy(camera.position);
+      lastQuat.copy(camera.quaternion);
+    } else {
+      safety.cameraRestored++;
+      camera.position.copy(lastPos);
+      camera.quaternion.copy(lastQuat);
+      blend = 1;
     }
     camera.updateMatrixWorld();
   }
@@ -150,6 +235,12 @@ export function createFirstPersonCamera(camera, settings = {}) {
     get replayView() { return replayView; },
     /** Cancels any running transition (e.g. right after a teleport). */
     snap() { blend = 1; },
-    get gaze() { return { yaw: gaze.yaw, pitch: gaze.pitch, phase: gaze.phase, limit: GAZE.BACK_LIMIT }; },
+    get gaze() { return { yaw: gaze.yaw, pitch: gaze.pitch, phase: gaze.phase, limit: GAZE.BACK_LIMIT, rear: lastGaze.rear, glassView: glassView() }; },
+    /** The ball is behind the eye on the player's side (first-person view with the gaze assist): the mirror's cue. */
+    get rear() { return mode === 'fp' && lastGaze.rear; },
+    /** XR head tracking drove the view this frame. */
+    get headTracking() { return headActive; },
+    /** Safety-net counters (eye / camera poses restored). */
+    safety,
   };
 }

@@ -465,30 +465,46 @@ describe('ball machine', () => {
     for (const k of ['fed', 'total', 'nextIn', 'headYaw', 'headPitch', 'feeding']) assert.ok(k in m.state, k);
   });
 
-  test('back-glass feeds rebound off the back glass at 0.8–1.6 m; corner feeds hit back then side glass', () => {
-    let inBand = 0;
+  // Round 3 (first real-world session: "didn't hit any off the glass"): glass feeds come off the
+  // glass descending, so the ball is played at a comfortable 0.6-1.3 m, at least 1 m off the glass.
+  test('glass feeds come off the glass at a comfortable 0.6–1.3 m, at least 1 m off it; corner feeds use both glasses', () => {
+    /** Steps a world until the second floor bounce; returns whether, after the last glass, the ball passed the comfort zone. */
+    const comfortAfterGlass = (w, sideClear) => {
+      let comfy = false;
+      for (let i = 0; i < 240 * 3.5 && w.ball && !w.ball.atRest; i++) {
+        stepWorld(w, DT);
+        const evs = w.flight.events;
+        if (evs.filter((e) => e.type === 'bounce').length >= 2) break;
+        const walls = evs.filter((e) => e.type === 'wall');
+        const p = w.ball.pos;
+        if (walls.length && p.y >= 0.6 && p.y <= 1.3 && 10 - p.z >= 1.0 && 5 - Math.abs(p.x) >= sideClear) comfy = true;
+      }
+      return comfy;
+    };
+    let ok = 0;
     for (let i = 0; i < 12; i++) {
       const w = createWorld({ rng: createRng(i + 1) });
       const plan = planFeed(DRILL_BY_ID['back-glass'].feeds(i, createRng(i + 7)), { origin: v3(0, 1, -9.2), rng: createRng(i), court: w.court });
       launchBall(w, { pos: plan.from, vel: plan.vel, spin: plan.spin, by: 'machine' });
-      stepFor(w, 2.2);
+      const comfy = comfortAfterGlass(w, 0.45);
       const evs = w.flight.events;
       assert.equal(evs[0].type, 'bounce');
       const glass = evs.find((e) => e.type === 'wall' && e.wall === 'back');
       assert.ok(glass && glass.surface === 'glass', 'reaches the back glass');
-      if (glass.pos.y >= 0.8 && glass.pos.y <= 1.6) inBand++;
+      if (comfy) ok++;
     }
-    assert.ok(inBand >= 10, `rebound height in band ${inBand}/12`);
+    assert.ok(ok >= 11, `comfortable after the back glass ${ok}/12`);
     let corner = 0;
     for (let i = 0; i < 10; i++) {
       const w = createWorld({ rng: createRng(i + 1) });
       const plan = planFeed(DRILL_BY_ID['double-wall'].feeds(i, createRng(i + 3)), { origin: v3(0, 1, -9.2), rng: createRng(i), court: w.court });
       launchBall(w, { pos: plan.from, vel: plan.vel, spin: plan.spin, by: 'machine' });
-      stepFor(w, 2.5);
+      const comfy = comfortAfterGlass(w, 0.6);
       const seq = w.flight.events.filter((e) => e.type !== 'rest').map((e) => (e.type === 'wall' ? `${e.wall}` : e.type));
-      if (seq[0] === 'bounce' && seq[1] === 'back' && seq[2] === 'side') corner++;
+      const both = seq[0] === 'bounce' && seq.slice(1, 3).includes('back') && seq.slice(1, 3).includes('side');
+      if (both && comfy) corner++;
     }
-    assert.ok(corner >= 8, `back-then-side corner feeds ${corner}/10`);
+    assert.ok(corner >= 8, `corner feeds off both glasses, comfortable after ${corner}/10`);
   });
 
   test('volley feeds pass the net player at chest height', () => {

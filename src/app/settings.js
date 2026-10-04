@@ -20,8 +20,11 @@ export const VIEW_DEFAULTS = Object.freeze({ fov: 74, viewPitch: -14, eyeOffset:
  * App-only settings: offAxisYaw is the experimental off-axis arm correction of the MediaPipe
  * world landmarks (app/tracking.js correctOffAxisYaw), off until verified on real footage.
  * hitPrediction (predictive hitting) is a world default (game/world.js DEFAULT_SETTINGS).
+ * glassView: how a ball behind the player is shown (render/gaze.js GLASS_VIEW): 'mirror' (the view
+ * stays on the net, a rear-view mirror inset shows the glass), 'turn' (a smooth head turn up to
+ * 75°) or 'fixed'. Glasses mode keeps its own settings (src/xr/glasses.js, 'vibora.xr.v1').
  */
-export const APP_DEFAULTS = Object.freeze({ offAxisYaw: false });
+export const APP_DEFAULTS = Object.freeze({ offAxisYaw: false, glassView: 'mirror' });
 
 /** Safe localStorage wrapper ({getItem,setItem} or null). */
 export function safeStorage() {
@@ -52,8 +55,14 @@ function clampSettings(s) {
   s.gainDepth = num(s.gainDepth, 1, 4, TRACKING.gainDepth);
   if (s.handed !== 'left') s.handed = 'right';
   s.offAxisYaw = s.offAxisYaw === true;
+  if (!['mirror', 'turn', 'fixed'].includes(s.glassView)) s.glassView = 'mirror';
   s.hitPrediction = s.hitPrediction !== false;
   if (!['rookie', 'club', 'pro'].includes(s.assist)) s.assist = 'club';
+  // Round 3 hittability settings.
+  if (!['auto', 'timing', 'physical'].includes(s.hitMode)) s.hitMode = 'auto';
+  if (!['realistic', 'enhanced', 'max'].includes(s.ballVisibility)) s.ballVisibility = 'enhanced';
+  s.learningSlowmo = s.learningSlowmo === true ? 'on' : s.learningSlowmo === false ? 'off' : ['on', 'off'].includes(s.learningSlowmo) ? s.learningSlowmo : 'auto';
+  s.timingTick = s.timingTick === true;
   if (!['ultra', 'high', 'balanced'].includes(s.quality)) s.quality = 'high';
   if (!TRACKING.cameraPresets[s.cameraPreset]) s.cameraPreset = TRACKING.defaultCamera;
   s.hfovDeg = TRACKING.cameraPresets[s.cameraPreset].hfov;

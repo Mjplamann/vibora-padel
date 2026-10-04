@@ -76,3 +76,17 @@ export function besideEyeFactor(a, b, eye, fwd) {
   const t = clamp01(Math.max(da, db) / BESIDE_FADE);
   return t * t * (3 - 2 * t);
 }
+
+/**
+ * Side-on play (first real-world session): with the torso turned to the side while the head (and
+ * the view) faces the TV, the near arm folds across the chest a hand's width below the eyes and
+ * its elbow end filled the bottom of the picture. Such a segment fades as a whole by its NEAREST
+ * point: solid beyond SIDE_ON_FADE_DIST[1] from the eye, gone inside SIDE_ON_FADE_DIST[0].
+ */
+export const SIDE_ON_FADE_DIST = Object.freeze([0.3, 0.48]);
+export function sideOnAlpha(a, b, eye) {
+  if (!eye) return 1;
+  const d = pointSegmentDistance(eye, a, b);
+  const t = clamp01((d - SIDE_ON_FADE_DIST[0]) / (SIDE_ON_FADE_DIST[1] - SIDE_ON_FADE_DIST[0]));
+  return t * t * (3 - 2 * t);
+}

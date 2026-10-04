@@ -12,6 +12,7 @@ import { createDrillMode, createRallyMode, createMatchMode } from '../game/modes
 import { getDrill, DRILL_BY_ID } from '../game/drills.js';
 import { createSession } from '../game/session.js';
 import { createAutopilotFeed } from './autofeed.js';
+import { createSyntheticCamera } from '../tracking/synthetic.js';
 
 export const STEP = 1 / SIM.tickRate;
 /** Latency (s) used for mouse / trackpad input: one display frame. */
@@ -31,13 +32,19 @@ export const FALLBACK_LATENCY = 0;
  * @param {number} [o.apDelivery] capture -> pose result delay of the autopilot feed (s)
  * @param {(frame, sample) => void} [o.onFrame] synthetic frames (autopilot) for PiP / cursor
  * @param {boolean} [o.attract] demo behind the title: no session records
+ * @param {'precise'|'human'} [o.apProfile] the autopilot's play (tracking/autopilot.js HUMAN_PROFILE);
+ *   default settings.apProfile or 'precise'
+ * @param {number} [o.apJitter] extra random capture -> result delay (s, uniform 0..apJitter)
+ * @param {number} [o.apNoise] landmark noise of the synthetic camera (1 = a typical webcam at 2.5 m)
  */
 export function createGame({
   spec, settings, input = 'camera', human = null, fallback = null, startTime = 0, storage = null,
   seed = 1, apLatency = 0, apDelivery = 0.045, onFrame = null, attract = false,
+  apProfile = null, apJitter = null, apNoise = null,
 }) {
   const overrides = input === 'autopilot' ? { latency: apLatency } : input === 'fallback' ? { latency: FALLBACK_LATENCY, gazeFollow: false } : {};
   const world = createWorld({ settings: { ...settings, ...overrides }, rng: createRng(seed) });
+  world.input = input; // mouse play keeps physical hits (game/swingAssist.js timingConfig)
   const session = attract ? null : createSession({ storage });
   let feed = null;
   let h = human;
@@ -51,6 +58,11 @@ export function createGame({
       handed: world.settings.handed, height: world.settings.height, hfovDeg: world.settings.hfovDeg, seed: seed + 101,
       delivery: apDelivery,
     });
+    const profile = attract ? 'precise' : apProfile || settings.apProfile || 'precise';
+    if (profile !== 'precise' && feed.autopilot.setProfile) feed.autopilot.setProfile(profile, { seed: seed * 7919 + 13 });
+    const jit = apJitter ?? settings.apJitter ?? 0;
+    const noise = apNoise ?? settings.apNoise ?? 0;
+    if (jit > 0 || noise > 0) installRealisticFeed(feed, { delivery: apDelivery, jitter: jit, noise, hfovDeg: world.settings.hfovDeg, seed: seed + 991 });
     // Stand still for a second, then calibrate the neutral spot (what the calibration screen does).
     world.time = startTime - 1.0;
     while (world.time < startTime - 1e-9) {
@@ -194,6 +206,11 @@ export function createGame({
     hud,
     emitHud(state) { emit(world, 'mode:hud', state); },
     isFinished: () => mode.isFinished(world),
+    /**
+     * Sim rate wanted right now (1, or < 1 during the learning slow motion off the glass,
+     * game/swingAssist.js). The app's clock runs at speed × timeScale().
+     */
+    timeScale: () => (world.timing && Number.isFinite(world.timing.timeScale) ? world.timing.timeScale : 1),
     /** In play for kcal / active time: ball live and the referee not between points. */
     inPlay() {
       const ref = world.referee;
@@ -207,3 +224,55 @@ export function createGame({
 }
 
 export const DRILL_IDS = Object.keys(DRILL_BY_ID);
+
+/** Landmark noise (σ) of a webcam at ~2.5 m for apNoise = 1: image (normalised) and world (m) coordinates. */
+export const WEBCAM_NOISE = Object.freeze({ image: 0.0016, world: 0.012, worldZ: 0.03 });
+
+/**
+ * Replaces an autopilot feed's frame delivery with a realistic one: 30 fps capture, each pose
+ * result delivered `delivery` + U(0, jitter) s later (never out of order), and optional landmark
+ * noise like a MacBook camera's (WEBCAM_NOISE × noise). The autopilot and camera are the feed's own.
+ */
+export function installRealisticFeed(feed, { delivery = 0.15, jitter = 0.02, noise = 0, fps = 30, hfovDeg = 68, seed = 991 } = {}) {
+  const cam = createSyntheticCamera({ hfovDeg });
+  const ap = feed.autopilot;
+  const rng = createRng(seed);
+  const pending = [];
+  let next = null;
+  const N = WEBCAM_NOISE;
+  const perturb = (frame) => {
+    if (!(noise > 0)) return frame;
+    for (const p of frame.people || []) {
+      for (const l of p.landmarks) {
+        l.x += rng.normal(0, N.image * noise);
+        l.y += rng.normal(0, N.image * noise);
+      }
+      for (const l of p.world) {
+        l.x += rng.normal(0, N.world * noise);
+        l.y += rng.normal(0, N.world * noise);
+        l.z += rng.normal(0, N.worldZ * noise);
+      }
+    }
+    return frame;
+  };
+  feed.beforeTick = (world, human, onFrame = null) => {
+    if (next === null) next = world.time;
+    if (world.tracking) {
+      world.tracking.delay = delivery + jitter / 2;
+      world.tracking.frameDt = 1 / fps;
+    }
+    if (world.time >= next - 1e-9) {
+      const body = ap.update(world, world.time);
+      const at = Math.max(world.time + delivery + rng() * jitter, pending.length ? pending[pending.length - 1].at : 0);
+      pending.push({ at, frame: perturb(cam.frame(world.time * 1000, [body])), t: world.time });
+      next += 1 / fps;
+      if (next < world.time) next = world.time + 1 / fps;
+    }
+    while (pending.length && pending[0].at <= world.time + 1e-9) {
+      const f = pending.shift();
+      const sample = human.onPoseFrame(world, f.frame, f.t);
+      if (onFrame) onFrame(f.frame, sample);
+    }
+  };
+  return feed;
+}

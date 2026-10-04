@@ -29,6 +29,25 @@ export const DROP_GAP = 1.0;
 
 const kmh = (v) => Math.round(v * 3.6);
 
+/** How long the HUD keeps the last miss reason and the timing meter (sim s). */
+export const MISS_HUD_S = 3.5;
+export const METER_HUD_S = 3.0;
+
+/**
+ * Timing-hit HUD fields (game/swingAssist.js): the last miss reason and the timing meter of the
+ * last swing, while recent. { miss: { reason, text, es, ms, cm } | null, meter: { e, early, late, hit, label } | null }
+ */
+export function timingHud(world) {
+  const T = world.timing;
+  if (!T) return { miss: null, meter: null };
+  const m = T.lastMiss && world.time - T.lastMiss.at <= MISS_HUD_S ? T.lastMiss : null;
+  const s = T.lastSwing && world.time - T.lastSwing.at <= METER_HUD_S ? T.lastSwing : null;
+  return {
+    miss: m ? { reason: m.reason, text: m.text, es: m.es, ms: m.ms, cm: m.cm, at: m.at } : null,
+    meter: s ? { e: s.e, early: s.early, late: s.late, hit: s.hit, label: s.label, at: s.at } : null,
+  };
+}
+
 function lastShotHud(shot, notes = []) {
   if (!shot) return null;
   return {
@@ -120,7 +139,7 @@ export function createDrillMode(drill, opts = {}) {
   let lastResolveT = -Infinity;
   const st = {
     points: 0, streak: 0, bestStreak: 0, results: [], lastShot: null, lastNotes: [], banner: null, bannerUntil: 0,
-    finished: false, ended: false, hits: 0, successes: 0, counted: 0, opened: 0,
+    finished: false, ended: false, hits: 0, successes: 0, counted: 0, opened: 0, misses: {},
   };
   const tactics = createTacticalHome();
 
@@ -229,6 +248,11 @@ export function createDrillMode(drill, opts = {}) {
           st.lastNotes = [];
         }
         break;
+      case 'player:miss':
+        // Timing hits (swingAssist.js): why this rep's ball was not hit.
+        st.misses[p.reason] = (st.misses[p.reason] || 0) + 1;
+        if (rep && !rep.shot) rep.miss = p;
+        break;
       default:
     }
   }
@@ -250,6 +274,8 @@ export function createDrillMode(drill, opts = {}) {
     let res;
     if (r.void) res = { points: 0, success: false, notes: ['No play – free rep'], zone: null };
     else res = scoreShot(d, r.shot, info, ctx);
+    // A ball the player did not hit: the reason the timing judge found replaces the generic tip.
+    if (!r.void && !r.shot && r.miss && r.miss.text) res.notes = [r.miss.text];
     if (!r.void) {
       st.counted++;
       st.points += res.points;
@@ -259,7 +285,7 @@ export function createDrillMode(drill, opts = {}) {
         st.bestStreak = Math.max(st.bestStreak, st.streak);
       } else st.streak = 0;
     }
-    const entry = { index: r.index, shot: r.shot, landing: info.landing, legal: info.legal, reason: info.reason, void: r.void, ...res };
+    const entry = { index: r.index, shot: r.shot, landing: info.landing, legal: info.legal, reason: info.reason, void: r.void, miss: r.miss ? r.miss.reason : null, ...res };
     st.results.push(entry);
     st.lastNotes = res.notes;
     if (session && r.shot) {
@@ -274,7 +300,10 @@ export function createDrillMode(drill, opts = {}) {
     if (outcome && (outcome.reason === 'por-tres' || outcome.reason === 'por-cuatro')) setBanner(world, outcome.label, 'great');
     else if (res.points > 0) setBanner(world, `+${res.points}`, res.success ? 'good' : 'info');
     else if (outcome && outcome.winner === 1) setBanner(world, outcome.label, 'bad');
-    if (res.notes.length) emit(world, 'coach:cue', { text: res.notes[0], es: noteEs(res.notes[0]), priority: res.success ? 0 : 1 });
+    if (res.notes.length) {
+      const es = !r.shot && r.miss && r.miss.text === res.notes[0] ? r.miss.es : noteEs(res.notes[0]);
+      emit(world, 'coach:cue', { text: res.notes[0], es, priority: res.success ? 0 : 1 });
+    }
   }
 
   function hud(world) {
@@ -295,6 +324,7 @@ export function createDrillMode(drill, opts = {}) {
       lastShot: lastShotHud(st.lastShot, st.lastNotes),
       banner: st.banner,
       prompt,
+      ...timingHud(world),
     };
   }
 
@@ -309,7 +339,8 @@ export function createDrillMode(drill, opts = {}) {
       successRate: counted ? st.successes / counted : 0,
       hits: st.hits,
       bestStreak: st.bestStreak,
-      results: st.results.map((r) => ({ index: r.index, points: r.points, success: r.success, landing: r.landing, reason: r.reason, notes: r.notes, stroke: r.shot ? r.shot.stroke : null, void: r.void })),
+      results: st.results.map((r) => ({ index: r.index, points: r.points, success: r.success, landing: r.landing, reason: r.reason, notes: r.notes, stroke: r.shot ? r.shot.stroke : null, void: r.void, miss: r.miss })),
+      misses: { ...st.misses },
       tips: topTips(st.results),
       targets: d.targets,
       session: session ? session.summary() : null,
@@ -341,10 +372,35 @@ export function createDrillMode(drill, opts = {}) {
   };
 }
 
-/** Three most frequent coaching notes of a drill run. */
+/**
+ * Coaching tip for a kind of miss (timing hits, game/swingAssist.js): the rep notes carry the exact
+ * reason ("Swing was 0.3 s late"); the results screen gets the advice for the most frequent kind.
+ */
+export const MISS_TIPS = Object.freeze({
+  'no-swing': 'Swing a bit faster – a full, quick swing counts',
+  early: 'Wait for it – swing as the ring around the ball turns green',
+  late: 'Start your swing earlier – as the ball bounces',
+  below: 'Swing through the ball, not under it',
+  above: 'Bend your knees for the low ball',
+  'too-far': 'Step toward the ball before you swing',
+  'too-close': 'Give yourself room – step away from the ball',
+  behind: 'Step in and meet the ball in front of you',
+  'in-front': 'Let the ball come to you',
+  rules: 'Let it bounce – and off the glass – before you play it',
+  tracking: 'Stay in the camera picture, head to ankles',
+});
+
+/** Three most frequent coaching notes of a drill run (misses grouped by their kind). */
 function topTips(results) {
   const count = new Map();
-  for (const r of results) for (const n of r.notes || []) count.set(n, (count.get(n) || 0) + 1);
+  for (const r of results) {
+    if (!r.shot && r.miss && MISS_TIPS[r.miss]) {
+      const t = MISS_TIPS[r.miss];
+      count.set(t, (count.get(t) || 0) + 1);
+      continue;
+    }
+    for (const n of r.notes || []) count.set(n, (count.get(n) || 0) + 1);
+  }
   return [...count.entries()].sort((a, b) => b[1] - a[1]).slice(0, 3).map(([n]) => n);
 }
 
@@ -365,7 +421,7 @@ export function createRallyMode({ level = 'club', rng = createRng(0x7a11), sessi
   const RALLY_HOME = { x: 0.8, z: 7.8 };
   const st = {
     rallies: 0, current: 0, playerHits: 0, best: 0, lastShot: null, banner: null, bannerUntil: 0, lastOutcome: null,
-    won: 0, lost: 0, finished: false,
+    won: 0, lost: 0, finished: false, misses: {},
   };
 
   function start(world) {
@@ -410,6 +466,8 @@ export function createRallyMode({ level = 'club', rng = createRng(0x7a11), sessi
       st.playerHits++;
       st.lastShot = p.shot;
       tactics.onPlayerShot(world, p.shot);
+    } else if (type === 'player:miss') {
+      st.misses[p.reason] = (st.misses[p.reason] || 0) + 1;
     }
   }
 
@@ -434,7 +492,7 @@ export function createRallyMode({ level = 'club', rng = createRng(0x7a11), sessi
     start,
     update,
     onBus,
-    hud: () => ({
+    hud: (world) => ({
       title: 'Rally with Coach',
       subtitle: `Level: ${level}`,
       repIndex: st.rallies,
@@ -448,9 +506,10 @@ export function createRallyMode({ level = 'club', rng = createRng(0x7a11), sessi
       lastShot: lastShotHud(st.lastShot),
       banner: st.banner,
       prompt: null,
+      ...(world ? timingHud(world) : {}),
     }),
     isFinished: () => st.finished,
-    summary: () => ({ mode: 'rally', level, rallies: st.rallies, bestRally: st.best, won: st.won, lost: st.lost, playerHits: st.playerHits, session: session ? session.summary() : null }),
+    summary: () => ({ mode: 'rally', level, rallies: st.rallies, bestRally: st.best, won: st.won, lost: st.lost, playerHits: st.playerHits, misses: { ...st.misses }, session: session ? session.summary() : null }),
     get state() { return st; },
     get coach() { return coach; },
     get tactics() { return tactics; },
@@ -481,6 +540,7 @@ export function createMatchMode({
   let pointStartT = 0;
   const st = {
     points: [], banner: null, bannerUntil: 0, lastShot: null, finished: false, rally: 0, pointLive: false, faults: 0, serving: null,
+    misses: {}, playerHits: 0,
   };
   const tactics = createTacticalHome({ netGame: true });
 
@@ -619,7 +679,10 @@ export function createMatchMode({
       if (p.team === 0 || p.team === 1) dropRetryAt = Infinity;
     } else if (type === 'ball:hit' && p.shot.by === 'player') {
       st.lastShot = p.shot;
+      st.playerHits++;
       tactics.onPlayerShot(world, p.shot);
+    } else if (type === 'player:miss') {
+      st.misses[p.reason] = (st.misses[p.reason] || 0) + 1;
     }
   }
 
@@ -650,7 +713,7 @@ export function createMatchMode({
 
   function summary() {
     const d = match.display();
-    return { mode: 'match', level, games, winner: match.winner, score: d, points: st.points.slice(), session: session ? session.summary() : null };
+    return { mode: 'match', level, games, winner: match.winner, score: d, points: st.points.slice(), playerHits: st.playerHits, misses: { ...st.misses }, session: session ? session.summary() : null };
   }
 
   return {
@@ -658,7 +721,8 @@ export function createMatchMode({
     start,
     update,
     onBus,
-    hud: () => ({
+    hud: (world) => ({
+      ...(world ? timingHud(world) : {}),
       title: 'Match',
       subtitle: `vs ${level}`,
       repIndex: st.points.length,

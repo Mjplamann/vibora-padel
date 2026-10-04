@@ -19,6 +19,7 @@ import {
 } from './world.js';
 import { createSwingPredictor } from './swingPredict.js';
 import { playableCandidates, pickGlassContact, stanceBounds } from './intercept.js';
+import { createTimingJudge, timingConfig, flightKeyOf } from './swingAssist.js';
 
 const REF_HEIGHT = 1.75;
 
@@ -175,8 +176,12 @@ export function createHumanController({ settings = {} } = {}) {
   const ballB = blank();
   const tmpC = new Vec3();
   const state = { frames: 0, hits: 0, lastContact: null, lastShot: null, valid: false, speculative: 0 };
-  // Predictive swing for display and speculative hits (swingPredict.js).
-  const predictor = createSwingPredictor({ racketTrack, posAt, contactOffsets: CONTACT_OFFSETS, futurePos });
+  // Predictive swing for display and speculative hits (swingPredict.js). With timing hits the swing
+  // is completed to the contact the timing plan has chosen (game/swingAssist.js).
+  const predictor = createSwingPredictor({ racketTrack, posAt, contactOffsets: CONTACT_OFFSETS, futurePos, contactPlan: timingContact });
+  // Timing-based hitting (swingAssist.js): swings -> hits / misses, auto-positioning, cues.
+  const judge = createTimingJudge({ racketTrack, posAt, prepTimeBefore: (c) => prepTimeBefore(c) });
+  let lastTarget = null; // court target the follow spring tracks (own steps + auto-positioning)
   const specBallPrev = blank();
   let pendingMargin = null; // speculative contact inside the assist margin only, waiting for the face
   let specPrevId = null;
@@ -226,7 +231,7 @@ export function createHumanController({ settings = {} } = {}) {
    */
   function futurePos(world, ahead, out = { x: 0, z: 0 }) {
     const pl = world.player;
-    const tgt = manualTarget || locomotion.target;
+    const tgt = manualTarget || lastTarget || locomotion.target;
     const k = PLAYER.followStiffness;
     const e = Math.exp(-k * ahead);
     const ex = pl.pos.x - tgt.x, ez = pl.pos.z - tgt.z;
@@ -276,6 +281,9 @@ export function createHumanController({ settings = {} } = {}) {
    * One camera frame. simT = sim time of the frame's capture (world clock, s).
    * Returns the BodySample (or null).
    */
+  // Sim time of the last valid pose frame (world.js holds timing-erasable events only while frames come).
+  let lastFrameAt = -Infinity;
+
   function onPoseFrame(world, frame, simT) {
     const sample = bodyTracker.update(frame);
     if (!sample) return null;
@@ -285,6 +293,7 @@ export function createHumanController({ settings = {} } = {}) {
     const pl = world.player;
     pl.body = sample;
     if (!sample.valid) return sample;
+    lastFrameAt = world.time;
 
     const assist = ASSIST[world.settings.assist] || ASSIST[DEFAULT_ASSIST];
     locomotion.update(sample, 0, {
@@ -301,8 +310,39 @@ export function createHumanController({ settings = {} } = {}) {
     uDirToCourt(hf.axis, pose.axis);
     uDirToCourt(hf.normal, pose.normal);
     racketTrack.push(simT, pose);
-    checkHits(world);
+    if (timingConfig(world)) {
+      const fStart = world.flight.startT;
+      for (const shot of judge.onFrame(world)) afterHit(world, shot, null, null, fStart);
+    } else checkHits(world);
     return sample;
+  }
+
+  /** The timing plan's contact for the swing predictor ({ t, pos, vel, fam }) or null. */
+  function timingContact(world) {
+    const T = world.timing;
+    const P = T && T.plan;
+    if (!P || !timingConfig(world) || P.key !== flightKeyOf(world)) return null;
+    if (T.decided && T.decided.key === P.key) return null;
+    return { t: P.tStar, pos: P.pStar, vel: P.vStar, fam: P.family };
+  }
+
+  /** Analytics and learning after a confirmed hit (physical or timing). */
+  function afterHit(world, shot, fam, racketPose, flightStart) {
+    const f = fam || (planFamily.key && planFamily.fam) || STROKE_FAMILY[shot.stroke];
+    predictor.learn(world, shot, f);
+    const rc = shot.swing && Number.isFinite(shot.swing.racketTime) ? shot.swing.racketTime : null;
+    const rp = racketPose || (rc !== null ? racketTrack.sample(rc) : null);
+    const shU = lastSample && lastSample.joints[lastSample.dominant === 'L' ? 'shoulderL' : 'shoulderR'];
+    const pp = rc !== null ? playerPosAt(world, rc) : world.player.pos;
+    if (shU && rp) predictor.learnFrame(world, f, rp, uToCourt(shU, pp.x, pp.z, tmpC.set(0, 0, 0)).clone());
+    if (react.key === flightStart && react.t !== null) shot.reactionMs = Math.round(react.t * 1000);
+    const prepTime = shot.swing ? shot.swing.prepTime : null;
+    if (Number.isFinite(prepTime)) {
+      const min = shot.volley || shot.stroke === 'serve' ? PREP_MIN.volley : PREP_MIN.ground;
+      shot.prepOnTime = prepTime >= min;
+    }
+    state.hits++;
+    state.lastShot = shot;
   }
 
   /**
@@ -474,8 +514,11 @@ export function createHumanController({ settings = {} } = {}) {
       planFamily.fam = plan.fam;
     }
     const b = world.ball;
+    const timing = !!timingConfig(world);
+    // Timing hits: the strike at t*, the magnetized racket, cues and the window are the judge's.
+    if (timing) judge.afterStep(world, { predictor, dt });
     // Speculative contact: the shown racket (previous tick -> now) against the ball over the same tick.
-    if (b && !world.spec && plan && !plan.struck && specPrevId === b.id) {
+    if (!timing && b && !world.spec && plan && !plan.struck && specPrevId === b.id) {
       const assist = ASSIST[world.settings.assist] || ASSIST[DEFAULT_ASSIST];
       // The real face first. A contact only inside the assist margin waits while the ball is
       // still closing in the margin (it then strikes on the strings, not 10 cm early) and is
@@ -513,7 +556,7 @@ export function createHumanController({ settings = {} } = {}) {
     } else specPrevId = null;
     // No contact where the prediction struck: the camera has shown the swing past it.
     const sp = world.spec;
-    if (sp && checkedUntil >= sp.cStar + WHIFF_WINDOW) revertSpeculative(world, 'whiff');
+    if (!timing && sp && checkedUntil >= sp.cStar + WHIFF_WINDOW) revertSpeculative(world, 'whiff');
   }
 
   /** Ball time of the contact the predicted swing is going for (current flight), or null. */
@@ -560,9 +603,19 @@ export function createHumanController({ settings = {} } = {}) {
       pl.vel.set(0, 0, 0);
       pl.snapToHome = false;
     }
-    updateMagnet(world);
-
-    const tgt = manualTarget || locomotion.target;
+    const tcfg = timingConfig(world);
+    let tgt;
+    if (tcfg) {
+      // Timing hits: the contact plan and auto-positioning toward its stance replace the magnet.
+      judge.update(world, dt);
+      pl.magnet = null;
+      magnetKey = null;
+      tgt = manualTarget || judge.autoTarget(world, locomotion.target, dt, tcfg);
+    } else {
+      updateMagnet(world);
+      tgt = manualTarget || locomotion.target;
+    }
+    lastTarget = tgt;
     const k = PLAYER.followStiffness;
     let ax = k * k * (tgt.x - pl.pos.x) - 2 * k * pl.vel.x;
     let az = k * k * (tgt.z - pl.pos.z) - 2 * k * pl.vel.z;
@@ -631,6 +684,9 @@ export function createHumanController({ settings = {} } = {}) {
     moveTo,
     get state() {
       return state;
+    },
+    get lastFrameAt() {
+      return lastFrameAt;
     },
   };
 }

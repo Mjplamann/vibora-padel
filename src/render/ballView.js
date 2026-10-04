@@ -1,5 +1,6 @@
 // Padel ball renderer: felt + seam texture, visual spin, render interpolation, soft contact
-// shadows (floor and nearby glass), a faint additive motion trail, optional halo and flashes.
+// shadows (floor and nearby glass), a faint additive motion trail, optional halo and flashes,
+// and the round-3 visibility aids (minimum on-screen size, glow, drop-line, reach ring).
 import * as THREE from 'three';
 import { BALL, COURT, SIM } from '../config.js';
 import { cached, hash2, tileNoise, heightToNormalCanvas, actorQuality } from './actorKit.js';
@@ -156,6 +157,49 @@ function nearestGlass(p, reach, out) {
   return out;
 }
 
+/** Ring texture (white, tinted by the sprite material) for the reach ring. */
+function ringTexture() {
+  return cached('ballRing', () => {
+    const c = document.createElement('canvas');
+    c.width = c.height = 128;
+    const ctx = c.getContext('2d');
+    ctx.strokeStyle = 'rgba(255,255,255,1)';
+    ctx.lineWidth = 9;
+    ctx.beginPath();
+    ctx.arc(64, 64, 52, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.strokeStyle = 'rgba(255,255,255,0.25)';
+    ctx.lineWidth = 18;
+    ctx.beginPath();
+    ctx.arc(64, 64, 52, 0, Math.PI * 2);
+    ctx.stroke();
+    const t = new THREE.CanvasTexture(c);
+    t.colorSpace = THREE.SRGBColorSpace;
+    return t;
+  });
+}
+
+/**
+ * Ball visibility (round 3, "like trying to hit a fruit fly" from 2-3 m on a TV): 'realistic' is the
+ * true ball; 'enhanced' (default) keeps it at least minDeg of the view (drawn bigger with distance),
+ * adds a soft glow, a stronger contact shadow and a thin drop-line to the floor; 'max' more so.
+ */
+export const BALL_VISIBILITY = Object.freeze({
+  realistic: Object.freeze({ minDeg: 0, glow: 0, line: 0, shadow: 0.62, shadowFall: 2.2 }),
+  enhanced: Object.freeze({ minDeg: 0.45, glow: 0.38, line: 0.42, shadow: 0.85, shadowFall: 0.9 }),
+  max: Object.freeze({ minDeg: 0.8, glow: 0.6, line: 0.62, shadow: 0.95, shadowFall: 0.5 }),
+});
+
+/** Drawn-size factor that keeps a ball of radius r at distance d at least minDeg wide (>= 1). */
+export function ballDisplayScale(d, minDeg, r = BALL.radius) {
+  if (!(minDeg > 0) || !(d > 0)) return 1;
+  const want = 2 * d * Math.tan((minDeg * Math.PI) / 360);
+  return Math.max(1, want / (2 * r));
+}
+
+const RING_YELLOW = new THREE.Color('#ffd84a');
+const RING_GREEN = new THREE.Color('#3dff7a');
+
 const TRAIL_N = 28;
 const TRAIL_SECONDS = 0.12;
 
@@ -192,6 +236,79 @@ export function createBallView(scene, { halo = false, trail = true, shadows = tr
   haloSprite.scale.setScalar(0.32);
   haloSprite.visible = halo;
   group.add(haloSprite);
+
+  // Visibility aids (BALL_VISIBILITY): glow, drop-line, reach ring.
+  let vis = BALL_VISIBILITY.enhanced;
+  let source = null; // { visibility: () => mode, ring: () => reachRing state | null }
+  const glowMat = new THREE.SpriteMaterial({
+    map: haloTexture(), transparent: true, depthWrite: false, blending: THREE.AdditiveBlending, opacity: 0.38,
+  });
+  const glow = new THREE.Sprite(glowMat);
+  glow.renderOrder = 3;
+  group.add(glow);
+  const lineMat = new THREE.ShaderMaterial({
+    uniforms: { uA: { value: 0.42 }, uColor: { value: new THREE.Color('#f4ff9a') } },
+    vertexShader: 'varying vec2 vUv; void main(){ vUv = uv; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }',
+    fragmentShader: /* glsl */ `
+      varying vec2 vUv; uniform float uA; uniform vec3 uColor;
+      void main() {
+        float edge = 1.0 - abs(vUv.x - 0.5) * 2.0;
+        float a = uA * smoothstep(0.0, 0.35, edge) * (0.35 + 0.65 * vUv.y);
+        if (a < 0.004) discard;
+        gl_FragColor = vec4(uColor, a);
+      }`,
+    transparent: true,
+    depthWrite: false,
+  });
+  const lineGeo = new THREE.PlaneGeometry(1, 1);
+  lineGeo.translate(0, 0.5, 0);
+  const dropLine = new THREE.Mesh(lineGeo, lineMat);
+  dropLine.renderOrder = 2;
+  dropLine.frustumCulled = false;
+  group.add(dropLine);
+  const ringMat = new THREE.SpriteMaterial({ map: ringTexture(), transparent: true, depthWrite: false, depthTest: false, color: RING_YELLOW, opacity: 0 });
+  const ring = new THREE.Sprite(ringMat);
+  ring.renderOrder = 7;
+  ring.visible = false;
+  group.add(ring);
+  let displayScale = 1;
+  let ringState = null;
+  let ringOpacity = 0;
+  let mainCamera = null; // the first camera to draw the ball each frame (the player's view)
+  const _camPos = new THREE.Vector3();
+  // Drawn size and the camera-facing aids follow the camera that renders this frame. The reach
+  // ring belongs to the player's own view only (not the rear-view mirror inset).
+  ball.onBeforeRender = (renderer, sc, camera) => {
+    // rearView.js tags its camera (userData.isMirror); otherwise the first camera of the frame is
+    // the player's view. When the ball is behind the player only the mirror draws it.
+    const mirror = !!(camera.userData && camera.userData.isMirror);
+    if (!mainCamera && !mirror) mainCamera = camera;
+    ringMat.opacity = !mirror && camera === mainCamera ? ringOpacity : 0;
+    camera.getWorldPosition(_camPos);
+    const d = _camPos.distanceTo(ball.position);
+    const k = ballDisplayScale(d, vis.minDeg);
+    displayScale = k;
+    if (Math.abs(ball.scale.x - k) > 1e-4) {
+      ball.scale.setScalar(k);
+      ball.updateMatrixWorld();
+    }
+    const rr = r * k;
+    if (glow.visible) {
+      glow.scale.setScalar(rr * 2 * 4.2);
+      glow.updateMatrixWorld();
+    }
+    if (dropLine.visible) {
+      dropLine.rotation.y = Math.atan2(_camPos.x - dropLine.position.x, _camPos.z - dropLine.position.z);
+      dropLine.scale.x = Math.max(0.005, d * 0.0028);
+      dropLine.updateMatrixWorld();
+    }
+    if (ring.visible && ringState) {
+      const p = ringState.progress;
+      const size = rr * 2 * (1.9 + 3.2 * (1 - p) * (1 - p)) * (ringState.green ? 1.15 : 1);
+      ring.scale.setScalar(Math.max(size, d * 0.012));
+      ring.updateMatrixWorld();
+    }
+  };
 
   // Trail ribbon, rebuilt camera-facing just before it renders.
   const trailPos = new Float32Array(TRAIL_N * 2 * 3);
@@ -259,6 +376,7 @@ export function createBallView(scene, { halo = false, trail = true, shadows = tr
 
   function update(b, dt = 1 / 60, alpha = 1) {
     clock += dt;
+    mainCamera = null;
     if (!b || !visible) {
       group.visible = false;
       hist.length = 0;
@@ -289,13 +407,40 @@ export function createBallView(scene, { halo = false, trail = true, shadows = tr
     if (!b.atRest && speed > 3) hist.push({ x: renderPos.x, y: renderPos.y, z: renderPos.z, t: clock });
     while (hist.length && (clock - hist[0].t > TRAIL_SECONDS || hist.length > TRAIL_N)) hist.shift();
 
+    // Visibility aids: the drawn ball never sinks into the floor when it is drawn bigger.
+    if (source && source.visibility) {
+      const m = source.visibility();
+      vis = BALL_VISIBILITY[m] || BALL_VISIBILITY.enhanced;
+    }
+    if (displayScale > 1 && renderPos.y < r * displayScale) ball.position.y = r * displayScale;
+    glow.visible = vis.glow > 0;
+    if (glow.visible) {
+      glow.position.copy(ball.position);
+      glowMat.opacity = vis.glow;
+    }
+    const airborne = renderPos.y > 0.18 && !b.atRest;
+    dropLine.visible = vis.line > 0 && airborne;
+    if (dropLine.visible) {
+      dropLine.position.set(renderPos.x, 0.005, renderPos.z);
+      dropLine.scale.y = Math.max(0.01, renderPos.y - r * displayScale);
+      lineMat.uniforms.uA.value = vis.line;
+    }
+    ringState = source && source.ring ? source.ring() : null;
+    ring.visible = !!(ringState && vis.minDeg > 0);
+    if (ring.visible) {
+      ring.position.copy(ball.position);
+      ringMat.color.copy(ringState.green ? RING_GREEN : RING_YELLOW);
+      ringOpacity = Math.max(0, Math.min(1, ringState.fade)) * (ringState.green ? 1 : ringState.inWindow ? 0.85 : 0.5);
+    } else ringOpacity = 0;
+    ringMat.opacity = ringOpacity;
+
     // Contact shadows.
     if (shadows) {
       const hgt = Math.max(0, renderPos.y - r);
-      const s = r * 2.6 * (1 + hgt * 0.9);
+      const s = r * 2.6 * (1 + hgt * (vis.minDeg > 0 ? 0.5 : 0.9)) * Math.min(displayScale, 2.5);
       floorBlob.position.set(renderPos.x, 0.004, renderPos.z);
       floorBlob.scale.set(s, s, 1);
-      floorBlob.material.opacity = 0.62 / (1 + hgt * 2.2);
+      floorBlob.material.opacity = vis.shadow / (1 + hgt * vis.shadowFall);
       floorBlob.visible = renderPos.y < 6;
       const g = nearestGlass(renderPos, 1.2, glass);
       if (g) {
@@ -327,6 +472,16 @@ export function createBallView(scene, { halo = false, trail = true, shadows = tr
     },
     setHalo(on) { haloSprite.visible = !!on; },
     setTrail(on) { trailMesh.visible = !!on; },
+    /** 'realistic' | 'enhanced' | 'max' (BALL_VISIBILITY). */
+    setVisibility(mode) { vis = BALL_VISIBILITY[mode] || BALL_VISIBILITY.enhanced; },
+    /**
+     * Live sources for the aids (app/wiring.js): { visibility: () => mode, ring: () => reach-ring
+     * state ({ progress 0..1, green, inWindow, fade }) | null } — or null to unbind.
+     */
+    bind(src) { source = src || null; },
+    get visibility() { return vis; },
+    get ringVisible() { return ring.visible; },
+    get displayScale() { return displayScale; },
     /** kind: 'hit' | 'bounce' | 'wall' | 'net' */
     flash(kind = 'hit') {
       flashT = 0.18;

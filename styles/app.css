@@ -312,6 +312,7 @@ b, strong { font-weight: 700; }
 .field-head { display: flex; justify-content: space-between; align-items: baseline; gap: 0.5rem; }
 .field-label { font: 600 0.68rem/1.15 var(--f-ui); color: var(--text); }
 .field-label .es { font-size: 0.78em; display: inline; margin-left: 0.45em; }
+.field-hint { margin: 0.1rem 0 0; font: 400 0.56rem/1.3 var(--f-ui); color: var(--text-2); }
 .field-val { font: 800 0.86rem/1 var(--f-display); color: var(--glass); letter-spacing: 0.02em; font-variant-numeric: tabular-nums; }
 .field-inline { flex-direction: row; justify-content: space-between; align-items: center; }
 .field-inline .field-label .es { display: block; margin: 0.1em 0 0; }
@@ -1331,3 +1332,94 @@ b, strong { font-weight: 700; }
 /* Running as the installed app: no browser chrome to explain, nothing to install. */
 :root[data-app="installed"] .title-install { display: none; }
 :root[data-app="installed"] body { -webkit-user-select: none; user-select: none; }
+
+/* ---------- Round 3: timing hits (miss reason, timing meter, "Now!") ----------
+   Top centre, compact: clear of the racket, hands and contact zone at the bottom of the picture,
+   of the score blocks in the corners, and under the rear-view mirror inset (render/rearView.js
+   REAR_VIEW: TOP 2% of the height, WIDTH 30% of the width at ASPECT 2.4, i.e. 12.5vw tall; keep
+   --rear-view-bottom in step with it). A prompt shown at the same time steps down below it. */
+:root { --rear-view-bottom: calc(2vh + 12.5vw); }
+.hud-timing {
+  left: 50%;
+  top: calc(var(--rear-view-bottom) + 0.6rem);
+  transform: translateX(-50%);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.3rem;
+  pointer-events: none;
+  max-width: min(36rem, 48vw);
+}
+.hud-timing[hidden], .htm-miss[hidden], .htm-meter[hidden], .hud-now[hidden] { display: none; }
+.htm-miss {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: 0.38rem 0.95rem 0.42rem;
+  background: rgba(3, 6, 11, 0.8);
+  -webkit-backdrop-filter: blur(8px);
+  backdrop-filter: blur(8px);
+  border-bottom: 3px solid var(--warn);
+  text-align: center;
+}
+.htm-text { font: 800 1rem/1.08 var(--f-display); text-transform: uppercase; letter-spacing: 0.03em; color: var(--text); }
+.htm-es { font: 400 0.6rem/1.2 var(--f-ui); color: var(--text-3); margin-top: 0.12rem; }
+.htm-es:empty { display: none; }
+.htm-miss.fresh { animation: missIn 380ms var(--ease); }
+@keyframes missIn { from { transform: translateY(-0.5rem); opacity: 0; } to { transform: none; opacity: 1; } }
+.htm-meter {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  padding: 0.24rem 0.6rem;
+  background: rgba(3, 6, 11, 0.7);
+  font: 700 0.5rem var(--f-ui);
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--text-3);
+}
+.htm-track { position: relative; width: 11rem; height: 0.55rem; background: rgba(244, 239, 228, 0.12); }
+.htm-win { position: absolute; top: 0; bottom: 0; background: rgba(139, 228, 238, 0.32); border-left: 1px solid var(--glass-2); border-right: 1px solid var(--glass-2); }
+.htm-zero { position: absolute; left: 50%; top: -0.15rem; bottom: -0.15rem; width: 2px; margin-left: -1px; background: var(--text); opacity: 0.85; }
+.htm-mark { position: absolute; top: -0.28rem; width: 0.7rem; height: 1.1rem; margin-left: -0.35rem; border-radius: 0.2rem; background: var(--ball); box-shadow: 0 0 0.6rem var(--ball-glow); }
+.htm-meter[data-state="good"] .htm-mark { background: #3dff7a; box-shadow: 0 0 0.7rem rgba(61, 255, 122, 0.55); }
+.htm-meter[data-state="miss"] .htm-mark { background: var(--bad); box-shadow: 0 0 0.6rem rgba(255, 111, 85, 0.5); }
+.htm-val { font: 800 0.72rem/1 var(--f-display); color: var(--text); letter-spacing: 0.04em; min-width: 5.2rem; }
+.vp-hud.has-timing .hud-prompt { top: calc(var(--rear-view-bottom) + 6.2rem); }
+.hud-now {
+  left: 50%;
+  top: 40%;
+  transform: translateX(-50%);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  font: 900 2.6rem/0.9 var(--f-display);
+  text-transform: uppercase;
+  color: #3dff7a;
+  text-shadow: 0 0 1.2rem rgba(61, 255, 122, 0.6), 0 0.1rem 0.4rem rgba(3, 6, 11, 0.9);
+  pointer-events: none;
+}
+.hud-now small { font: 700 0.3em var(--f-ui); letter-spacing: 0.2em; color: var(--text-2); }
+.hud-now.flash { animation: nowFlash 650ms var(--ease) forwards; }
+@keyframes nowFlash { 0% { transform: translateX(-50%) scale(0.7); opacity: 0; } 18% { transform: translateX(-50%) scale(1.08); opacity: 1; } 70% { opacity: 1; } 100% { transform: translateX(-50%) scale(1); opacity: 0; } }
+.vp.is-replay .hud-timing, .vp.is-replay .hud-now { display: none; }
+
+/* Copy diagnostics fallback: a selectable text box when the clipboard refuses. */
+.vp-diag { position: absolute; inset: 0; z-index: 12; display: grid; place-items: center; background: var(--scrim); }
+.vp-diag[hidden] { display: none; }
+.diag-panel { width: min(46rem, 80vw); display: flex; flex-direction: column; gap: 0.6rem; padding: 1.1rem 1.3rem; }
+.diag-hint { margin: 0; font-size: 0.7rem; color: var(--text-2); }
+.diag-text { width: 100%; height: 40vh; resize: none; font: 400 0.55rem/1.35 ui-monospace, Menlo, monospace; color: var(--text); background: rgba(3, 6, 11, 0.8); border: 1px solid var(--glass-line); padding: 0.6rem; }
+.diag-panel .btn { align-self: flex-end; }
+.res-misses { display: flex; flex-wrap: wrap; align-items: baseline; gap: 0.3rem 0.8rem; margin: 0.6rem 0 0; font-size: 0.66rem; color: var(--text-2); }
+.res-misses .eyebrow { flex-basis: 100%; }
+.res-misses b { font: 900 0.95rem/1 var(--f-display); color: var(--warn); margin-right: 0.15rem; }
+
+/* Round 3: five settings groups (Play, Ball & aids, Movement & view, Player, Picture & sound). */
+.settings-grid { grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 1.15rem; }
+@media (max-aspect-ratio: 3/2) {
+  .settings-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+}
+@media (max-aspect-ratio: 4/3) {
+  .settings-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}

@@ -15,13 +15,14 @@
 
 import { Vec3, v3 } from '../util/vec3.js';
 import { clamp, createRng, createBus } from '../util/math.js';
-import { COURT, BALL, SIM, PLAYER, TRACKING, ASSIST, DEFAULT_ASSIST, netHeightAt } from '../config.js';
+import { COURT, BALL, SIM, PLAYER, TRACKING, ASSIST, DEFAULT_ASSIST, RACKET, netHeightAt } from '../config.js';
 import { createBall, cloneBall, stepBall } from '../physics/ball.js';
 import { createCourt } from '../physics/court.js';
 import { createBallHistory } from '../physics/history.js';
 import { predict, solveShot, netClearance, firstBounce } from '../physics/predict.js';
 import { racketImpact, blendTowardIntent, spinComponents } from '../physics/racket.js';
 import { classifyStroke, contactQuality, relabelByTrajectory } from '../tracking/swing.js';
+import { createTimingState, timingAnalysis, judgeHoldOf } from './swingAssist.js';
 
 const R = BALL.radius;
 const UP = new Vec3(0, 1, 0);
@@ -58,6 +59,13 @@ export const DEFAULT_SETTINGS = Object.freeze({
   // Predictive hitting: the racket shown meets the ball the player sees (swingPredict.js) and
   // the hit is played at once, then confirmed (or undone) by the lag-compensated detector.
   hitPrediction: true,
+  // Round 3 (game/swingAssist.js): 'auto' = the assist's mode (Club / Rookie timing, Pro physical),
+  // or 'timing' / 'physical' for every level.
+  hitMode: 'auto',
+  // Learning slow motion off the glass: 'auto' (on for Rookie), true or false.
+  learningSlowmo: 'auto',
+  // Audio tick 0.15 s before the moment to swing on every ball (glass balls always tick).
+  timingTick: false,
 });
 
 /** Merges a partial settings object over DEFAULT_SETTINGS (volumes merged too). */
@@ -144,6 +152,10 @@ export function createWorld({ settings = {}, rng = createRng(1), court = null } 
     reach: { key: null, lastIn: -Infinity },
     nextSpecId: 1000001,
     specStats: { strikes: 0, confirmed: 0, reverted: 0, cancelled: 0, lateOnly: 0, heldDropped: 0, dirDiffDeg: [], dtContact: [] },
+    // Input kind ('camera' | 'autopilot' | 'fallback', set by app/game.js): mouse play keeps physical hits.
+    input: null,
+    // Timing-based hitting (game/swingAssist.js): contact plan, decisions, swings, misses, auto-positioning.
+    timing: createTimingState(),
   };
 }
 
@@ -232,6 +244,7 @@ function recordEvent(world, evt, opts = {}) {
   if (type && !opts.silent) {
     const release = holdUntil(world, evt);
     if (release === null) emit(world, type, { evt });
+    else if (release === TIMING_HELD) world.held.push({ type, evt, release: Infinity, spec: false, timing: true });
     else world.held.push({ type, evt, release, spec: release === Infinity });
   }
   queueJudge(world, { kind: 'event', t: evt.t, evt });
@@ -266,10 +279,23 @@ export function detectionDelay(world) {
   return (world.settings.latency ?? 0) + (tr.delay || 0) + 2 * (tr.frameDt || 1 / 30);
 }
 
-/** Release time of a live-ball event (Infinity: until the pending prediction resolves) or null (now). */
+/** holdUntil: held until the timing judge rules on the incoming ball (see releaseTimingHeld). */
+const TIMING_HELD = -2;
+/** Pose frames still arrive (s since the last one): otherwise no swing can be ruled a hit. */
+const TIMING_FRAME_GAP = 0.5;
+const timingFramesLive = (world) => !!(world.human && world.human.lastFrameAt > world.time - TIMING_FRAME_GAP);
+
+/**
+ * Release time of a live-ball event (Infinity: until the pending prediction resolves; TIMING_HELD:
+ * until the timing judge rules) or null (now).
+ */
 function holdUntil(world, evt) {
   if (!world.human || !world.ball) return null;
   if (world.spec && world.spec.ballId === world.ball.id && evt.t > world.spec.t - 1e-9) return Infinity;
+  // Timing hits: a swing can still be ruled a hit with any contact after the judge hold (the
+  // earliest possible contact) until the judge decides or closes the window, which at webcam
+  // latency comes ~0.4 s after the ideal moment. Events after that point wait for the ruling.
+  if (world.timing && timingFramesLive(world) && evt.t > judgeHoldOf(world, true)) return TIMING_HELD;
   if (!incomingToPlayer(world) || evt.side !== 'near') return null;
   // Mouse controls (no latency, no camera pipeline): hits are found within a frame.
   if ((world.settings.latency ?? 0) + ((world.tracking && world.tracking.delay) || 0) < 0.04) return null;
@@ -324,6 +350,26 @@ function dropHeldAfter(world, contactT) {
   h.length = keep;
 }
 
+/** Releases events held for a timing ruling once it is made (recent ones now, stale ones dropped). */
+function releaseTimingHeld(world, maxAge = 0.35) {
+  if (!world.held.length || (Number.isFinite(judgeHoldOf(world, true)) && timingFramesLive(world))) return;
+  let any = false;
+  for (const it of world.held) {
+    if (!it.timing) continue;
+    it.timing = false;
+    any = true;
+    it.release = world.time - it.evt.t <= maxAge ? world.time : -1;
+  }
+  if (!any) return;
+  const h = world.held;
+  let keep = 0;
+  for (let i = 0; i < h.length; i++) {
+    if (h[i].release < 0) world.specStats.heldDropped++;
+    else h[keep++] = h[i];
+  }
+  h.length = keep;
+}
+
 /** Releases events held for a speculative hit (recent ones now, stale ones dropped). */
 function releaseSpecHeld(world, maxAge = 0.35) {
   for (const it of world.held) {
@@ -354,7 +400,7 @@ export function launchBall(world, { pos, vel = v3(), spin = v3(), by = 'machine'
   ball.t = world.time;
   if (world.spec) cancelSpeculative(world);
   // A new ball: what is still held of the old one plays now (it can no longer be erased).
-  for (const it of world.held) it.release = it.spec ? -1 : world.time;
+  for (const it of world.held) it.release = it.spec || (it.timing && world.time - it.evt.t > 0.35) ? -1 : world.time;
   world.held = world.held.filter((it) => it.release >= 0);
   releaseHeld(world);
   world.ball = ball;
@@ -411,8 +457,11 @@ export function stepWorld(world, dt = 1 / SIM.tickRate) {
   if (world.spec) stepSpeculative(world);
   // Swing prediction, speculative contacts and their resolution (human controller).
   if (world.human && world.human.afterStep) world.human.afterStep(world, dt);
+  if (world.timing) releaseTimingHeld(world);
   releaseHeld(world);
-  flushJudge(world, world.time - judgeDelay(world));
+  // Timing hits: rulings after the earliest possible contact wait until the swing is decided (a
+  // miss until its reason is known, so the rep / point result carries it).
+  flushJudge(world, Math.min(world.time - judgeDelay(world), world.timing ? judgeHoldOf(world) : Infinity));
   return world;
 }
 
@@ -612,6 +661,18 @@ function strikeAnalysis(world, ball, contact, poseAtContact, contactTime, extra,
   const ref = world.referee;
   const isServe = !!(ref && ref.state.awaitingServe && ref.state.serving && ref.state.serving.team === 0);
   const ctx = flightContext(world, contactTime, 'near');
+  if (contact && contact.timing) {
+    // Timing hit (swingAssist.js): the shot comes from the swing's timing, speed and path.
+    const a = timingAnalysis(world, ball, contact, contactTime, extra, ctx, isServe);
+    if (!a) return null;
+    a.lift = applyNetSafety(ball, assist.netSafety, -1);
+    const v = ball.vel;
+    const ff = freeFlight(ball.pos, v, ball.spin, 3);
+    const launchDeg = (Math.atan2(v.y, Math.hypot(v.x, v.z)) * 180) / Math.PI;
+    a.stroke = relabelByTrajectory(a.pathStroke, { apex: ff.apex, launchDeg, speed: v.length() }, a.groundStroke);
+    a.info.speedOut = v.length();
+    return a;
+  }
   const contactPos = ball.pos.clone();
   const speedIn = ball.vel.length();
 
@@ -696,6 +757,8 @@ function makePlayerShot(world, a, ball, fl, contactTime, extra, id) {
     eA: a.info.eA,
     racketStroke: a.pathStroke,
     swing: extra.swing || null,
+    // Timing hit (swingAssist.js): timing error, swing speed / path, quality, shot type, aim.
+    timingHit: a.timing || null,
   };
 }
 
@@ -759,7 +822,7 @@ export function applyPlayerHit(world, contact, poseAtContact, contactTime, extra
     const c = (outVel.dot(spec.outVel) / Math.max(1e-9, outVel.length() * spec.outVel.length()));
     st.dirDiffDeg.push((Math.acos(clamp(c, -1, 1)) * 180) / Math.PI);
     st.dtContact.push(spec.t - contactTime);
-    if (st.detail) {
+    if (st.detail && poseAtContact) {
       const ang = (a, b) => (Math.acos(clamp(a.dot(b) / Math.max(1e-9, a.length() * b.length()), -1, 1)) * 180) / Math.PI;
       const pv = poseAtContact.vel || v3();
       st.detail.push({
@@ -854,10 +917,13 @@ export function applySpeculativeHit(world, contact, poseAtContact, t, extra = {}
   const evs = [];
   if (world.time > ball.t) stepBall(ball, world.time - ball.t, world.court, null, evs, { deterministic: true });
   ball.t = world.time;
+  // A timing strike has no tracked racket at the contact: its virtual contact pose is drawn.
+  if (a.pose) poseAtContact = a.pose;
   const pose = {
     grip: poseAtContact.grip.clone(), axis: poseAtContact.axis.clone(), normal: poseAtContact.normal.clone(),
     vel: (poseAtContact.vel || v3()).clone(), angVel: (poseAtContact.angVel || v3()).clone(), t,
   };
+  pose.sweet = pose.grip.clone().addScaled(pose.axis, RACKET.sweetSpotY);
   world.spec = {
     id: shot.id, ballId: world.ball.id, flightStartT: world.flight.startT, t, ball, shot, outVel, pose,
     contact: a.contactPos, cStar: extra.cStar ?? t + (world.settings.latency ?? 0), at: world.time, plan: extra.plan || null,

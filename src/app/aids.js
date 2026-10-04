@@ -1,9 +1,25 @@
 // Training aids computed from the live ball: the predicted first bounce on the player's side
 // (landing marker) and the ideal contact point (contact ghost). Re-predicted per flight and
-// every 0.3 s, so mesh scatter or a net cord is picked up. Pure module.
+// every 0.3 s, so mesh scatter or a net cord is picked up. With timing hits (game/swingAssist.js)
+// the contact marker is the planned contact p*: shown for balls off the glass whenever the ball
+// visibility aids are on (round 3 off-the-glass coaching), for every ball at 'max' visibility, or
+// with the ghost setting. Pure module.
 import { predictFlight } from '../game/world.js';
 import { interceptCandidates } from '../physics/predict.js';
 import { playableCandidates, pickGlassContact } from '../game/intercept.js';
+import { timingConfig, flightKeyOf } from '../game/swingAssist.js';
+
+/** The timing plan's contact marker {x, y, z, t} for this frame, or null. */
+export function timingMarker(world, { wantGhost = false } = {}) {
+  const T = world.timing;
+  const P = T && T.plan;
+  if (!P || !timingConfig(world) || P.key !== flightKeyOf(world)) return null;
+  if (P.closed || (T.decided && T.decided.key === P.key)) return null;
+  const vis = world.settings.ballVisibility || 'enhanced';
+  const want = wantGhost || vis === 'max' || (P.glass && vis !== 'realistic');
+  if (!want || world.time > P.tStar + 0.25) return null;
+  return { x: P.pStar.x, y: P.pStar.y, z: P.pStar.z, t: P.tStar };
+}
 
 export function createAids() {
   let key = null;
@@ -24,10 +40,18 @@ export function createAids() {
     const ball = world.ball;
     const f = world.flight;
     const incoming = ball && !ball.atRest && !ball.outside && f && f.team !== 0 && f.by !== 'drop';
-    if (!incoming || (!wantLanding && !wantGhost)) return clear();
+    // Timing hits: the planned contact is the marker (its own rules), the landing marker as before.
+    const tm = incoming && !world.spec && timingConfig(world) ? timingMarker(world, { wantGhost }) : null;
+    if (timingConfig(world)) wantGhost = false;
+    if (!incoming || (!wantLanding && !wantGhost && !tm)) return clear();
     // A predicted hit is showing (game/world.js world.spec): the incoming ball is struck on
     // screen, so its bounce marker and contact ghost would point at a path the player left.
     if (world.spec) return clear();
+    if (tm && !wantLanding) {
+      out.landing = null;
+      out.ghost = tm;
+      return out;
+    }
     const k = `${ball.id}:${f.startT}`;
     if (k !== key || world.time - at > 0.3) {
       key = k;
@@ -56,7 +80,7 @@ export function createAids() {
     }
     if (ghost && ghost.t < world.time - 0.05) ghost = null;
     out.landing = wantLanding ? landing : null;
-    out.ghost = wantGhost ? ghost : null;
+    out.ghost = tm || (wantGhost ? ghost : null);
     return out;
   }
 

@@ -30,6 +30,7 @@ import { racketImpact, spinFromComponents } from '../physics/racket.js';
 import { createBall, cloneBall, stepBall } from '../physics/ball.js';
 import { CONTACT_OFFSETS, idealStance, contactFamily } from '../game/human.js';
 import { predictFlight, currentStroke } from '../game/world.js';
+import { timingConfig } from '../game/swingAssist.js';
 
 const REF_H = 1.75;
 const UP = new Vec3(0, 1, 0);
@@ -75,6 +76,32 @@ export const ROOM_ENVELOPE = Object.freeze({ front: 0.7, back: 0.6, side: 1.0 })
 const REACH_TOL = { x: 0.3, z: 0.14 };
 
 const READY = { grip: [0.12, 1.06, 0.36], axis: [-0.3, 0.75, 0.55], normal: [-0.9, 0.1, 0.35] };
+
+/**
+ * Human-like play (round 3, first real-world session): what a real person 2–3 m from a MacBook
+ * camera does, so the game can be measured the way it is played. Per ball, drawn once:
+ *  - timing: the swing peaks N(timingMean, timingSigma) s after the ideal moment (slightly late);
+ *  - spatial: the racket path is aimed at the ball plus an error of spatialSigma per axis
+ *    (x lateral, y height, z depth; radial RMS ≈ 0.27 m);
+ *  - pace: the swing's peak sweet-spot speed is drawn from the family's range (m/s), not solved
+ *    for the aimed shot;
+ *  - stance: with probability noStep the player only takes part of the step (stepPart);
+ *  - with probability noSwing there is no swing at all;
+ *  - the player starts reading the ball `reaction` s after it is shown.
+ * The default ('precise') profile is the regression autopilot of rounds 1–2.
+ */
+export const HUMAN_PROFILE = Object.freeze({
+  timingMean: 0.02,
+  timingSigma: 0.09,
+  timingClamp: 0.4,
+  spatialSigma: Object.freeze({ x: 0.17, y: 0.14, z: 0.14 }),
+  speed: Object.freeze({ fh: [8, 16], bh: [8, 15], vfh: [5, 9], vbh: [5, 9], oh: [8, 14], sm: [15, 24], serve: [8, 12], soft: [4.5, 8] }),
+  noStep: 0.3,
+  stepPart: [0, 0.5],
+  stepNoise: 0.18, // court m
+  noSwing: 0.05,
+  reaction: [0.18, 0.32],
+});
 
 function softDeadzoneInverse(out, deadzone, knee = deadzone) {
   const a = Math.abs(out);
@@ -161,6 +188,52 @@ export function createAutopilot({ handed = 'right', skill = 0.9, rng = createRng
   // elevation / azimuth offsets (rad) and a pace ratio between realised and planned launch.
   const adapt = st.adapt;
   let seenShots = 0;
+  // Human-like profile (HUMAN_PROFILE): its own rng so the precise stream is unchanged.
+  let human = null;
+  let hrng = null;
+  const intents = new Map(); // plan key -> per-ball human intent
+  st.profile = 'precise';
+  st.intents = { balls: 0, noSwing: 0, noStep: 0 };
+
+  /** Per-ball human intent (drawn once per ball / flight key). */
+  function intentFor(world, key) {
+    let it = intents.get(key);
+    if (it) return it;
+    const H = human;
+    const r = hrng;
+    const dt = clamp(r.normal(H.timingMean, H.timingSigma), -H.timingClamp, H.timingClamp);
+    const err = v3(r.normal(0, H.spatialSigma.x), r.normal(0, H.spatialSigma.y), r.normal(0, H.spatialSigma.z));
+    const speedU = r();
+    const partial = r() < H.noStep;
+    const step = partial ? r.range(H.stepPart[0], H.stepPart[1]) : 1;
+    const swing = r() >= H.noSwing;
+    const react = r.range(H.reaction[0], H.reaction[1]);
+    const noise = { x: r.normal(0, H.stepNoise), z: r.normal(0, H.stepNoise) };
+    const pp = world.player.pos;
+    it = { dt, err, speedU, step, swing, react, noise, anchor: { x: pp.x, z: pp.z } };
+    intents.set(key, it);
+    st.intents.balls++;
+    if (!swing) st.intents.noSwing++;
+    if (partial) st.intents.noStep++;
+    if (intents.size > 16) intents.delete(intents.keys().next().value);
+    return it;
+  }
+
+  /**
+   * 'precise' (default) or 'human' (HUMAN_PROFILE, optionally overridden per field).
+   * opts.seed seeds the human error stream.
+   */
+  function setProfile(name = 'precise', { seed = 0x5eed, overrides = null } = {}) {
+    if (name === 'human') {
+      human = overrides ? { ...HUMAN_PROFILE, ...overrides } : HUMAN_PROFILE;
+      hrng = createRng(seed >>> 0 || 1);
+    } else {
+      human = null;
+      hrng = null;
+    }
+    intents.clear();
+    st.profile = human ? 'human' : 'precise';
+  }
 
   // Scratch
   const tA = v3(), tB = v3(), tC = v3();
@@ -289,14 +362,26 @@ export function createAutopilot({ handed = 'right', skill = 0.9, rng = createRng
     });
     if (receivingServe) cands = cands.filter((c) => c.kind !== 'volley');
     const hint = hints(world);
-    const c = chooseCandidate(world, cands, hint, serving);
+    const intent = human ? intentFor(world, key) : null;
+    if (intent && !intent.swing) return { key, none: true, made: T, noSwing: true };
+    // Timing hits: play the contact the game has planned (what a person watching the reach ring does).
+    const tp = world.timing && world.timing.plan && world.timing.plan.key === key && timingConfig(world) ? world.timing.plan : null;
+    const c = tp
+      ? { t: tp.tStar, pos: tp.pStar, vel: tp.vStar, kind: tp.kind === 'serve' ? 'after-bounce' : tp.kind, height: tp.pStar.y }
+      : chooseCandidate(world, cands, hint, serving);
     if (!c) return { key, none: true, made: T };
-    const fam = serving ? 'fh' : familyFor(c, hint, pl.pos);
+    const fam = serving ? 'fh' : tp ? tp.family : familyFor(c, hint, pl.pos);
     const off = CONTACT_OFFSETS[fam];
     const b = stanceBounds();
     const s = idealStance(c.pos, fam, handed, height);
     // Where the play area can actually put the player (the swing is planned from there).
-    const stance = reachableStance(world, { x: clamp(s.x, b.xMin, b.xMax), z: clamp(s.z, b.zMin, b.zMax) });
+    let goal = { x: clamp(s.x, b.xMin, b.xMax), z: clamp(s.z, b.zMin, b.zMax) };
+    if (intent) {
+      // A person does not always take the full step (and never lands exactly on the spot).
+      const a = intent.anchor;
+      goal = { x: a.x + (goal.x - a.x) * intent.step + intent.noise.x, z: a.z + (goal.z - a.z) * intent.step + intent.noise.z };
+    }
+    const stance = reachableStance(world, goal);
     const turn = dom * off.turn;
 
     // Contact in U relative to the stance; crouch so the shoulder can reach a low ball.
@@ -310,9 +395,11 @@ export function createAutopilot({ handed = 'right', skill = 0.9, rng = createRng
     sh = shoulderU(turn, crouch);
     const shoulder = v3(stance.x + sh.x, sh.y, stance.z - sh.z);
 
-    const tr = c.t + lat + rng.normal(0, (1 - skill) * 0.025);
+    const tr = c.t + lat + (intent ? intent.dt : rng.normal(0, (1 - skill) * 0.025));
     const aim = aimFor(world, hint, fam, serving);
     const fromC = c.pos.clone();
+    // Human: the racket path is aimed at where the player thinks the ball will be.
+    if (intent) fromC.add(intent.err).y = Math.max(0.15, fromC.y);
     const dir = v3(aim.target.x - fromC.x, 0, aim.target.z - fromC.z);
     const spinGuess = spinFromComponents(dir, aim.top, 0);
     const solveDes = (spin) => {
@@ -341,7 +428,7 @@ export function createAutopilot({ handed = 'right', skill = 0.9, rng = createRng
       sw = solveSwing({ C: fromC, vin: vIn, spinIn, vDes: corrected(des.vel), shoulder, faceSign, brushDeg });
       const omega = sw.omega.length();
       const tau0 = Math.min(shape.tau0, thetaMax / Math.max(omega, 1e-3));
-      return { des, sw, omega, tau0 };
+      return { des, sw, omega, tau0, thetaMax };
     };
     // A held backswing must not sit in the ball's path before the contact (QA2: off the back glass the
     // ball came straight back into the waiting racket, 0.6 m from the glass). Try a lower, brushed
@@ -355,13 +442,29 @@ export function createAutopilot({ handed = 'right', skill = 0.9, rng = createRng
       if (!best || s.clear > best.clear + 0.02) best = s;
       if (s.clear >= FOUL_CLEAR) break;
     }
-    const { des, sw, omega, tau0 } = best;
+    const { des, sw } = best;
+    let { omega, tau0 } = best;
+    if (intent) {
+      // Human pace: the swing's own speed, whatever the aimed shot needed.
+      // A touch shot (chiquita: aimed under 45 km/h) is a soft swing.
+      const soft = !serving && aim.speed < 45 / 3.6 && (fam === 'fh' || fam === 'bh');
+      const range = human.speed[serving ? 'serve' : soft ? 'soft' : fam] || human.speed.fh;
+      const want = range[0] + (range[1] - range[0]) * intent.speedU;
+      const have = sw.V.length();
+      if (have > 1e-3) {
+        const f = want / have;
+        sw.V.scale(f);
+        sw.omega.scale(f);
+        omega = sw.omega.length();
+        tau0 = Math.min(shape.tau0, best.thetaMax / Math.max(omega, 1e-3));
+      }
+    }
     st.minClear = Math.min(st.minClear ?? Infinity, best.clear);
     st.plans++;
     const p = {
       key, none: false, made: T, committed, t: c.t, tr, kind: c.kind, fam, adaptKey, stance, crouch, turn,
       homeT: world.player.homeTarget ? { x: world.player.homeTarget.x, z: world.player.homeTarget.z } : null,
-      C: fromC, vin: c.vel.clone(), shoulder, sw, tau0, omega, faceSign, aim, des, vWanted: des.vel.clone(),
+      C: fromC, Cball: c.pos.clone(), vin: c.vel.clone(), shoulder, sw, tau0, omega, faceSign, aim, des, vWanted: des.vel.clone(),
       prepFrom: null, prepStart: T,
     };
     st.lastPlan = p;
@@ -559,6 +662,8 @@ export function createAutopilot({ handed = 'right', skill = 0.9, rng = createRng
     }
     if (!plan || plan.key !== key) {
       if (plan && T >= plan.tr - ARC_IN && T <= plan.tr + ARC_OUT) return; // mid-swing on the previous ball
+      // A person reads the ball a moment after it is shown.
+      if (human && T < world.flight.startT + (world.settings.latency ?? 0) + intentFor(world, key).react) return;
       const prev = currentPose(world, T);
       plan = makePlan(world, T, key, false);
       if (!plan.none) {
@@ -584,7 +689,10 @@ export function createAutopilot({ handed = 'right', skill = 0.9, rng = createRng
       const s = pred.samples[pred.samples.length - 1];
       const ht = world.player.homeTarget;
       const homeMoved = ht && plan.homeT && Math.hypot(ht.x - plan.homeT.x, ht.z - plan.homeT.z) > 0.3;
-      if (s.pos.distanceTo(plan.C) > 0.2 || homeMoved) {
+      // The game's timing plan moved to another contact: follow it.
+      const tp = world.timing && world.timing.plan && timingConfig(world) ? world.timing.plan : null;
+      const planMoved = tp && tp.key === key && Math.abs(tp.tStar - plan.t) > 0.02;
+      if (s.pos.distanceTo(plan.Cball || plan.C) > 0.2 || homeMoved || planMoved) {
         const prev = currentPose(world, T);
         const fresh = makePlan(world, T, key, false);
         if (!fresh.none) {
@@ -626,6 +734,10 @@ export function createAutopilot({ handed = 'right', skill = 0.9, rng = createRng
   /** Learns from the player's last shot: realised physical launch vs the planned one. */
   function learn(world) {
     const shots = world.shots;
+    if (human) {
+      seenShots = shots.length; // a person does not re-aim from a measured launch error
+      return;
+    }
     for (; seenShots < shots.length; seenShots++) {
       const s = shots[seenShots];
       if (s.by !== 'player' || !s.physVel) continue;
@@ -701,6 +813,10 @@ export function createAutopilot({ handed = 'right', skill = 0.9, rng = createRng
   return {
     update,
     reset,
+    setProfile,
+    get profile() {
+      return st.profile;
+    },
     get plan() {
       return plan;
     },

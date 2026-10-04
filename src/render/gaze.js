@@ -2,23 +2,34 @@
 // behaviour can be tested against the real drill pipeline under Node.
 //
 // The player's real body and tracked arms always face the TV (court -z). Any yaw of the view
-// therefore rotates the picture away from the arm frame, so the gaze follows the ball with
-// three phases:
+// therefore rotates the picture away from the arm frame, so the gaze follows the ball in phases:
 //   front   ball ahead of the eye: follow part of the way (more for far balls); within 2.5 m
 //           (the stroke itself) the yaw stays within ±30° so the racket meets the ball on screen.
-//   out     ball behind the eye and travelling to the back glass: a head turn toward it, capped
-//           at ±80° (the off-screen arrow covers the rest).
-//   return  ball behind the eye coming back off the glass (or slowing there): snap back toward
-//           the expected contact beside the body (±30°) with a stiffer spring.
-// Every phase shares a yaw-rate cap (150°/s): no whip pans on a big TV.
+//   out     ball behind the eye and travelling to the back glass.
+//   return  ball behind the eye coming back off the glass (or slowing there).
+//
+// What happens while the ball is behind depends on opts.glassView (settings.glassView, real-world
+// session: "turning to the glass wasn't really fluid"):
+//   'mirror' (app default) the view keeps facing the net with a gentle follow (|yaw| <= 25°); the
+//            stage shows the glass rebound in a rear-view mirror inset (rear: true in the result).
+//   'fixed'  the same view without the mirror.
+//   'turn'   a head turn toward the glass (|yaw| <= 75°), re-tuned for smoothness: it starts
+//            before the ball passes the eye (anticipation from the ball's time to the eye plane),
+//            its target is low-pass filtered and followed by a softer critically damped spring
+//            (no snap-back: the return to the contact starts as the ball reaches the glass).
+//            The old phase switch with a 14/s spring hit the 150°/s rate cap with ~10 000°/s²
+//            jolts; this keeps the pan under ~100°/s and the acceleration a few hundred °/s².
+// Every mode keeps a hard yaw-rate cap (150°/s) as a last resort.
 //
 // Contact framing (QA2): when the predicted contact of the incoming ball is known (opts.contact,
 // the tactical home's intercept), the view blends over the last CONTACT_LEAD s from following the
 // ball to framing the contact point in the lower-middle of the picture (up to CONTACT_DROP below
-// the centre; never by tilting up past a chest-high contact), so racket and ball meet on screen. Overheads cap the upward pitch (OVERHEAD_PITCH_MAX): the view
-// does not stare at the ceiling and the racket rising from behind the head enters the frame.
+// the centre; never by tilting up past a chest-high contact), so racket and ball meet on screen.
+// Overheads cap the upward pitch (OVERHEAD_PITCH_MAX): the view does not stare at the ceiling and
+// the racket rising from behind the head enters the frame.
 
 const DEG = Math.PI / 180;
+const COURT_HALF_LENGTH = 10; // m, back glass plane (config COURT.halfLength; gaze.js stays dependency-free)
 
 export const GAZE = Object.freeze({
   FRONT_LIMIT: 70 * DEG,
@@ -43,6 +54,24 @@ export const GAZE = Object.freeze({
   CONTACT_BLEND_NEAR: 1.5,
 });
 
+/** Glass-view modes (settings.glassView): limits, springs and anticipation (see the header). */
+export const GLASS_VIEW = Object.freeze({
+  MODES: Object.freeze(['mirror', 'turn', 'fixed']),
+  DEFAULT: 'mirror',
+  CALM_LIMIT: 25 * DEG, // mirror / fixed: |yaw| never beyond this
+  CALM_LAMBDA: 4, // mirror / fixed: spring (1/s)
+  CALM_GAIN: 0.45, // mirror / fixed: share of the ball's bearing followed
+  TURN_LIMIT: 75 * DEG,
+  TURN_LAMBDA: 6, // turn: spring while the ball is behind / coming back (1/s)
+  RETURN_MARGIN: 8 * DEG, // turn: the return aims this far inside the ±30° contact band
+  TARGET_LAMBDA: 7, // low-pass of the yaw target (1/s): no target steps reach the spring
+  TARGET_LAMBDA_NEAR: 14, // the same at the stroke (contact framing keeps the racket on screen)
+  ANTICIPATE: Object.freeze([0.1, 0.55]), // s to the eye plane: full turn .. turn starts
+  RELEASE: Object.freeze([0.05, 0.38]), // s to the glass: return starts .. full turn
+  REAR_DZ: -0.2, // m: the mirror shows the rebound once the ball is this close to the eye plane
+});
+
+const finite3 = (v) => !!v && Number.isFinite(v.x) && Number.isFinite(v.y) && Number.isFinite(v.z);
 const clamp = (v, lo, hi) => (v < lo ? lo : v > hi ? hi : v);
 const smoothstep = (a, b, x) => {
   const t = clamp((x - a) / (b - a), 0, 1);
@@ -62,56 +91,107 @@ export function springCapped(s, target, lambda, dt, maxRate) {
 }
 
 /**
- * @returns {{ update(ball, eye, dt, opts): {yaw, pitch, phase}, reset(basePitch), yaw, pitch, phase }}
- *   ball: BallState|null; eye: {x,y,z}; opts: { basePitch (rad), follow = true, contact = null }
+ * @returns {{ update(ball, eye, dt, opts): {yaw, pitch, phase, rear}, reset(basePitch), yaw, pitch, phase }}
+ *   ball: BallState|null; eye: {x,y,z}; opts: { basePitch (rad), follow = true, contact = null,
+ *   glassView = 'turn' ('mirror' | 'turn' | 'fixed'; the app passes settings.glassView, default
+ *   'mirror') }
  *   contact: predicted contact {x, y, z, t?} (court; t in ball time) for the incoming ball, or null.
  *   yaw: 0 = looking toward -z, + = turned to the player's left (three.js Y rotation).
+ *   rear: the ball is behind (or at) the eye plane on the player's side: the mirror inset's cue.
  */
 export function createGaze() {
   const yaw = { x: 0, v: 0 };
   const pitch = { x: 0, v: 0 };
+  let yawT = 0; // low-passed yaw target
+  let lamS = GAZE.LAMBDA; // low-passed spring stiffness (no stiffness steps either)
   let pitchInit = false;
   let phase = 'front';
+  let rear = false;
 
   function reset(basePitch = 0) {
     yaw.x = 0; yaw.v = 0;
+    yawT = 0;
+    lamS = GAZE.LAMBDA;
     pitch.x = basePitch; pitch.v = 0;
     pitchInit = true;
     phase = 'front';
+    rear = false;
   }
 
-  function update(ball, eye, dt, { basePitch = 0, follow = true, contact = null } = {}) {
-    if (!pitchInit) reset(basePitch);
+  function update(ball, eye, dt, { basePitch = 0, follow = true, contact = null, glassView = 'turn' } = {}) {
+    // Non-finite inputs never reach the springs (a NaN target would keep the view NaN for good).
+    if (!Number.isFinite(basePitch)) basePitch = 0;
+    if (!(dt >= 0) || !Number.isFinite(dt)) dt = 0;
+    if (ball && !(finite3(ball.pos) && (!ball.vel || finite3(ball.vel)))) ball = null;
+    if (eye && !finite3(eye)) eye = null;
+    if (contact && !finite3(contact)) contact = null;
+    if (!pitchInit || !(Number.isFinite(yaw.x) && Number.isFinite(yaw.v) && Number.isFinite(pitch.x) && Number.isFinite(pitch.v) && Number.isFinite(yawT))) reset(basePitch);
+    const turn = glassView === 'turn';
+    const calm = !turn; // 'mirror' | 'fixed'
+    const yawLimit = turn ? GLASS_VIEW.TURN_LIMIT : GLASS_VIEW.CALM_LIMIT;
     let tYaw = 0, tPitch = basePitch;
-    let lambda = GAZE.LAMBDA;
+    let lambda = calm ? GLASS_VIEW.CALM_LAMBDA : GAZE.LAMBDA;
+    let lamT = GLASS_VIEW.TARGET_LAMBDA;
+    let passing = 0; // turn: weight of a ball passing the eye on its way to the glass
     phase = 'front';
+    rear = false;
     if (follow && ball && !ball.atRest && !ball.outside && eye) {
       const dx = ball.pos.x - eye.x, dy = ball.pos.y - eye.y, dz = ball.pos.z - eye.z;
       const horiz = Math.hypot(dx, dz);
       const vz = ball.vel ? ball.vel.z : 0;
+      const vx = ball.vel ? ball.vel.x : 0;
       const behind = dz > GAZE.BEHIND_DZ;
       const near = horiz < GAZE.NEAR_RADIUS && ball.pos.z > 0;
-      if (behind && vz > GAZE.OUT_VZ) {
-        phase = 'out';
-        let ang = Math.atan2(-dx, -dz);
+      rear = ball.pos.z > 0 && dz > GLASS_VIEW.REAR_DZ && (vz > GAZE.OUT_VZ || behind);
+      // Toward the contact the ball is heading for: beside the body, a little in front.
+      const contactSide = clamp(Math.atan2(-dx, 0.6) * 0.6, -GAZE.CONTACT_LIMIT, GAZE.CONTACT_LIMIT);
+      // Front following (also the base the turn blends from).
+      const ang = Math.atan2(-dx, -dz);
+      let front;
+      if (calm) front = clamp(ang * GLASS_VIEW.CALM_GAIN, -GLASS_VIEW.CALM_LIMIT, GLASS_VIEW.CALM_LIMIT);
+      else {
+        const gain = 0.35 + 0.5 * smoothstep(1.2, 4.0, horiz);
+        front = clamp(ang * gain, -(near ? GAZE.CONTACT_LIMIT : GAZE.FRONT_LIMIT), near ? GAZE.CONTACT_LIMIT : GAZE.FRONT_LIMIT);
+      }
+      if (turn && vz > GAZE.OUT_VZ && ball.pos.z > 0) {
+        // Heading for the back glass: turn toward where the ball will meet it, starting before it
+        // passes the eye and releasing as it reaches the glass.
+        const tEye = (eye.z + GAZE.BEHIND_DZ - ball.pos.z) / vz;
+        const tGlass = Math.max(0, (COURT_HALF_LENGTH - ball.pos.z) / vz);
+        const gx = ball.pos.x + vx * tGlass - eye.x, gz = COURT_HALF_LENGTH - eye.z;
+        let gAng = Math.atan2(-gx, -gz);
         // Straight behind: keep turning over the shoulder already turned to (no side flips).
-        if (Math.abs(ang) > GAZE.BACK_LIMIT && Math.abs(dx) < 0.5 && Math.abs(yaw.x) > 10 * DEG && Math.sign(ang) !== Math.sign(yaw.x)) {
-          ang = Math.sign(yaw.x) * Math.PI;
-        }
-        tYaw = clamp(ang, -GAZE.BACK_LIMIT, GAZE.BACK_LIMIT);
+        if (Math.abs(gx) < 0.5 && Math.abs(yawT) > 10 * DEG && Math.sign(gAng) !== Math.sign(yawT)) gAng = Math.sign(yawT) * Math.PI;
+        // A contact planned before the ball reaches the eye plane (a volley, a ball taken early)
+        // is the stroke, not a glass ball: no turn.
+        const tc = contact && Number.isFinite(contact.t) && Number.isFinite(ball.t) ? contact.t - ball.t : null;
+        const strokeFirst = tc !== null && tc > -0.15 && tc < Math.max(0, tEye) + 0.1;
+        // wPass: the ball is passing the eye plane (front following would whip round); wTurn: there
+        // is still time to watch it meet the glass, else the view heads back toward the contact.
+        const wPass = strokeFirst ? 0 : 1 - smoothstep(GLASS_VIEW.ANTICIPATE[0], GLASS_VIEW.ANTICIPATE[1], tEye);
+        const wTurn = smoothstep(GLASS_VIEW.RELEASE[0], GLASS_VIEW.RELEASE[1], tGlass);
+        const wOut = wPass * wTurn;
+        passing = wPass;
+        const outT = clamp(gAng, -yawLimit, yawLimit);
+        const retLim = GAZE.CONTACT_LIMIT - GLASS_VIEW.RETURN_MARGIN;
+        const retT = clamp(contactSide, -retLim, retLim);
+        tYaw = front + (outT * wTurn + retT * (1 - wTurn) - front) * wPass;
+        if ((behind && !strokeFirst) || wOut > 0.5) phase = 'out';
+        if (wPass > 0.05) lambda = GLASS_VIEW.TURN_LAMBDA;
       } else if (behind) {
         phase = 'return';
-        // Toward the contact the ball is heading for: beside the body, a little in front.
-        tYaw = clamp(Math.atan2(-dx, 0.6) * 0.6, -GAZE.CONTACT_LIMIT, GAZE.CONTACT_LIMIT);
-        lambda = GAZE.LAMBDA_RETURN;
+        // The soft spring lags: aim a few degrees inside the contact band.
+        const lim = calm ? GLASS_VIEW.CALM_LIMIT : GAZE.CONTACT_LIMIT - GLASS_VIEW.RETURN_MARGIN;
+        tYaw = clamp(contactSide, -lim, lim);
+        lambda = calm ? GLASS_VIEW.CALM_LAMBDA : GLASS_VIEW.TURN_LAMBDA;
       } else {
-        const ang = Math.atan2(-dx, -dz);
-        const gain = 0.35 + 0.5 * smoothstep(1.2, 4.0, horiz);
-        const lim = near ? GAZE.CONTACT_LIMIT : GAZE.FRONT_LIMIT;
-        tYaw = clamp(ang * gain, -lim, lim);
-        if (near) lambda = GAZE.LAMBDA_NEAR;
-        // Coming back from a turn (e.g. the ball has just come off the glass past the eye).
-        if (Math.abs(yaw.x) > GAZE.CONTACT_LIMIT) lambda = GAZE.LAMBDA_RETURN;
+        tYaw = front;
+        if (near) {
+          lambda = calm ? Math.max(lambda, 6) : GAZE.LAMBDA_NEAR;
+          lamT = GLASS_VIEW.TARGET_LAMBDA_NEAR;
+        }
+        // Coming back from a turn (the ball has come off the glass past the eye): no snap.
+        if (turn && Math.abs(yaw.x) > GAZE.CONTACT_LIMIT) lambda = Math.max(GLASS_VIEW.TURN_LAMBDA, GAZE.LAMBDA);
       }
       const ballPitch = Math.atan2(dy, Math.max(0.3, horiz));
       const d = ballPitch - basePitch;
@@ -122,31 +202,38 @@ export function createGaze() {
         const cx = contact.x - eye.x, cy = contact.y - eye.y, cz = contact.z - eye.z;
         // Blend in over the last CONTACT_LEAD s before the contact (by distance without a time).
         const tl = Number.isFinite(contact.t) && Number.isFinite(ball.t) ? contact.t - ball.t : null;
-        const w = tl !== null
+        // (Not while the ball is still on its way past the eye to the glass.)
+        const w = (1 - passing) * (tl !== null
           ? (tl < -0.15 ? 0 : 1 - smoothstep(GAZE.CONTACT_LEAD[0], GAZE.CONTACT_LEAD[1], tl))
-          : 1 - smoothstep(GAZE.CONTACT_BLEND_NEAR, GAZE.CONTACT_BLEND_FAR, Math.hypot(ball.pos.x - contact.x, ball.pos.z - contact.z));
+          : 1 - smoothstep(GAZE.CONTACT_BLEND_NEAR, GAZE.CONTACT_BLEND_FAR, Math.hypot(ball.pos.x - contact.x, ball.pos.z - contact.z)));
         if (w > 0) {
           const cH = Math.max(0.25, Math.hypot(cx, cz));
-          const cYaw = clamp(Math.atan2(-cx, -cz) * GAZE.CONTACT_YAW_GAIN, -GAZE.CONTACT_LIMIT, GAZE.CONTACT_LIMIT);
+          const cLim = calm ? GLASS_VIEW.CALM_LIMIT : GAZE.CONTACT_LIMIT;
+          const cYaw = clamp(Math.atan2(-cx, -cz) * GAZE.CONTACT_YAW_GAIN, -cLim, cLim);
           // Contact CONTACT_DROP below the centre, but never by looking up past the contact (a
           // chest-high ball is framed at the centre rather than with the ceiling).
           const e = Math.atan2(cy, cH);
           const cPitch = clamp(Math.min(e + GAZE.CONTACT_DROP, Math.max(basePitch, e)), GAZE.PITCH_MIN, GAZE.OVERHEAD_PITCH_MAX);
           tYaw = tYaw + (cYaw - tYaw) * w;
           tPitch = tPitch + (cPitch - tPitch) * w;
-          lambda = Math.max(lambda, GAZE.LAMBDA_NEAR);
+          lambda = Math.max(lambda, calm ? 6 : GAZE.LAMBDA_NEAR);
+          lamT = GLASS_VIEW.TARGET_LAMBDA_NEAR;
           phase = 'contact';
         }
       }
       // Overheads: never stare at the ceiling.
       if (tPitch > GAZE.OVERHEAD_PITCH_MAX && phase !== 'out') tPitch = GAZE.OVERHEAD_PITCH_MAX;
-    } else if (Math.abs(yaw.x) > GAZE.CONTACT_LIMIT) {
-      lambda = GAZE.LAMBDA_RETURN;
+    } else if (turn && Math.abs(yaw.x) > GAZE.CONTACT_LIMIT) {
+      lambda = Math.max(GLASS_VIEW.TURN_LAMBDA, GAZE.LAMBDA);
     }
-    springCapped(yaw, tYaw, lambda, dt, GAZE.MAX_YAW_RATE);
+    tYaw = clamp(tYaw, -yawLimit, yawLimit);
+    // The yaw target is low-passed so no step reaches the spring (smooth acceleration).
+    yawT += (tYaw - yawT) * (1 - Math.exp(-lamT * dt));
+    lamS += (lambda - lamS) * (1 - Math.exp(-GLASS_VIEW.TARGET_LAMBDA * dt));
+    springCapped(yaw, yawT, lamS, dt, GAZE.MAX_YAW_RATE);
     springCapped(pitch, tPitch, lambda, dt, GAZE.MAX_PITCH_RATE);
-    yaw.x = clamp(yaw.x, -GAZE.BACK_LIMIT, GAZE.BACK_LIMIT);
-    return { yaw: yaw.x, pitch: pitch.x, phase };
+    yaw.x = clamp(yaw.x, -yawLimit, yawLimit);
+    return { yaw: yaw.x, pitch: pitch.x, phase, rear };
   }
 
   return {
@@ -155,5 +242,6 @@ export function createGaze() {
     get yaw() { return yaw.x; },
     get pitch() { return pitch.x; },
     get phase() { return phase; },
+    get rear() { return rear; },
   };
 }

@@ -211,6 +211,14 @@ export function toUserFrame(world, scale, hipHeight) // -> map of joint name -> 
 
 Tests: build frames with `synthetic.js` for a known user at a known position and check that `room` comes back within 10% and the joints within 3 cm.
 
+**Side-on robustness** (`ROBUST`, round 3: the first real player saw a black screen when turning side-on). Before any filter, landmarks are sanitised:
+- non-finite or out-of-range landmarks (|world| ≥ 2.5, |image − 0.5| ≥ 2.5) are held at the last accepted value with visibility 0;
+- left/right label swaps are undone per group (face, arms, legs) when the swapped assignment fits the previous frame at least 2× better (`groupSwapped`), and by the facing-camera prior (`frontalSwapped`);
+- single-frame jumps beyond 0.45 m (body) / 1.5 m (hands) in world, or 0.3 / 0.9 in the image, are held for up to 2 frames;
+- a landmark further from its parent joint than any body allows (`BONES`) is held or pulled in.
+
+Torso yaw is `torsoYawDeg(world)`; with |yaw| > 55° the shoulder and hip widths leave the distance median (`estimateDistance(..., { sideOn })`). Room x and d reject jumps above 0.3 m + 3 m/s·dt for up to 2 frames. Arm landmarks hidden inside the picture are followed with `landmarkTrust` (down to `OCCLUDED_TRUST` = 0.25 of the smoothing factor). `computeHandFrame(side, w, i, p, t, e, out, { prevNormal, palmVis, handLength })` falls back to the forearm direction and the previous palm direction when the palm is degenerate (`HAND_DEGENERATE`), and sets `out.degenerate`. Filters never ingest non-finite values. A sample that would be non-finite is not returned (null). BodySample gains `yawDeg` and `sideOn`; `tracker.stats` = { frames, dropped, rejectedLandmarks, spikes, swaps, frontalSwaps, degenerateHands, roomHeld, sideOnFrames, nonFinite }.
+
 ### 4.3 `racketTrack.js`
 
 ```js
@@ -279,6 +287,8 @@ The autopilot reads `world.ball` and `predict()`. It picks an intercept on the n
 
 Its goal is to return ≥ 70% of machine feeds in the forehand drill with assist `club`. The smoke test relies on this.
 
+**Human-like profile** (round 3): `ap.setProfile(name = 'precise', { seed, overrides })` switches between the precise player (default; tests, attract mode) and `'human'` = `HUMAN_PROFILE` (optionally overridden per field), which plays like a person: timing error N(+20 ms, σ 90 ms) clamped to ±0.4 s, racket position error σ (0.17, 0.14, 0.14) m, swing speeds by stroke (forehand 8–16 m/s, backhand 8–15, volleys 5–9, overheads 8–14, smash 15–24, serve 8–12, touch 4.5–8), only part of the steps (30% none, otherwise 0–50% of the way, ±0.18 m), 5% of balls with no swing, and a 0.18–0.32 s reaction delay. It uses its own rng, so the precise stream is unchanged. `app/game.js installRealisticFeed(feed, { delivery, jitter, noise, fps = 30 })` replaces the feed's delivery with a webcam-like one: 30 fps capture, each result `delivery + U(0, jitter)` s later (in order), landmark noise `WEBCAM_NOISE × noise` (1 = a MacBook camera at 2.5 m). `createGame({ apProfile, apJitter, apNoise })` and the URL flags `?approfile=human&apjitter=0.02&apnoise=1` use them.
+
 ### 4.8 `camera.js` and `pose.js` (browser)
 
 ```js
@@ -325,6 +335,12 @@ export function detectionDelay(world) // settings.latency + measured pipeline de
 - **Predictive hitting.** The camera sees a swing ~0.25 s late on a Mac + TV. `src/game/swingPredict.js` (driven by `human.afterStep`) completes the swing the tracked racket has started toward the contact the player is going for (`CONTACT_OFFSETS`, drill hints), and the shown racket is swept against the shown ball every tick. On contact, `applySpeculativeHit` plays the strike at once. The authoritative `world.ball`, its history and the judge stay on the unhit path; the lag-compensated detector then confirms the hit (the confirming `ShotRecord` carries `shot.confirms` = the provisional shot id, and the shown ball blends onto the real path) or, with no contact by 0.1 s past the predicted one, `revertSpeculative` undoes it.
 - **World fields added:** `spec` (pending prediction `{ ball, shot, t, ballId, ... }` or null), `viewCorrection { seq, kind: 'strike'|'confirm'|'revert'|'late', ballId, contactT, at, contact }` (the renderer's cue for discontinuities of the shown ball), `held` (bus events of the incoming ball near the player held for at most the judge margin and dropped if a hit erases them), `specStats { strikes, confirmed, reverted, cancelled, lateOnly, heldDropped, dirDiffDeg[], dtContact[] }`, and `player.renderRacket` (the racket to draw this frame).
 - **Bus contract additions:** `ball:hit` with `shot.provisional` is presentation only: it never reaches `mode.onBus`, `world.shots`, the judge or session stats; listeners that count hits filter `!shot.provisional`. A confirming hit carries `shot.confirms`; audio and effects already played at the strike, so they skip it (`app/wiring.js` binds audio through a filtered bus). `ball:unhit { shot, reason }` cancels a provisional shot. Events of the shown (speculatively struck) ball carry `evt.speculative`.
+- **Timing hitting** (round 3, `src/game/swingAssist.js`; `config.ASSIST[level].mode` = `'timing'` for Club and Rookie, `'physical'` for Pro, with `ASSIST[level].timing = { early, late, reach, minSpeed, position }`: Club 0.20 / 0.22 s, 0.75 m, 4 m/s, 0.75; Rookie 0.32 / 0.35 s, any reach, 3 m/s, 1.0). `timingConfig(world)` gives the active window, or null for physical hitting (`settings.hitMode` 'physical', Pro on 'auto', or mouse input: `world.input === 'fallback'`). For each playable incoming ball `planTiming` sets the plan `world.timing.plan` = { key, tStar, pStar, family, glass, wallT, closed, … }: the ideal contact moment t* and point p* (§5.4b rules) and the stance; `autoTarget(world, own, dt)` glides the player toward the stance (critically damped; weight `position`: Rookie all the way, Club 75%, own steps add; never deeper than 9.2 m). A swing (`createSwingWatch`: the racket's sweet-spot velocity relative to the body, above `minSpeedFor(world, cfg, P)` = minSpeed × 0.6 for volleys / chiquitas, × 0.75 for serves, raised over the camera's jitter, with a minimum travel and a preparation check) whose peak, mapped to ball time, falls in [t* − early, t* + late] within `reach` of the ball is a hit at t_c = t* + 0.35·e: the ball where it really is then, pace from the swing speed, direction from the timing error (20% blended with the swing direction), spin from the swing path, quality from timing and spacing, then normal flight and net safety. It runs inside the predictive pipeline: the predicted strike at t* (display racket magnetised onto the contact for 120 ms) is confirmed through `applyPlayerHit` or reverted. `contact.timing` and `shot.timingHit = { e, dist, speed, … }` carry the evaluation.
+- **World fields added (round 3):** `world.input` ('camera' | 'autopilot' | 'fallback'), `world.timing = createTimingState()` ({ plan, auto, decided, lastSwing, lastMiss, swings[≤40], log: { plans, hits, misses, strikes, reverted, noStrike: { tracking, prep, early } }, byMode, hold, learned, cue, flight, timeScale }).
+- **Judge hold** `judgeHoldOf(world, untilClosed = false)`: rulings after the earliest possible contact wait until the swing is decided or the miss reason is known, with a failsafe at t* + late + 1.2 s. Presentation events (sounds, glass marks) after the earliest contact are held until the window closes (`untilClosed`), only while pose frames arrive (`human.lastFrameAt`); events older than 0.35 s are dropped.
+- **Learning slow motion** (`learningSlowmoOn(settings)`: 'on' / 'off' / 'auto' = Rookie): `world.timing.timeScale` eases to 0.7 around a glass contact; the app clock runs at speed × `game.timeScale()` (§10 `clock.setRate`).
+- **Miss reasons:** every playable ball not hit is reported once by `reportMiss` → `world.timing.lastMiss` and the bus event `'player:miss' { reason: 'no-swing'|'early'|'late'|'below'|'above'|'too-far'|'too-close'|'behind'|'in-front'|'rules'|'out-of-reach'|'tracking'|'late-detect', ms, cm, step, rule, speed, text, es, tStar, family, glass }` (`missText` gives the EN / ES text). Coaching cues of glass balls: `'timing:cue' { kind: 'glass'|'now-voice'|'tick'|'now', t, text?, es? }` (presentation only; 'tick' also on every ball with `settings.timingTick`). `reachRing(world)` → { progress, green (|now − t*| ≤ 60 ms), inWindow, after, fade, tStar, pStar } | null for the renderer.
+
 Bus event names are the contract with render, audio and UI:
 - `ball:launch {ball, by}`
 - `ball:hit {shot: ShotRecord}`
@@ -336,6 +352,7 @@ Bus event names are the contract with render, audio and UI:
 - `coach:cue {text, es, priority}`
 - `player:step {pos, speed}`
 - `mode:hud {...}` (see §5.6)
+- `player:miss {reason, ms, cm, text, es, …}` and `timing:cue {kind, t}` (round 3, above)
 
 `ShotRecord = { id, t, by: 'player'|'coach'|'machine'|'ai', stroke, contact: Vec3, contactU: Vec3|null, racketSpeed, speedIn, speedOut, spinRpm:{top,side,total}, offCenter, quality, assist, timing, spacing, netClearance, predictedLanding: Vec3|null, afterBounce, afterWall }`
 
@@ -391,6 +408,8 @@ Drills (realistic padel curriculum; speeds in km/h, z positive = near side):
 12. `return`: "Return of Serve" / *Resto*. The machine serves underhand from the far right (≈60 km/h) into the near right box. Target cross-court deep, or a lob.
 13. `live-mix`: "Live Ball Mix". Random feeds from all of the above.
 
+Glass feeds (round 3) are tuned so the contact after the glass is comfortable: 0.6–1.3 m high and at least 1 m out of the glass (`back-glass`, `double-wall`: "comes off both glasses in the corner"). Each drill carries `ap = { contact: 'ground'|'glass'|'volley'|'overhead'|'serve'|'any', family, shot, aim, speedKmh, top, … }`: the intended stroke, used by the autopilot, the swing predictor and the timing hit (`ap.shot` sets the stroke type and pace range, e.g. 'chiquita' lowers the swing threshold).
+
 Each rep's outcome comes from the ball's subsequent events. Use the referee with the player as the hitter. Notes are human-readable coaching cues, for example: "Contact further in front", "Let it come off the glass", "Get lower for the low ball", "Racket back earlier".
 
 ### 5.4b `intercept.js` and `tactics.js`: contact planning near the enclosure (QA2 revision)
@@ -426,8 +445,12 @@ export function createDrillMode(drill, opts) // ModeController
 export function createRallyMode({ level }) // free rally with coach; counts rally length; coach plays a realistic variety
 export function createMatchMode({ level, games }) // 2v2: AI partner on near left/right + 2 AI opponents (reuse coach brain), real scoring via scoring.js and referee with serves
 ModeController = { id, start(world), update(world, dt), onBus(type, payload, world), hud(world) /* -> HudState */, isFinished(world), summary(world) }
-HudState = { title, subtitle, repIndex, repTotal, points, streak, timer, score /* match display or null */, lastShot: { stroke, speedKmh, spinRpm, netClearance, quality, timing, spacing, notes[] } | null, banner: { text, kind } | null, prompt: string|null , rally?: number /* rally / match: current rally length (points and streak are null) */, bestRally?: number, live?: boolean /* set by main: ball in play */ }
+HudState = { title, subtitle, repIndex, repTotal, points, streak, timer, score /* match display or null */, lastShot: { stroke, speedKmh, spinRpm, netClearance, quality, timing, spacing, notes[] } | null, banner: { text, kind } | null, prompt: string|null , rally?: number /* rally / match: current rally length (points and streak are null) */, bestRally?: number, live?: boolean /* set by main: ball in play */,
+  miss?: { reason, text, es, ms, cm } | null /* round 3: last miss reason while recent */,
+  meter?: { e, early, late, hit, label, at } | null /* timing meter of the last swing */,
+  ballIndicator?: { angle } | null /* set by main: hidden while the rear-view mirror shows the ball */ }
 ```
+Drill, rally and match summaries carry `misses: { reason: count }` (the results screen lists them).
 
 ## 6. Rendering (`src/render/`, three.js)
 
@@ -441,6 +464,7 @@ export function createRenderer(canvas, { quality = 'high' /* 'ultra'|'high'|'bal
 - Use physically correct lights, `renderer.toneMapping = THREE.ACESFilmicToneMapping`, exposure ~1.0, `outputColorSpace = SRGBColorSpace`, and soft PCF shadows.
 - The bloom pass is subtle and only catches the LED panels. Use `OutputPass`.
 - Dynamic resolution keeps 60 fps by scaling the pixel ratio between 0.6 and `min(devicePixelRatio, 2)`.
+- A finite guard pass (`FINITE_GUARD_SHADER`) after the RenderPass zeroes non-finite pixels (float-bit test), so one NaN fragment cannot be smeared over the picture by the bloom.
 - The camera is a PerspectiveCamera (default vertical FOV 70°, near 0.02, far 120). Near 0.02 matters so the hands render.
 
 ### 6.2 `textures.js`: procedural canvas textures (cached)
@@ -489,13 +513,16 @@ export function createFirstPersonRig({ handed = 'right', skinTone = '#c58c6a', s
 - **Fallback:** if the GLB fails to load, use a procedural capsule hand.
 - **Extrapolation:** render with the pose extrapolated by `renderOpts.extrapolate` seconds (≤ 0.06) using the racket track velocity to hide latency. Hit detection does not use this. (Revision: live worlds draw `player.renderRacket`, already predicted for the frame by §5.1 predictive hitting, with `extrapolate: 0`; the 0.06 s extrapolation only applies to replay frames. `stage.js` re-solves the elbow so the arm follows the shown racket with the tracked segment lengths.)
 - **Near-eye fading** (QA2 revision, `src/render/armFade.js`): arm segments fade per pixel by angular size (solid below 0.12 rad, gone at 0.2 rad), the upper arm is only a 9 cm stub above the elbow that fades as the elbow rises to shoulder height, no sleeve is drawn, and faded limbs cast no shadow. The drawn racket is kept inside the back / side glass with a soft knee (`src/render/viewClamp.js`, visual only).
+- **Safety** (round 3): racket poses that are not a valid frame (`safeView.frameOk`) are not drawn. Arm segments outside 0.4–1.8× their nominal length (`segmentOk`) are hidden. Segments with a zero axis keep their last orientation. A racket face within 0.58 m and less than 38° from the view axis fades (to 0.3 at 0.32 m) unless the ball is near. With the torso turned more than 45°, arm segments fade by their nearest point (`armFade.sideOnAlpha`: gone within 0.3 m, solid beyond 0.48 m). `rig.stats` = { racketRejected, segmentsHidden }.
 
 ### 6.6 `ballView.js`
 
 ```js
-export function createBallView(scene) // -> { update(ball, dt, alpha), setVisible(b), flash(kind) }
+export function createBallView(scene, { halo, trail, shadows } = {}) // -> { update(ball, dt, alpha), setVisible(b), flash(kind), setHalo(b), bind({ visibility, ring }), setVisibility(mode), ringVisible }
 ```
 The ball uses the felt texture and rotates with `ball.spin`, integrated visually. Add a soft contact shadow, an analytic blob decal projected on the floor (and on glass when close). Add a subtle motion trail ribbon (last ~0.12 s, additive, very faint) and a tiny emissive lift, so it reads against the dark hall on a TV. The optional `halo` setting is a soft sprite for visibility training.
+
+**Visibility** (round 3): `createBallView(scene, { halo, trail, shadows })` adds `bind({ visibility: () => mode, ring: () => reachRing state | null })`, `setVisibility(mode)` and `ringVisible`. `BALL_VISIBILITY` = { realistic, enhanced (default: minimum angular size 0.45°, glow, contact shadow, drop-line to the floor), max (0.8°) }; `ballDisplayScale(d, minDeg)` is the drawn-size factor. The reach ring (yellow, green within ±60 ms of t*) and the contact marker at p* for glass balls are drawn in the player's view only: the ring is hidden for a camera with `camera.userData.isMirror` (the rear-view mirror, §6.10).
 
 ### 6.7 `humanoid.js`: coach and AI players
 
@@ -512,11 +539,22 @@ Build a realistic athletic mannequin procedurally, with proper proportions for a
 ### 6.8 `fpCamera.js`
 
 ```js
-export function createFirstPersonCamera(camera, settings) // -> { update(world, dt), setFov(deg), mode: 'fp'|'replay'|'orbit', setReplayView(kind) }
+export function createFirstPersonCamera(camera, settings, { getXR } = {}) // -> { update(world, dt, dtReal), setFov(deg), mode: 'fp'|'replay'|'orbit', setReplayView(kind), snap(), gaze, rear, headTracking, safety }
 ```
 - **Position:** `player.eye`, which `main.js` computes as player.pos + head offset from tracking + eye height.
 - **Base orientation:** looking at the far court, pitch −6°.
-- **Gaze assist:** follow the ball with a critically damped yaw/pitch (λ ≈ 6) when `settings.gazeFollow` is on. Limit yaw to ±70° while the ball is in front, and to ±30° while it is within 2.5 m (the stroke). When the ball is behind the player heading for the back glass, allow up to ±80° (a head turn; the off-screen arrow covers the rest). As soon as it comes back off the glass, return to ±30° with a stiffer spring (λ ≈ 14). Yaw rate is capped at 150°/s. In the last 0.8 s before the predicted contact (tactical home) the view frames that contact up to 17° below centre, never tilting up past a chest-high contact; upward pitch is capped at +25° except while the ball is going out. (QA revision: the player's real body and arms face the TV, so a ±150° view left them aiming 90–130° away from their arms at contact.) The logic lives in the pure `src/render/gaze.js` and is tested against the real drills.
+- **Gaze assist:** follow the ball with a critically damped yaw/pitch (λ ≈ 6) when `settings.gazeFollow` is on. In 'turn' mode yaw is limited to ±70° while the ball is in front, and to ±30° while it is within 2.5 m (the stroke); 'mirror' and 'fixed' follow 45% of the ball's bearing within ±25° (λ 4). A ball going past the player to the glass follows `settings.glassView`:
+  - 'mirror' (default): yaw ≤ ±25° with a gentle follow; the rear-view mirror inset (§6.10) shows balls behind the eye.
+  - 'turn': an anticipatory head turn ≤ 75° toward the ball's glass impact. It starts when the ball is < 0.55 s from the eye plane and releases toward the contact from 0.38 s before the glass. The yaw target is low-passed at 7/s (14/s at the stroke) and followed by a critically damped spring (6/s), with a 150°/s cap as a last resort.
+  - 'fixed': like mirror, without the inset.
+
+  `gaze.update(..., { glassView })` returns `{ yaw, pitch, phase, rear }`; non-finite ball, eye or contact inputs are ignored. In the last 0.8 s before the predicted contact (tactical home) the view frames that contact up to 17° below centre, never tilting up past a chest-high contact; upward pitch is capped at +25° except while the ball is going out. (QA revision: the player's real body and arms face the TV, so a ±150° view left them aiming 90–130° away from their arms at contact.) The logic lives in the pure `src/render/gaze.js` and is tested against the real drills.
+- **XR integration** (`stage.app.xr`, set with `stage.setXR(x)`):
+  - `x.getHeadQuaternion()` → {x,y,z,w} | null: the head rotation since recenter, in the three.js camera convention (yaw about +Y, pitch about +X).
+  - While it returns a quaternion, the view orientation is base·head, with base = body forward (looking −z, level). The gaze assist and the mirror inset are off.
+  - `x.fov` (deg, optional) overrides the vertical fov.
+  - `x.stereo = { enabled, ipd, render(renderer, scene, camera, composer) }`: when enabled, `stage.render` calls it instead of the composer (the frame-rate stats keep updating; the mirror inset is off).
+- **Safety net:** fpCamera never applies a non-finite eye or camera pose (last good pose restored; `fpCam.safety`). `stage.render` hides, for that frame, any visible dynamic mesh whose world matrix is non-finite or singular (`safeView.matrixOk`), and skips non-finite balls. Counters: `stage.safety` = { ballHidden, rigHidden, meshesHidden, framesWithHidden, lastHidden, camera: { eyeRestored, cameraRestored }, rig: { racketRejected, segmentsHidden }, mirrorFrames } (`__vibora.stats.safety`, the `?debug=1` safety line, Copy diagnostics).
 - **Comfort:** no roll, and no bob beyond the real head motion.
 - **Orbit mode** (menus): a slow cinematic orbit around the court.
 - **Replay mode:** broadcast (behind and above the near baseline), side, and ball-cam views.
@@ -530,6 +568,20 @@ export function createEffects(scene) // -> { bounce(pos, surface, speed), glassH
 - **Drill target zones:** glowing floor rectangles with labels drawn in canvas textures.
 - **Landing marker:** a predicted bounce ring, used in Rookie/Club.
 - **Ideal contact ghost:** a soft glowing sphere at the best contact point for the current incoming ball, a training aid toggled in settings.
+
+### 6.8b Glasses (`src/xr/`, experimental)
+
+VITURE XR glasses (Beast, Luma, Pro, One) plugged into the Mac as a display. `boot.js installGlasses({ stage, settings, storage, uiRoot, toast, search })` (called once by main.js after the stage) → `{ glasses, sim, frame({ playing }), hud(hudState), onSessionStart(), onScreen(name), diagnostics() }`:
+- `glasses.js createGlasses()` owns its settings (localStorage `vibora.xr.v1`: `{ enabled: false, profile: 'auto', headTracking: true, stereo: 'off', layout: 'auto', ipdMm: 63, compactHud: true, autoRecenter: true, autoConnect: true, stereoPost: true }`; not in the app settings store, the panel owns the controls) and exposes the stage's `app.xr` object: `getHeadQuaternion()`, `fov` (true-scale profile: 32.7° × 50.3° from the 58° diagonal at 16:10), `stereo`, `eyeOffset` (the true eye position while head tracking), `hud`, `headTracking`. `stage.setXR(glasses.active)` follows every change.
+- `viture.js createVitureDriver()`: WebHID (Chrome / Edge; vendor 0x35CA), tries the V2 pose stream (0x7308) then the legacy IMU stream, axis remap + flips (persisted under `vibora.xr.viture.v1`), recentre (yaw / full), prediction ≤ 20 ms, stall and unplug / replug handling, diagnostics.
+- `stereo.js`: side-by-side full (3840 × 1200) or half, per-eye cameras ±IPD/2 (63 mm), optional post-processing per eye, shadows rendered once, an in-world HUD drawn per eye (`hudText.js`). Only during play (menus are DOM and cannot be drawn per eye).
+- `panel.js` (Settings and Help, mounted by `onScreen`; `data-xr-*` controls the UI's binders ignore), `axis.js` (guided axis test), `display.js` (field of view, layouts), `protocol.js` (packet formats), `quat.js`, `sim.js` (simulated glasses for `?xrsim=1|legacy`), `styles.js` (CSS: `xr-glasses`, `xr-compact`, `xr-stereo` classes on `<html>`).
+- Keys: C (no modifiers) or Home recentre while head tracking runs (capture phase, stopped so the UI's C picture-in-picture toggle does not also fire; Shift+C still toggles it; Home is ignored in sliders and text fields). Every drill / rally / match start recentres (`autoRecenter`).
+- URL flags: `?glasses=1` (glasses mode for this visit), `?stereo=1`, `?xrsim=1|legacy`.
+
+### 6.10 `rearView.js`: rear-view mirror
+
+`createRearView(app)` → { update(dt, { want, eye, ball }), render(hidden[]), rect(), camera, opacity, visible, stats }. A second camera at the eye looking back (92° horizontal fov, aimed toward the ball), rendered into a half-float target at 0.75× the inset's resolution with no post-processing and the shadow maps reused. Drawn top centre at 30% of the width (`REAR_VIEW` TOP 0.02, WIDTH 0.3, ASPECT 2.4; the HUD's `--rear-view-bottom: calc(2vh + 12.5vw)` in `styles/app.css` must stay in step), rounded, mirrored left/right, with ACES + sRGB applied. Fades in over 0.12 s, holds for at least 0.5 s, fades out over 0.3 s; the hold is released once the returning ball is back at the eye plane (≤ 0.1 m behind the eye, moving toward the net at > 1 m/s) and the inset then fades in 0.15 s, so it is gone at the moment to swing off the glass (the contact is only ~0.25 m in front of the eye). Wanted in the first-person view with `glassView` 'mirror' while the ball is behind the eye, never with head tracking or stereo. The mirror camera has `userData.isMirror = true`. While it is visible the HUD's off-screen ball arrow is hidden.
 
 ## 7. Audio (`src/audio/`)
 
@@ -562,7 +614,7 @@ A **10-foot TV interface**. It is readable from 3 m: base size `clamp(18px, 1.6v
 // ui/ui.js
 export function createUI(root, handlers) // -> UIApi
 UIApi = { show(screen, data), hud(HudState), shotCard(ShotRecord & result), banner(text, kind), toast(text), results(summary), setLoading(p, text), setCameraPreview(videoEl|null), setSkeleton(PoseFrame|null), setCursor({x,y,visible,progress}), calibration(status /* + needsLatencyTest */), settings(current), setInstall({ kind: 'prompt'|'chrome'|'safari'|'installed'|'done'|'none', onInstall }), updateReady(onRestart) }
-handlers = { onStartDrill(id), onStartRally(level), onStartMatch(level), onCalibrate(), onCameraSelect(deviceId, presetKey), onSettings(patch), onPause(), onResume(), onQuit(), onRestart(), onReplay(), onUseFallbackControls() }
+handlers = { onStartDrill(id), onStartRally(level), onStartMatch(level), onCalibrate(), onCameraSelect(deviceId, presetKey), onSettings(patch), onPause(), onResume(), onQuit(), onRestart(), onReplay(), onUseFallbackControls(), onScreen?(name, data), onDiagnostics?() }
 // ui/cursor.js
 export function createHandCursor({ root, ui, onPause, isLive /* () => boolean: ball in play, pause gesture ignored */ }) // -> { update(sample /*BodySample*/, screenRect), click handling: dispatches synthetic click on dwell, setEnabled(b), setLiveGate(fn) }
 // ui/charts.js
@@ -582,6 +634,7 @@ export function strokeBars(el, byStroke)
 - `hub`: drill cards grouped by skill, with stars and bests; Rally with Coach; Match; Settings; Help.
 - `drill-intro`: the coaching focus, a picture made of simple court diagrams (canvas), and "Raise your racket to start".
 - `play`: the HUD.
+  - Top-centre (under the rear-view mirror): the last miss reason and a timing meter (round 3).
   - Top-left: drill name and reps (e.g. "7 / 20").
   - Top-right: points and streak.
   - Bottom-center: the last-shot card with stroke, km/h, rpm, net clearance and timing chips (early/good/late).
@@ -591,9 +644,12 @@ export function strokeBars(el, byStroke)
 - `pause`: raise both hands above your head for 2 s, or press Esc. The gesture is ignored while a ball is live (`createHandCursor({ ..., isLive })`, QA2: overhead preparation held the old 1.5 s gesture).
 - `results`: stars, points, a landing map, stroke bars, three coaching tips, and buttons for retry, next drill and hub.
 - `settings`:
-  - Assist (Pro/Club/Rookie), predictive hitting (`hitPrediction`), movement gains, field of view, gaze follow, latency, off-axis arm correction (`offAxisYaw`, experimental, off).
+  - Assist (Pro/Club/Rookie), hitting (`hitMode`: 'auto' | 'timing' | 'physical', labelled Auto / Timing / Contact), predictive hitting (`hitPrediction`), movement gains, field of view, gaze follow, balls behind you (`glassView`: 'mirror' | 'turn' | 'fixed'), latency, off-axis arm correction (`offAxisYaw`, experimental, off).
+  - Ball & aids: ball visibility (`ballVisibility`: 'realistic' | 'enhanced' | 'max'), learning slow motion off the glass (`learningSlowmo`: 'auto' (Rookie) | 'on' | 'off'), timing tick on every ball (`timingTick`), landing marker, contact ghost, ball halo.
+  - VITURE glasses (§6.8b): the glasses panel, mounted by `installGlasses().onScreen`.
+  - **Copy diagnostics** (also on Pause, and D on the pause screen): `handlers.onDiagnostics()` returns `app/diagnostics.js buildDiagnostics({ world, settings, tracking: { camera, stats }, calibration, pwa, stats, params, env: browserEnv(), glasses, safety, robust })` (setup, settings, hitting windows, per-drill hits / misses, the last 40 swings, glasses status, safety-net counters, tracker guards); `copyText` copies it, or a selectable text box opens when the clipboard refuses.
   - Handedness, height, skin tone and racket color.
-  - Graphics quality, landing marker, contact ghost, ball halo.
+  - Graphics quality.
   - Voice coach EN/ES, and volumes.
 - `help`: how to set up the Mac, TV and camera, and how each stroke is read.
 
@@ -624,15 +680,20 @@ export function createFallbackControls({ canvas, handed }) // -> { enabled, upda
    - `?fallback=1`: mouse controls.
    - `?speed=N` (sim seconds per real second), `?aplatency=` / `?apdelivery=` (the autopilot's display latency and capture-to-result delay), `?mode=rally|match&level=`, `?seed=`, `?attract=0`, `?mute=1`, `?quality=`, `?fov=` / `?pitch=` / `?eyeback=` / `?eyedown=`.
    - `?sw=0`: no service worker. `?source=app`: the installed app's start URL.
+   - `?assist=rookie|club|pro` (this visit only), `?approfile=human|precise`, `?apjitter=<s>`, `?apnoise=<k>` (the autopilot plays like a person through a webcam-like feed, §4.7); `?glasses=1`, `?stereo=1`, `?xrsim=1|legacy` (glasses mode, §6.8b).
 7. **App packaging:** `initPwa({ ui, isPlaying, onFullscreenExit })` (`src/app/pwa.js`) right after `createUI`: registers `./sw.js` (scope `./`, `updateViaCache: 'none'`), shows *Update ready — Restart* when a new worker waits (Restart sends `SKIP_WAITING`, the page reloads on `controllerchange`), offers *Install Víbora* from `beforeinstallprompt` (Safari: *File → Add to Dock* hint), detects installed display modes (`data-display`, `data-app="installed"` on `<html>`), and toggles full screen with **F** (Keyboard Lock keeps a short Esc for the game; leaving full screen during play pauses). Pure helpers: `displayModeOf`, `browserOf`, `installKindOf`, `isInstalledApp`.
 8. **Camera tracking options:** `createTracking({ video, onFrame, onStatus, model, cameraPreset, yawCorrection })` (`src/app/tracking.js`); `applySettings` calls `tracking.setCameraPreset(S.cameraPreset)` (capture offset, §4.8) and `tracking.setYawCorrection(S.offAxisYaw)`. `correctOffAxisYaw(frame, hfovDeg)` rotates each person's world landmarks about +y by their bearing `offAxisBearing(frame, hfovDeg)` (experimental, off by default: unverified on real footage). `captureOffsetFor(presetKey)` gives the preset's capture offset.
-9. **Test hooks** (`window.__vibora`): `stats` (incl. `speculative`: predictive-hitting counters), `freezeOn('contact'|'hit'|'strike', offset)` ('strike': the tick a predicted hit is shown), `freezeAt(t)`, `resume()`, `nextContact()`, `injectPoseFrame(frame)`, `replaySeek(dt)`, `pwa`.
+9. **Test hooks** (`window.__vibora`): `stats` (incl. `speculative`: predictive-hitting counters, `safety`: render safety net, `tracker`: side-on tracker guards, `timeRate`), `freezeOn('contact'|'hit'|'strike', offset)` ('strike': the tick a predicted hit is shown), `freezeAt(t)`, `resume()`, `nextContact()`, `injectPoseFrame(frame)`, `replaySeek(dt)`, `pwa`, `tracking`, `glasses` (glasses diagnostics), `xr` (the `installGlasses` object), `diagnostics()` (the Copy diagnostics object).
+10. **Sim clock** (`src/app/clock.js`): `createSimClock({ speed })` → { simTimeOf(ms), now(), pause(), resume(), shift(dSim), setRate(r), rate, speed, running }. `setRate` (learning slow motion: main.js calls `clock.setRate(game.timeScale())` before each frame's advance, 1 for the attract demo and after a session) re-anchors at now(); the anchors of the last ~3 s are kept so a pose frame's capture time maps with the rate of the segment it falls in.
+11. **Round 3 wiring:** `createGame({ apProfile, apJitter, apNoise })` from `?approfile=` / `?apjitter=` / `?apnoise=`; results carry `misses`; the 10 Hz HUD block hides `ballIndicator` while `stage.rearView.visible`, then feeds `xrBoot.hud(h)`; `frame()` calls `xrBoot.frame({ playing })` before `syncWorld`; `startGame` calls `xrBoot.onSessionStart()`; `handlers.onScreen` calls `xrBoot.onScreen(name)`.
 
 ## 11. Tooling
 
 - `tools/serve.mjs`: a static server for `npm start`, on port 5173. Correct MIME types for `.wasm .mjs .js .task .glb .woff2 .webmanifest`, and `Cache-Control: no-cache`.
 - `tools/smoke.mjs`: a Playwright smoke test against Chromium at `/opt/pw-browsers`, or the default. It loads `?autopilot=1&drill=fh-drive`, runs for 40 s of sim time (accelerated if supported), and asserts no console errors, ≥ 8 player hits, and ≥ 50% of reps landing in the court. It saves screenshots to `tools/out/`. It also runs a realistic Mac latency pass (`&aplatency=0.11&apdelivery=0.15`), the mouse fallback, the fake-camera calibration, the no-camera path, the `/vibora-padel/` sub-path and the installable app (`--only=pwa`): manifest and installability via the DevTools Protocol, service-worker precache, an **offline** relaunch (drill and pose model), and the *Update ready* flow.
 - **App packaging:** `manifest.webmanifest` (name, `id`/`scope` `./`, `start_url ./?source=app`, display `fullscreen` → `standalone`, landscape, icons, shortcuts); `sw.js` (versioned caches `vibora-precache-<version>` + `vibora-runtime-v1`; the precache list between its markers, with a content hash per file, is generated by `node tools/precache.mjs --write` and refreshed by the deploy workflow; network first for pages, `src/`, `styles/`, the manifest; cache first for `vendor/`, `models/`, `assets/`, `fonts/`, `icons/`; same-origin GET requests in scope only; messages `SKIP_WAITING`, `CACHE_URLS`, `STATUS`); `icons/` (original artwork, generated by `node tools/icons.mjs`).
+- `tools/blackscreen.mjs`: a browser check that a degenerate mesh and side-on MediaPipe corruptions never black out the picture (smoke stage `--only=blackscreen`).
+- `dev/xr-shot.mjs` (stereo eye order, layouts, head sweep on `dev/xr.html`) and `dev/xr-app-shot.mjs` (the real app with simulated glasses via `?xrsim=1&stereo=1`, and the Settings / Help panels); smoke stage `--only=xr` runs `xr-shot --only=full` and `xr-app-shot --only=stereo`.
 - `package.json` scripts: `start`, `test` (`node --test tests/`), `smoke`.
 - `.github/workflows/pages.yml`: run `npm test`, refresh the precache list (`node tools/precache.mjs --write`), check the key app files, and deploy the repo root to GitHub Pages.
 - `README.md`: the Mac + TV + camera setup, controls, drills, troubleshooting, and the physics notes with sources of the constants.

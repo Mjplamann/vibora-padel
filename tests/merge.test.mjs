@@ -40,7 +40,9 @@ describe('settings shapes', () => {
 describe('assist magnet plans like the tactical home (game/intercept.js)', () => {
   for (const drillId of ['back-glass', 'double-wall', 'fh-drive']) {
     test(`${drillId}: the magnet stance is never deeper than ${STANCE_Z_MAX} m and its contact is off the glass`, () => {
-      const S = loadSettings(null);
+      // The magnet assists physical hitting (round 3: Club's timing hits glide to the stance instead,
+      // tests/hittability.test.mjs).
+      const S = { ...loadSettings(null), hitMode: 'physical' };
       const g = createGame({ spec: { kind: 'drill', drillId }, settings: S, input: 'autopilot', startTime: 10, seed: 4, apLatency: 0.11, apDelivery: 0.15 });
       const w = g.world;
       let magnets = 0, maxZ = -Infinity, maxContactZ = -Infinity;

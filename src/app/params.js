@@ -6,15 +6,23 @@
 //   ?mode=rally|match   jump straight into a rally or match (?level=rookie|club|pro)
 //   ?fallback=1         mouse / trackpad controls (no camera)
 //   ?quality=ultra|high|balanced
+//   ?assist=rookie|club|pro   assist level for this visit (QA; Settings changes persist as usual)
 //   ?pitch=<deg>, ?fov=<deg>   override the first-person framing (testing)
 //   ?eyeback=<m>, ?eyedown=<m> viewpoint offset behind / below the tracked eyes (testing)
 //   ?attract=0          no autopilot demo behind the title screen
 //   ?seed=N             RNG seed for the session
 //   ?aplatency=<s>      display latency the autopilot plays with (default 0: it sees the true ball)
 //   ?apdelivery=<s>     capture -> pose result delay of the autopilot's synthetic camera (default 0.045)
+//   ?approfile=human|precise  how the autopilot plays (tracking/autopilot.js HUMAN_PROFILE: timing
+//                       σ 90 ms, racket position error, partial steps, 5% no-swing); default precise
+//   ?apjitter=<s>       extra random capture -> result delay (uniform 0..apjitter) of a 30 fps
+//                       webcam-like feed (app/game.js installRealisticFeed)
+//   ?apnoise=<k>        landmark noise of that feed (1 = a MacBook camera at ~2.5 m)
+//   (glasses mode reads its own flags in src/xr/boot.js: ?glasses=1, ?stereo=1, ?xrsim=1|legacy)
 
 const QUALITIES = ['ultra', 'high', 'balanced'];
 const LEVELS = ['rookie', 'club', 'pro'];
+const AP_PROFILES = ['precise', 'human'];
 
 function num(v, lo, hi, fallback = null) {
   const n = Number(v);
@@ -36,6 +44,7 @@ export function parseParams(search = '') {
     level: LEVELS.includes(q.get('level')) ? q.get('level') : 'club',
     fallback: flag('fallback'),
     quality: QUALITIES.includes(q.get('quality')) ? q.get('quality') : null,
+    assist: LEVELS.includes(q.get('assist')) ? q.get('assist') : null,
     pitch: num(q.get('pitch'), -40, 10),
     fov: num(q.get('fov'), 40, 110),
     eyeBack: num(q.get('eyeback'), -0.2, 0.4),
@@ -44,6 +53,9 @@ export function parseParams(search = '') {
     seed: num(q.get('seed'), 0, 2 ** 31, null),
     apLatency: num(q.get('aplatency'), 0, 0.3, 0),
     apDelivery: num(q.get('apdelivery'), 0, 0.3, 0.045),
+    apProfile: AP_PROFILES.includes(q.get('approfile')) ? q.get('approfile') : null,
+    apJitter: num(q.get('apjitter'), 0, 0.2, null),
+    apNoise: num(q.get('apnoise'), 0, 4, null),
     noAudio: flag('mute'),
   };
 }
