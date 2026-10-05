@@ -95,6 +95,7 @@ export const LIMBS = Object.freeze({
 export const REGION = Object.freeze({
   SKIN: 0, SHIRT: 1, TRIM: 2, SHORTS: 3, SHORTS_TRIM: 4, SOCK: 5, SHOE: 6, SOLE: 7, SHOE_ACCENT: 8,
   HAIR: 9, HEADWEAR: 10, HEADWEAR_ACCENT: 11, EYE: 12, IRIS: 13, BAND: 14, LACE: 15, PUPIL: 16,
+  BROW: 17, LASH: 18, INNER: 19, // the baked realistic athletes (tools/people/bake.mjs) add these
 });
 export const PART = Object.freeze({ BODY: 0, HEAD: 1, ARMS: 2 });
 

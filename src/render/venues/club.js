@@ -5,7 +5,9 @@
 import * as THREE from 'three';
 import { COURT } from '../../config.js';
 import { concreteTexture, panelTexture, logoTexture, CONCRETE_TILE_M, PANEL_TILE_M } from '../textures.js';
+import { RoundedBoxGeometry } from 'three/addons/geometries/RoundedBoxGeometry.js';
 import { boxAt, wallPlane, merge, tint, disposeTree, seeded, keepSet, floorAround, courtFootprints } from './common.js';
+import { detailNormal, addTriplanarDetail } from '../detailMaps.js';
 import { createCrowd, randomLook } from '../crowd.js';
 
 const HW = COURT.halfWidth;
@@ -89,6 +91,12 @@ function makeHallMaterials() {
   addCoveWash(m.wallUpper, 1);
   addCoveWash(m.wallLower, -1);
   addFloorOcclusion(m.concrete);
+  // Round 6 detail normals (render/detailMaps.js): sanded wood grain on the benches, fine grit on
+  // the polished concrete and the lower wall, so close surfaces hold texture under the reflections.
+  addTriplanarDetail(m.wood, detailNormal('grain-normal'), { scale: 2.2, strength: 0.35, key: 'grain' });
+  addTriplanarDetail(m.concrete, detailNormal('grit-normal'), { scale: 1.6, strength: 0.12, key: 'grit' });
+  addTriplanarDetail(m.wallLower, detailNormal('grit-normal'), { scale: 2.5, strength: 0.2, key: 'grit' });
+  addTriplanarDetail(m.props, detailNormal('grit-normal'), { scale: 6, strength: 0.08, key: 'grit' });
   return m;
 }
 
@@ -288,6 +296,119 @@ function buildLounge(group, mats) {
   return p;
 }
 
+/** Soft rounded box (bags, cushions): segments 1, radius r. */
+function soft(w, h, d, r, x, y, z, rotY = 0) {
+  const g = new RoundedBoxGeometry(w, h, d, 1, Math.min(r, w * 0.45, h * 0.45, d * 0.45));
+  if (rotY) g.rotateY(rotY);
+  g.translate(x, y, z);
+  return g;
+}
+
+/**
+ * Club life around the courts (round 6 set dressing, one merged draw call): racket bags, ball tubes,
+ * towels and water bottles on the benches and the floor, a ball cart by the near corner, a lounge
+ * corner with sofas and plants by the bar, acoustic wall panels and a match clock.
+ */
+function buildDressing(group, mats) {
+  const p = [];
+  const rng = seeded(4711);
+  const C = (h) => new THREE.Color(h);
+  const bagCols = [[0x16181d, 0xe8572a], [0x1d2b4a, 0xeef1f4], [0xd9f03a, 0x16181d], [0xc8263c, 0x16181d], [0xeef1f4, 0x1d2b4a]];
+  const SEAT_Y = 0.47;
+  const racketBag = (x, y, z, rotY, k) => {
+    const [a, b] = bagCols[k % bagCols.length];
+    p.push(tint(soft(0.78, 0.3, 0.32, 0.08, x, y + 0.15, z, rotY), C(a)));
+    // Contrast band and the zip strip.
+    p.push(tint(soft(0.8, 0.07, 0.33, 0.03, x, y + 0.2, z, rotY), C(b)));
+  };
+  const tube = (x, y, z, lying = false) => {
+    const t = new THREE.CylinderGeometry(0.038, 0.038, 0.24, 14);
+    const cap = new THREE.CylinderGeometry(0.04, 0.04, 0.025, 14);
+    cap.translate(0, 0.13, 0);
+    if (lying) { t.rotateZ(Math.PI / 2); cap.rotateZ(Math.PI / 2); }
+    t.translate(x, y + (lying ? 0.038 : 0.12), z);
+    cap.translate(x, y + (lying ? 0.038 : 0.12), z);
+    p.push(tint(t, C(0xd8dde2)), tint(cap, C(0xd9f03a)));
+  };
+  const bottle = (x, y, z, col) => {
+    const b = new THREE.CylinderGeometry(0.034, 0.036, 0.21, 12);
+    b.translate(x, y + 0.105, z);
+    const c = new THREE.CylinderGeometry(0.018, 0.022, 0.035, 10);
+    c.translate(x, y + 0.228, z);
+    p.push(tint(b, C(col)), tint(c, C(0x16181d)));
+  };
+  const towel = (x, z, col, side = 1) => {
+    // Folded on the seat, one end hanging over the front edge.
+    p.push(tint(boxAt(0.3, 0.018, 0.42, x, SEAT_Y + 0.009, z), C(col)));
+    p.push(tint(boxAt(0.016, 0.24, 0.42, x + side * 0.205, SEAT_Y - 0.11, z), C(col)));
+  };
+  // Benches at x = ±6.6 between the courts (seat z ±[0.5, 2.3]); people sit at a few places.
+  for (const cx of [-6.6, 6.6, -19.4, 19.4]) {
+    const s = Math.sign(cx);
+    racketBag(cx + s * 0.62, 0, -1.3 + rng() * 0.4, Math.PI / 2 + (rng() - 0.5) * 0.3, (rng() * 5) | 0);
+    tube(cx - 0.08, SEAT_Y, cx < 0 ? 2.05 : -0.75);
+    tube(cx + 0.06, SEAT_Y, cx < 0 ? 2.12 : -0.68, true);
+    bottle(cx + s * 0.35, 0, 0.35 + rng() * 0.2, 0x2a8fd8);
+    bottle(cx + s * 0.4, 0, 0.55 + rng() * 0.2, 0xeef1f4);
+    towel(cx, cx < 0 ? 1.65 : -2.0, [0xeef1f4, 0xe8572a, 0x5fd8ff][(rng() * 3) | 0], -s);
+  }
+  // Floor kit by the near-right corner, outside the court: bags, a ball cart, a tube pile.
+  racketBag(6.0, 0, 11.0, 0.3, 0);
+  racketBag(6.15, 0, 11.6, -0.2, 2);
+  {
+    const cx = -6.2, cz = 11.2;
+    for (const [dx, dz] of [[-0.22, -0.22], [0.22, -0.22], [-0.22, 0.22], [0.22, 0.22]]) {
+      p.push(tint(new THREE.CylinderGeometry(0.012, 0.012, 0.95, 6).translate(cx + dx, 0.475, cz + dz), C(0x9aa0a8)));
+    }
+    const basket = new THREE.CylinderGeometry(0.3, 0.26, 0.42, 16, 1, true);
+    basket.translate(cx, 0.78, cz);
+    p.push(tint(basket, C(0x2b2f36)));
+    // Ball heap in the basket.
+    for (let i = 0; i < 26; i++) {
+      const b = new THREE.SphereGeometry(0.033, 8, 6);
+      const a = rng() * Math.PI * 2, r = Math.sqrt(rng()) * 0.24;
+      b.translate(cx + Math.cos(a) * r, 0.92 + rng() * 0.08, cz + Math.sin(a) * r);
+      p.push(tint(b, C(0xd9f03a)));
+    }
+    for (let i = 0; i < 4; i++) tube(cx + 0.6 + i * 0.09, 0, cz - 0.4, i % 2 === 1);
+  }
+  // Lounge corner beside the bar: two sofas, a low table, plants.
+  const z0 = HALL.zMin;
+  for (const [x, rot] of [[-7.4, 0], [7.4, 0]]) {
+    p.push(tint(soft(2.2, 0.42, 0.9, 0.12, x, 0.21, z0 + 3.4, rot), C(0x2b2f36)));
+    p.push(tint(soft(2.2, 0.5, 0.22, 0.1, x, 0.6, z0 + 3.0, rot), C(0x2b2f36)));
+    for (const dx of [-0.55, 0.55]) p.push(tint(soft(1.0, 0.12, 0.7, 0.05, x + dx, 0.47, z0 + 3.45, rot), C(0x3b4250)));
+    p.push(tint(soft(1.1, 0.06, 0.6, 0.02, x, 0.38, z0 + 4.5), C(0x6b4a32)));
+    for (const dx of [-1.6, 1.6]) {
+      const pot = new THREE.CylinderGeometry(0.22, 0.17, 0.45, 16);
+      pot.translate(x + dx, 0.225, z0 + 3.0);
+      p.push(tint(pot, C(0xd9d4cc)));
+      for (let k = 0; k < 9; k++) {
+        const leaf = new THREE.IcosahedronGeometry(0.16 + rng() * 0.08, 0);
+        leaf.translate(x + dx + (rng() - 0.5) * 0.35, 0.65 + rng() * 0.75, z0 + 3.0 + (rng() - 0.5) * 0.35);
+        p.push(tint(leaf, C(rng() < 0.5 ? 0x2f5a2a : 0x3c6e33)));
+      }
+    }
+  }
+  // Acoustic felt panels on the long walls (club colours, muted) and a match clock on the far wall.
+  const panelCols = [0x16203a, 0x22262c, 0x16203a, 0x2a2220];
+  for (const sx of [-1, 1]) {
+    for (let z = -12; z <= 12; z += 4) {
+      p.push(tint(boxAt(0.04, 1.2, 2.4, sx * (HALL.xMax - 0.03), 4.2, z), C(panelCols[((z + 12) / 4 + (sx > 0 ? 1 : 0)) % panelCols.length])));
+    }
+  }
+  p.push(tint(boxAt(1.3, 0.5, 0.08, 7.5, 6.4, z0 + 0.06), C(0x0a0b0d)));
+  const m = new THREE.Mesh(merge(p), mats.props);
+  m.castShadow = true;
+  m.receiveShadow = true;
+  m.name = 'club-dressing';
+  group.add(m);
+  // The clock's digits: a small emissive strip (warm red LED).
+  const digits = new THREE.Mesh(boxAt(1.1, 0.28, 0.01, 7.5, 6.4, z0 + 0.105), new THREE.MeshBasicMaterial({ color: new THREE.Color(1.0, 0.18, 0.08).multiplyScalar(2.2) }));
+  digits.name = 'club-clock';
+  group.add(digits);
+}
+
 function buildLights(group, mats, q, courtXs) {
   const lights = { keys: [], fills: [], neighbors: [], hemi: null, sun: null, all: [] };
   const fixtureZ = [-8.4, -5.0, -1.7, 1.7, 5.0, 8.4];
@@ -371,7 +492,7 @@ function buildLights(group, mats, q, courtXs) {
 }
 
 /** A few club members watching: on the benches between the courts and at the lounge bar. */
-function buildSpectators(q) {
+function buildSpectators(q, haze) {
   const rng = seeded(303);
   const people = [];
   const add = (x, y, z, seated, extra = {}) => people.push({ x, y, z, seated, ...randomLook(rng), lit: 0.9, ...extra });
@@ -381,7 +502,10 @@ function buildSpectators(q) {
   add(-2.6, 0, HALL.zMin + 3.0, false, { lit: 0.75 }); add(-1.9, 0, HALL.zMin + 3.15, false, { lit: 0.75 });
   add(1.4, 0, HALL.zMin + 3.05, false, { lit: 0.75 }); add(3.3, 0, HALL.zMin + 2.95, false, { lit: 0.75 });
   add(-7.4, 0, 12.6, false); add(-6.9, 0, 12.9, false);
-  return createCrowd({ people, msaa: q.msaa > 0, name: 'club-spectators', light: 0xfff2e6, lightK: 1.25 });
+  return createCrowd({
+    people, msaa: q.msaa > 0, name: 'club-spectators', light: 0xfff2e6, lightK: 1.25,
+    keyDir: { x: 0.1, y: 1, z: 0.35 }, key: 0.75, sky: 0xc9ccd2, ground: 0x46556e, hemiK: 0.45, haze,
+  });
 }
 
 /**
@@ -394,8 +518,12 @@ export function buildClub(ctx) {
   const mats = makeHallMaterials();
   const hall = buildHall(group, mats, courtMats, courtXs);
   buildLounge(group, mats);
+  buildDressing(group, mats);
   const lights = buildLights(group, mats, q, courtXs);
-  const crowd = buildSpectators(q);
+  // A faint hall haze (lit air between the courts): depth for the far wall and the bar.
+  const haze = { color: new THREE.Color(0x30343b), density: 0.0105 };
+  if (ctx.scene) ctx.scene.fog = new THREE.FogExp2(haze.color, haze.density);
+  const crowd = buildSpectators(q, haze);
   group.add(crowd.mesh);
   return {
     group,
@@ -404,6 +532,11 @@ export function buildClub(ctx) {
     crowd,
     courts: courtXs.length,
     envIntensity: LIGHT.env,
+    // Image-based light (render/ibl.js): the warehouse panorama's strip lights, walls and concrete
+    // floor fill the hall's ambient and texture the reflections in the glass and steel.
+    ibl: { ambient: [1, 1.3], reflect: [1, 0.5] },
+    // The hall's interior for box-projected reflections in the glass (environment.js).
+    reflectBox: { min: new THREE.Vector3(HALL.xMin, -0.05, HALL.zMin), max: new THREE.Vector3(HALL.xMax, HALL.height, HALL.zMax) },
     turf: { dust: 0, wear: 1, grain: 0.1, ao: 1 },
     glass: { grease: 1, felt: 1, water: 0 },
     capture: {
@@ -419,6 +552,7 @@ export function buildClub(ctx) {
     },
     dispose() {
       crowd.dispose();
+      if (ctx.scene && ctx.scene.fog) ctx.scene.fog = null;
       disposeTree(group, { keep: keepSet(courtMats) });
     },
   };

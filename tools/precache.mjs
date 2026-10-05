@@ -19,14 +19,15 @@ export const EXTRA = [
   'index.html',
   'manifest.webmanifest',
   'styles/app.css',
+  'styles/mobile.css',
   'vendor/mediapipe/vision_bundle.mjs',
   'vendor/mediapipe/wasm/vision_wasm_internal.js',
   'vendor/mediapipe/wasm/vision_wasm_internal.wasm',
   'models/pose_landmarker_full.task',
 ];
 /** Whole directories precached as-is (relative paths). */
-const DIRS = ['src', 'fonts', 'assets/hands', 'icons'];
-const DIR_EXT = /\.(js|mjs|woff2|glb|png|svg)$/i;
+const DIRS = ['src', 'fonts', 'assets/hands', 'assets/people', 'assets/env', 'assets/tex', 'icons'];
+const DIR_EXT = /\.(js|mjs|woff2|glb|png|svg|webp|exr)$/i;
 
 const IMPORT_MAP = { three: 'vendor/three/three.module.js', 'three/addons/': 'vendor/three/addons/' };
 const IMPORT_RE = /(?:^|[;\s}])(?:import|export)\s*(?:[\w*{}\s,$]+\s*from\s*)?['"]([^'"]+)['"]|\bimport\(\s*['"]([^'"]+)['"]\s*\)/g;

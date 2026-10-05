@@ -17,13 +17,10 @@ import { createStepper } from './animation/stepper.js';
 import { STANCES } from './animation/strokes.js';
 import { envelope } from './animation/director.js';
 import { racketInHand } from './handPose.js';
-import { LIMBS } from './humanModel.js';
 import { isFiniteVec, frameOk } from './safeView.js';
 
 const clamp = (v, a, b) => (v < a ? a : v > b ? b : v);
 const SIDES = Object.freeze(['R', 'L']);
-/** Model-space distance from the pelvis (hips bone) to the shoulder midpoint. */
-const TORSO = 1.445 - LIMBS.hipY;
 /** Dissolve by height below the eye (m): gone within NEAR, solid from FAR down. */
 export const FP_BODY_FADE = Object.freeze({ near: 0.14, far: 0.24 });
 /** The chest front stays at least this far (m) behind the eye (VR-style), so looking down shows
@@ -102,7 +99,10 @@ export function createTrackedPoser(human, { keepBehindEye = false } = {}) {
     solver.setRoot(px, pz, YAW);
     const bc = player.bodyCourt;
     const j = bc && bc.joints;
-    const rs = hand === 'left' ? 'L' : 'R', os = rs === 'R' ? 'L' : 'R';
+    const rs = hand === 'left' ? 'L' : 'R';
+    // Body proportions of the current bind (the realistic athletes each have their own).
+    const limbs = solver.limbs;
+    const torso = (limbs.shoulderY || 1.445) - limbs.hipY;
 
     // ---- torso from the shoulders (and the hips when they are plausible)
     jShift = 0;
@@ -125,14 +125,14 @@ export function createTrackedPoser(human, { keepBehindEye = false } = {}) {
           stats.hipsTracked++;
         }
       }
-      const standingS = 1.445;
+      const standingS = limbs.shoulderY || 1.445;
       const drop = clamp(standingS - sc.y, -0.05, 0.6);
       const crouch = clamp(drop / 0.45, 0, 1);
       crouchS += (crouch - crouchS) * (init ? 1 - Math.exp(-12 * dt) : 1);
       const leanT = lean !== null ? clamp(lean, -0.25, 0.9) : 0.06 + 0.5 * crouchS;
       leanS += (leanT - leanS) * (init ? 1 - Math.exp(-10 * dt) : 1);
       // Pelvis under the shoulder midpoint along the lean.
-      T.hipsPos.set(sc.x - Math.sin(leanS) * TORSO * 0.6, clamp(sc.y - Math.cos(leanS) * TORSO, 0.5, LIMBS.hipY + 0.04), sc.z - Math.sin(leanS) * TORSO);
+      T.hipsPos.set(sc.x - Math.sin(leanS) * torso * 0.6, clamp(sc.y - Math.cos(leanS) * torso, 0.5, limbs.hipY + 0.04), sc.z - Math.sin(leanS) * torso);
       // First person: keep the chest front behind the eye (tracked eye-to-shoulder offsets vary).
       if (keepBehindEye && player.eye && isFiniteVec(player.eye)) {
         solver.toModel(player.eye, v);
@@ -144,7 +144,7 @@ export function createTrackedPoser(human, { keepBehindEye = false } = {}) {
       sl.z -= backShift; sr.z -= backShift;
     } else {
       crouchS += (0 - crouchS) * (1 - Math.exp(-4 * dt));
-      T.hipsPos.set(0, LIMBS.hipY - 0.04, 0);
+      T.hipsPos.set(0, limbs.hipY - 0.04, 0);
       leanS = 0.08;
     }
     jShift = backShift; // arms, hands, head and the racket move back with the torso
@@ -239,7 +239,7 @@ export function createTrackedPoser(human, { keepBehindEye = false } = {}) {
       solver.toModel(w, v);
       const L = T.leg[side];
       const heel = Math.max(0, f.pitch) * 0.075;
-      L.ankle.set(v.x, LIMBS.ankleY + f.y / human.scale + heel + jumpY * 0.85, v.z);
+      L.ankle.set(v.x, limbs.ankleY + f.y / human.scale + heel + jumpY * 0.85, v.z);
       let yaw = f.yaw - YAW;
       while (yaw > Math.PI) yaw -= 2 * Math.PI;
       while (yaw < -Math.PI) yaw += 2 * Math.PI;
@@ -247,7 +247,7 @@ export function createTrackedPoser(human, { keepBehindEye = false } = {}) {
       L.pitch = f.pitch;
       L.pole.set(Math.sin(yaw) + (side === 'R' ? -0.12 : 0.12), 0, Math.cos(yaw)).normalize();
     }
-    keepFeetReachable(T);
+    keepFeetReachable(T, limbs);
     solver.solve();
     init = true;
     return true;
@@ -277,6 +277,8 @@ export function createFirstPersonBody({ handed = 'right', height = 1.75, kit = {
   root.name = 'fp-body';
   const poser = createTrackedPoser(human, { keepBehindEye: true });
   retune();
+  // The realistic body arrives after boot: re-apply the dissolve settings to its material.
+  human.onRebuild = () => retune();
 
   /**
    * o: { visible, racket (shown), time, cue, viewDir: {x,y,z} (camera forward; the visible mesh is

@@ -18,6 +18,8 @@ import {
   RIGHT_BIND, analyzeBind, poseHand, handleInArmature, handInRacketMatrix, chainNames,
   cradleInRacketMatrix, cradleHandleInArmature, blendPoses,
 } from './handPose.js';
+import { peopleLib, onPeopleReady, requestWarmup } from './peopleAssets.js';
+import { createRealHumanMaterial, PEOPLE_MODE } from './skinnedHuman.js';
 
 const UP = new THREE.Vector3(0, 1, 0);
 const UPPER_ARM = 0.3;
@@ -110,6 +112,168 @@ function proceduralHand(handed, skinMat) {
 
 const _t1 = new THREE.Vector3();
 const _t2 = new THREE.Vector3();
+const _cTmp = new THREE.Color();
+
+/** Sweatband on the realistic forearms: limbT span (1 = wrist), knit stripe, thickness (m). */
+export const REAL_BAND = Object.freeze({ t0: 0.765, t1: 0.975, edge: 0.012, stripe: [0.846, 0.874], lift: 0.0035 });
+/** Along-the-forearm trim of the realistic arm while the upper-arm stub is not drawn: its open,
+ * flared elbow end (the bake's cut through the MakeHuman topology) never shows. */
+export const REAL_ELBOW_TRIM = 0.14;
+
+/** Band weight (0..1) of a realistic forearm vertex from its limbT. */
+export function realBandWeight(t) {
+  const B = REAL_BAND;
+  if (!(t > B.t0 - B.edge && t < B.t1 + B.edge)) return 0;
+  return THREE.MathUtils.smoothstep(t, B.t0 - B.edge, B.t0 + B.edge) * (1 - THREE.MathUtils.smoothstep(t, B.t1 - B.edge, B.t1 + B.edge));
+}
+
+/**
+ * Realistic forearm + hand (baked MakeHuman arm, render/peopleAssets.js): a skinned mesh on a
+ * WebXR-style hand skeleton (flat joints, posed by handPose.js like the GLB hands) plus elbow and
+ * mid-forearm joints. setElbow() places them each frame so the forearm reaches the tracked elbow.
+ * The terry sweatband is part of the mesh (the wrist end of the forearm lifted 3.5 mm, cloth
+ * surface: knit normal and sheen, a navy stripe) so it hugs the wrist like the opponents' bands;
+ * setColors(skin, band, stripe) recolours skin and band (vertex colours; the material stays white).
+ */
+export function realArm(lib, handed, material, body = 'male', { skin = '#c58c6a', band = '#ecebe6', stripe = '#1d2b4a' } = {}) {
+  const tpl = lib.templates[body] || lib.templates.male;
+  const side = handed === 'left' ? 'L' : 'R';
+  const data = tpl.fparm && tpl.fparm[side];
+  const src = tpl.parts[`fparm/${side}`];
+  if (!data || !src) return null;
+  const A = src.attributes;
+  const n = A.POSITION.array.length / 3;
+  const g = new THREE.BufferGeometry();
+  const nrm = Float32Array.from(A.NORMAL.array, (x) => x / 127);
+  const limbT = Float32Array.from(A._LIMBT.array, (x) => (x / 255) * 1.5);
+  // Own copy of the positions (the library's arrays are shared by every rig built from it).
+  const pos = Float32Array.from(A.POSITION.array);
+  const bw = new Float32Array(n);
+  const stripeW = new Float32Array(n);
+  for (let i = 0; i < n; i++) {
+    const w = realBandWeight(limbT[i]);
+    bw[i] = w;
+    if (w <= 0) continue;
+    const t = limbT[i];
+    stripeW[i] = THREE.MathUtils.smoothstep(t, REAL_BAND.stripe[0] - 0.004, REAL_BAND.stripe[0] + 0.004) * (1 - THREE.MathUtils.smoothstep(t, REAL_BAND.stripe[1] - 0.004, REAL_BAND.stripe[1] + 0.004));
+    for (let k = 0; k < 3; k++) pos[i * 3 + k] += nrm[i * 3 + k] * REAL_BAND.lift * w;
+  }
+  g.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+  g.setAttribute('normal', new THREE.BufferAttribute(nrm, 3));
+  g.setAttribute('uv', new THREE.BufferAttribute(Float32Array.from(A.TEXCOORD_0.array, (x) => x / 65535), 2));
+  g.setAttribute('skinIndex', new THREE.Uint16BufferAttribute(Uint16Array.from(A.JOINTS_0.array), 4));
+  g.setAttribute('skinWeight', new THREE.Float32BufferAttribute(Float32Array.from(A.WEIGHTS_0.array, (x) => x / 255), 4));
+  g.setAttribute('limbT', new THREE.BufferAttribute(limbT, 1));
+  // The realistic human material's per-vertex inputs: albedo (skin tone or band colour; the material
+  // colour is white), surface (skin: wrap + pores; band: terry cloth), the skin texture on skin
+  // only, baked occlusion.
+  const colorAttr = new THREE.BufferAttribute(new Float32Array(n * 3), 3);
+  g.setAttribute('color', colorAttr);
+  const surf = new Float32Array(n * 3);
+  const hmode = new Float32Array(n);
+  for (let i = 0; i < n; i++) {
+    const w = bw[i] > 0.5 ? 1 : 0;
+    surf[i * 3] = w ? 0.95 : 0.47;
+    surf[i * 3 + 1] = w ? 1 : 0;
+    surf[i * 3 + 2] = w ? 0 : 1;
+    hmode[i] = w ? 0 : 1;
+  }
+  g.setAttribute('surf', new THREE.BufferAttribute(surf, 3));
+  g.setAttribute('part', new THREE.BufferAttribute(new Float32Array(n), 1));
+  g.setAttribute('hmode', new THREE.BufferAttribute(hmode, 1));
+  g.setAttribute('hao', new THREE.BufferAttribute(Float32Array.from(A._AO.array, (x) => x / 255), 1));
+  const cSkin = new THREE.Color(), cBand = new THREE.Color(), cStripe = new THREE.Color(), cOut = new THREE.Color();
+  function setColors(skinC = skin, bandC = band, stripeC = stripe) {
+    skin = skinC; band = bandC; stripe = stripeC;
+    cSkin.set(skin); cBand.set(band); cStripe.set(stripe);
+    const a = colorAttr.array;
+    for (let i = 0; i < n; i++) {
+      cOut.copy(cSkin);
+      if (bw[i] > 0) cOut.lerp(_cTmp.copy(cBand).lerp(cStripe, stripeW[i]), bw[i]);
+      a[i * 3] = cOut.r; a[i * 3 + 1] = cOut.g; a[i * 3 + 2] = cOut.b;
+    }
+    colorAttr.needsUpdate = true;
+  }
+  setColors();
+  g.setIndex(new THREE.BufferAttribute(src.index, 1));
+  const names = data.joints.names;
+  const bind = {};
+  names.forEach((nm, i) => { const p = data.joints.pos[i]; bind[nm] = { pos: new THREE.Vector3(p[0], p[1], p[2]), quat: new THREE.Quaternion() }; });
+  const frame = analyzeBind(bind, handed);
+  const scene = new THREE.Group();
+  scene.matrixAutoUpdate = false;
+  scene.matrix.copy(frame.toCanon);
+  const bones = {};
+  const list = names.map((nm) => {
+    const b = new THREE.Bone();
+    b.name = nm;
+    b.position.copy(bind[nm].pos);
+    bones[nm] = b;
+    scene.add(b);
+    return b;
+  });
+  const mesh = new THREE.SkinnedMesh(g, material);
+  mesh.frustumCulled = false;
+  mesh.castShadow = true;
+  mesh.receiveShadow = true;
+  scene.add(mesh);
+  scene.updateMatrixWorld(true);
+  mesh.bind(new THREE.Skeleton(list), mesh.matrixWorld);
+  // Forearm frames (model space = armature space).
+  const E0 = bind.elbow.pos.clone(), W0 = bind.wrist.pos.clone();
+  const d0 = W0.clone().sub(E0).normalize();
+  const inv = new THREE.Matrix4();
+  const e = new THREE.Vector3(), d = new THREE.Vector3(), dW = new THREE.Vector3(), w3 = new THREE.Vector3();
+  const qE = new THREE.Quaternion(), qI = new THREE.Quaternion(), qS = new THREE.Quaternion();
+  return {
+    object: scene,
+    bind,
+    frame,
+    mesh,
+    material,
+    realistic: true,
+    setColors,
+    apply(pose) {
+      for (const [name, t] of Object.entries(pose)) {
+        const b = bones[name];
+        if (!b) continue;
+        b.position.copy(t.pos);
+        b.quaternion.copy(t.quat);
+      }
+    },
+    /**
+     * Elbow in the space of the holder's parent (the rig root): the forearm joints follow. The
+     * hand's own joints stay where the pose put them (the holder carries the hand).
+     */
+    setElbow(elbowW) {
+      const holder = scene.parent;
+      if (holder) {
+        holder.updateMatrix();
+        inv.multiplyMatrices(holder.matrix, scene.matrix).invert();
+      } else inv.copy(scene.matrix).invert();
+      e.copy(elbowW).applyMatrix4(inv);
+      w3.copy(bones.wrist.position);
+      d.subVectors(w3, e);
+      const len = d.length();
+      if (!(len > 1e-4)) return;
+      d.multiplyScalar(1 / len);
+      // The forearm turns with the hand (pronation from the pose's wrist rotation) and swings so its
+      // elbow end reaches the elbow: elbow end = swing * wrist rotation, so the two ends never differ
+      // by a twist (a twist between them wrings the forearm flat in linear blend skinning).
+      const qW = bones.wrist.quaternion;
+      dW.copy(d0).applyQuaternion(qW);
+      qS.setFromUnitVectors(dW, d);
+      qE.multiplyQuaternions(qS, qW);
+      // Skinning pivots each joint about its bind position: v' = pos + R (v - bind).
+      bones.elbow.position.copy(e);
+      bones.elbow.quaternion.copy(qE);
+      // Mid forearm: halfway between the elbow end and the hand.
+      qI.slerpQuaternions(qW, qE, 0.5);
+      bones['forearm-mid'].quaternion.copy(qI);
+      bones['forearm-mid'].position.copy(e).lerp(w3, 0.5);
+    },
+  };
+}
 
 let handsPromise = null;
 function loadHandGltfs() {
@@ -184,7 +348,7 @@ function setSegmentAlpha(arm, key, a) {
  * style). Planar depth, so a limb in a corner of the wide frustum, drawn larger than its visual
  * angle, is cut sooner.
  */
-function addNearFade(m, radius, { along = 0 } = {}) {
+function addNearFade(m, radius, { along = 0, attr = false } = {}) {
   const cut = nearCutDepths(radius);
   const near = cut.near.toFixed(4), far = cut.far.toFixed(4);
   const prev = m.onBeforeCompile;
@@ -197,9 +361,13 @@ function addNearFade(m, radius, { along = 0 } = {}) {
     let alongCode = '';
     if (along > 0) {
       shader.uniforms.uAlong = m.userData.along;
-      shader.vertexShader = shader.vertexShader
-        .replace('#include <common>', '#include <common>\nvarying float vLimbT;')
-        .replace('#include <begin_vertex>', `#include <begin_vertex>\n\tvLimbT = clamp(-position.y / ${along.toFixed(4)}, 0.0, 1.0);`);
+      shader.vertexShader = attr
+        ? shader.vertexShader
+          .replace('#include <common>', '#include <common>\nattribute float limbT;\nvarying float vLimbT;')
+          .replace('#include <begin_vertex>', '#include <begin_vertex>\n\tvLimbT = limbT;')
+        : shader.vertexShader
+          .replace('#include <common>', '#include <common>\nvarying float vLimbT;')
+          .replace('#include <begin_vertex>', `#include <begin_vertex>\n\tvLimbT = clamp(-position.y / ${along.toFixed(4)}, 0.0, 1.0);`);
       shader.fragmentShader = shader.fragmentShader.replace('#include <common>', '#include <common>\nvarying float vLimbT;\nuniform float uAlong;');
       alongCode = `\n\tgl_FragColor.a *= smoothstep(uAlong, uAlong + ${ALONG_CUT.band.toFixed(3)}, vLimbT);`;
     }
@@ -209,7 +377,7 @@ function addNearFade(m, radius, { along = 0 } = {}) {
     );
   };
   const key = m.customProgramCacheKey ? m.customProgramCacheKey.call(m) : '';
-  m.customProgramCacheKey = () => `${key}|nearcut-${near}-${far}${along > 0 ? `|alongcut-${along}` : ''}`;
+  m.customProgramCacheKey = () => `${key}|nearcut-${near}-${far}${along > 0 ? `|alongcut-${attr ? 'attr' : along}` : ''}`;
   m.transparent = true;
   return m;
 }
@@ -389,10 +557,26 @@ export function createFirstPersonRig({ handed = 'right', skinTone = '#c58c6a', s
     hands[side].apply(op.blended);
   }
 
+  // Realistic forearms + hands (baked athletes) once they are loaded; the GLB / procedural hands
+  // with lathe forearms until then (and offline without the files).
+  const realMats = { L: null, R: null };
+  function realArmFor(side) {
+    const lib = PEOPLE_MODE === 'real' ? peopleLib() : null;
+    if (!lib) return null;
+    if (!realMats[side]) {
+      // White material: skin tone and sweatband colours are the arm's vertex colours (setColors).
+      realMats[side] = addNearFade(createRealHumanMaterial(lib), ARM_RADIUS.fore, { along: 1, attr: true });
+    }
+    try {
+      return realArm(lib, sideHanded(side), realMats[side], armBody, { skin: armColors.skin, band: armColors.band, stripe: armColors.stripe });
+    } catch {
+      return null;
+    }
+  }
   function installAll() {
     for (const side of ['L', 'R']) {
-      let model = null;
-      if (gltfs) {
+      let model = realArmFor(side);
+      if (!model && gltfs) {
         try {
           const src = side === 'L' ? gltfs.left : gltfs.right;
           model = glbHand({ scene: cloneSkinned(src.scene) }, sideHanded(side), skinMat);
@@ -402,9 +586,16 @@ export function createFirstPersonRig({ handed = 'right', skinTone = '#c58c6a', s
         }
       }
       installHand(side, model || proceduralHand(sideHanded(side), skinMat));
+      arms[side].foreSkin.visible = !(model && model.realistic);
     }
   }
+  let armBody = 'male';
+  const armColors = { skin: skinTone, band: '#ecebe6', stripe: '#1d2b4a' };
   installAll();
+  if (PEOPLE_MODE === 'real') onPeopleReady(() => {
+    installAll();
+    requestWarmup(root);
+  });
 
   const ready = loadHandGltfs().then((g) => {
     gltfs = g;
@@ -700,6 +891,17 @@ export function createFirstPersonRig({ handed = 'right', skinTone = '#c58c6a', s
       arm.foreSkin.castShadow = arm.band.castShadow = arm.cut < 0.3;
       // A forearm whose hand (and racket) has been culled reads as a stump: hide it too.
       if (side === dom && rp && !holders[dom].visible) arm.fore.visible = false;
+      // Realistic arm: one skinned forearm + hand; the forearm joints reach the elbow and the cut
+      // runs along it (limbT), the hand itself is never cut by it.
+      const hm = hands[side];
+      if (hm && hm.realistic) {
+        arm.foreSkin.visible = false;
+        // The realistic forearm wears its own (mesh) sweatband.
+        arm.band.visible = false;
+        if (foreOk) hm.setElbow(elbow);
+        hm.material.userData.along.value = arm.fore.visible ? (arm.stubOn ? arm.cut : Math.max(arm.cut, REAL_ELBOW_TRIM)) : 1 + ALONG_CUT.band;
+        hm.mesh.castShadow = arm.fore.visible && arm.cut < 0.3;
+      }
     }
     void dt;
   }
@@ -723,7 +925,11 @@ export function createFirstPersonRig({ handed = 'right', skinTone = '#c58c6a', s
     ready,
     update,
     setHanded,
-    setSkin(c) { for (const m of skinMats) m.color.set(c); },
+    setSkin(c) {
+      for (const m of skinMats) m.color.set(c);
+      armColors.skin = c;
+      for (const side of ['L', 'R']) hands[side]?.setColors?.(armColors.skin, armColors.band, armColors.stripe);
+    },
     setSleeve(c) { sleeveMat.color.set(c); sleeveMat.sheenColor.set(c).lerp(new THREE.Color('#ffffff'), 0.45); },
     /**
      * Outfit (game/progression.js OUTFITS { shirt, sleeve, band }): the sleeves take the shirt / sleeve
@@ -736,9 +942,11 @@ export function createFirstPersonRig({ handed = 'right', skinTone = '#c58c6a', s
         sleeveMat.sheenColor.set(sl).lerp(new THREE.Color('#ffffff'), 0.45);
       }
       if (o.band) {
+        armColors.band = o.band;
         for (const side of ['L', 'R']) {
           const m = arms[side] && arms[side].band && arms[side].band.material;
           for (const mm of Array.isArray(m) ? m : m ? [m] : []) if (mm.color) mm.color.set(o.band);
+          hands[side]?.setColors?.(armColors.skin, armColors.band, armColors.stripe);
         }
       }
     },

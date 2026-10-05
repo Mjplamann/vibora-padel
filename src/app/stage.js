@@ -2,7 +2,7 @@
 // (or from a recorded replay frame shaped like one) every display frame.
 import * as THREE from 'three';
 import { createRenderer } from '../render/scene.js';
-import { buildEnvironment } from '../render/environment.js';
+import { buildEnvironment, preloadVenueIbl } from '../render/environment.js';
 import { createEffects } from '../render/effects.js';
 import { createBallView } from '../render/ballView.js';
 import { buildBallMachine } from '../render/machineView.js';
@@ -76,6 +76,9 @@ export async function createStage({ canvas, settings, quality, progress = () => 
   app.resize(window.innerWidth, window.innerHeight);
   await progress(0.3, 'Building the club…');
   await tick();
+  // The venue's photographed panorama (render/ibl.js, ~150-250 KB, lazily per venue) first, so the
+  // first lighting capture already includes it; a slow or failed fetch never holds the boot (3 s).
+  await preloadVenueIbl(settings.venue || 'club', 3000);
   // The environment first: it captures the hall into the PMREM reflection maps. The venue (club, sunset,
   // stadium: render/venues/*) is the free-play one from the settings; sessions may switch it (setVenue).
   const env = buildEnvironment(app.scene, app.renderer, { quality, venue: settings.venue || 'club' });
@@ -532,7 +535,11 @@ export async function createStage({ canvas, settings, quality, progress = () => 
    * already up). Court materials, actors and the rig persist across venues. Returns the venue metadata.
    */
   function setVenue(v) {
-    return env.setVenue(v);
+    const meta = env.setVenue(v);
+    // Round 6: venues choose their own tone mapping (venues/meta.js), and the mirror composite's
+    // program depends on it: build it now rather than on the first ball behind the player.
+    rearView.warm();
+    return meta;
   }
 
   // ---- render safety net ------------------------------------------------------

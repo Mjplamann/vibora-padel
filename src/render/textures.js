@@ -175,12 +175,12 @@ export const UI_FONT = '"Barlow Semi Condensed", "Arial Narrow", "Helvetica Neue
 /**
  * Blue sand-filled artificial turf tile covering TURF_TILE_M x TURF_TILE_M.
  * Tufted monofilament fibres in 3/8" gauge rows, laid with a grain, over quartz sand infill.
- * roughnessMap packs: R = sand-visible mask (1 = sand), G = roughness (three reads G).
+ * roughnessMap packs: R = sand-visible mask (1 = sand), G = roughness (three reads G), B = pile height.
  * @returns {{map: THREE.Texture, normalMap: THREE.Texture, roughnessMap: THREE.Texture, tileMeters: number}}
  */
 export function turfTextures(renderer, { size = 2048, seed = 7 } = {}) {
   const S = 2 ** Math.round(Math.log2(size)); // power of two: wrapped indexing uses a bit mask
-  return cached(`turf:${S}:${seed}`, () => {
+  return cached(`turf:${S}:${seed}:r6b`, () => {
     const k = S / 2048; // pixel scale relative to the reference resolution (0.49 mm / px)
     const rng = createRng(seed);
     const aniso = renderer?.capabilities?.getMaxAnisotropy?.() || 16;
@@ -228,7 +228,8 @@ export function turfTextures(renderer, { size = 2048, seed = 7 } = {}) {
     const tmpC = new THREE.Color();
     for (let i = 0; i < SH; i++) {
       const b = i / (SH - 1);
-      tmpC.setHSL((212 + b * 5) / 360, 0.6 + b * 0.1, 0.25 + b * 0.16, THREE.LinearSRGBColorSpace); // plain HSL->RGB, no transfer
+      // Round 6: a deeper, more saturated court blue (with image-based fill the old palette read pastel).
+      tmpC.setHSL((213 + b * 5) / 360, 0.7 + b * 0.08, 0.21 + b * 0.14, THREE.LinearSRGBColorSpace); // plain HSL->RGB, no transfer
       pal.push([tmpC.r * 255, tmpC.g * 255, tmpC.b * 255]);
     }
     const mask = S - 1; // S is a power of two
@@ -269,10 +270,15 @@ export function turfTextures(renderer, { size = 2048, seed = 7 } = {}) {
       }
     };
     const width = Math.max(1.2, 2.3 * k);
-    for (let y0 = 0; y0 < S - 1e-6; y0 += gauge) {
-      for (let x0 = rng() * stitch; x0 < S; x0 += stitch * (0.8 + rng() * 0.4)) {
-        const cx = x0 + (rng() - 0.5) * 3 * k;
-        const cy = y0 + (rng() - 0.5) * gauge * 0.7; // break up the tuft rows (no corduroy)
+    for (let x0 = 0; x0 < S - 1e-6; x0 += gauge) {
+      // Round 6: the tuft rows run along v (down the court, the roll's machine direction, as on a
+      // real court) instead of across it, wander (whole cycles per tile, so it still tiles) and
+      // scatter by a full gauge. Rows across the view direction are foreshortened to a few pixels
+      // at standing distance and beat against the pixel grid as horizontal scanlines.
+      const ph = rng() * Math.PI * 2, amp = gauge * (0.2 + rng() * 0.2), cyc = 2 + ((rng() * 3) | 0);
+      for (let y0 = rng() * stitch; y0 < S; y0 += stitch * (0.8 + rng() * 0.4)) {
+        const cy = y0 + (rng() - 0.5) * 3 * k;
+        const cx = x0 + Math.sin((y0 / S) * Math.PI * 2 * cyc + ph) * amp + (rng() - 0.5) * gauge * 0.8;
         const cl = clumpAt(cx, cy);
         const lean = Math.PI * 0.5 + (cl - 0.5) * 1.6; // grain direction (+v), wandering by clumps
         const n = 6 + ((rng() * 4) | 0);
@@ -286,6 +292,8 @@ export function turfTextures(renderer, { size = 2048, seed = 7 } = {}) {
     }
 
     const normalBytes = heightToNormal(height, S, S, 1.6 / k);
+    // B: pile height (sand ~0.2, fibre tips ~0.9), read by the near-field fibre shells.
+    for (let i = 0; i < S * S; i++) rough[i * 4 + 2] = clamp(height[i] * 255, 0, 255);
     const map = dataTextureFromRGBA(color, S, S, { srgb: true, aniso });
     const normalMap = dataTextureFromRGBA(normalBytes, S, S, { aniso });
     const roughnessMap = dataTextureFromRGBA(rough, S, S, { aniso });

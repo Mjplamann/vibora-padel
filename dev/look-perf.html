@@ -1,0 +1,69 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Víbora Padel — venue perf</title>
+<script type="importmap">{"imports":{"three":"../vendor/three/three.module.js","three/addons/":"../vendor/three/addons/"}}</script>
+<style>html, body { margin: 0; height: 100%; background: #000; overflow: hidden; } canvas { display: block; width: 100vw; height: 100vh; }</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<script type="module">
+// Minimal before/after perf probe (round 6 look): only APIs that every round-4+ checkout has
+// (createRenderer, buildEnvironment), so the same page can be dropped into an older snapshot.
+// window.shot(view) renders a first-person view; window.perf(n) times n frames, each followed by a
+// 1-pixel readPixels (GPU sync): median ms is a fill-rate / shading proxy on the software rasteriser.
+import * as THREE from 'three';
+import { createRenderer } from '../src/render/scene.js';
+import * as envMod from '../src/render/environment.js';
+
+const qs = new URLSearchParams(location.search);
+const venue = qs.get('venue') || 'club';
+const quality = qs.get('quality') || 'high';
+if (envMod.preloadVenueIbl) await envMod.preloadVenueIbl(venue);
+const app = createRenderer(document.getElementById('c'), { quality, dynamicResolution: false });
+app.resize(innerWidth, innerHeight);
+const env = envMod.buildEnvironment(app.scene, app.renderer, { quality, venue });
+const cam = app.camera;
+const views = { baseline: [2.3, 8.3, 0, -14], net: [1.2, 2.6, 0, -10] };
+function setView(name) {
+  const [x, z, yaw, pitch] = views[name] || views.baseline;
+  cam.fov = 74;
+  cam.position.set(x, 1.64, z);
+  cam.rotation.order = 'YXZ';
+  cam.rotation.set(THREE.MathUtils.degToRad(pitch), THREE.MathUtils.degToRad(yaw), 0);
+  cam.updateProjectionMatrix();
+  cam.updateMatrixWorld();
+}
+for (let i = 0; i < 60; i++) env.update?.(1 / 30, cam);
+window.shot = (name) => {
+  setView(name);
+  app.render(1 / 60);
+  app.render(1 / 60);
+  return { venue, view: name, drawCalls: app.stats.drawCalls, triangles: app.stats.triangles };
+};
+window.perf = (n = 5) => {
+  const gl = app.renderer.getContext();
+  const px = new Uint8Array(4);
+  const ms = [];
+  for (let i = 0; i < n; i++) {
+    const a = performance.now();
+    app.render(1 / 60);
+    gl.readPixels(0, 0, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, px);
+    ms.push(performance.now() - a);
+  }
+  ms.sort((x, y) => x - y);
+  return { venue, medianMs: Math.round(ms[n >> 1]), drawCalls: app.stats.drawCalls, triangles: app.stats.triangles,
+    programs: app.renderer.info.programs.length, textures: app.renderer.info.memory.textures };
+};
+setView('baseline');
+let n = 0;
+(function frame() {
+  app.render(1 / 60);
+  if (++n === 2) window.__ready = true;
+  else requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>

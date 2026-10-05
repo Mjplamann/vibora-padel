@@ -27,7 +27,7 @@ test('manifest: app identity, sub-path-safe URLs, display and colours', async ()
   assert.equal(m.id, './');
   assert.equal(m.display, 'fullscreen');
   assert.deepEqual(m.display_override, ['fullscreen', 'standalone']);
-  assert.equal(m.orientation, 'landscape');
+  assert.equal(m.orientation, 'any'); // portrait allowed on phones (swipe mode shows a rotate hint)
   assert.deepEqual(m.categories, ['sports', 'games', 'health']);
   assert.ok(m.description.length > 20);
   for (const k of ['background_color', 'theme_color']) assert.match(m[k], /^#[0-9a-f]{6}$/i);

@@ -8,9 +8,9 @@
 //       with a ball, looking at the ball, and an optional real racket path (instant replay).
 // No allocation per frame: every temporary is preallocated here.
 import * as THREE from 'three';
-import { BONES, LIMBS } from '../humanModel.js';
+import { BONES, LIMBS, handBindBasis } from '../humanModel.js';
 import { racketInHand, cradleInRacketMatrix } from '../handPose.js';
-import { STROKES, sampleStroke, strokeSample, readySample, strokeFamily, STANCES } from './strokes.js';
+import { STROKES, sampleStroke, strokeSample, readySample, strokeFamily, STANCES, contactPhase } from './strokes.js';
 import { createStepper } from './stepper.js';
 import { envelope } from './director.js';
 
@@ -33,10 +33,7 @@ const SCALARS = Object.freeze(['turn', 'hip', 'crouch', 'lean', 'jump']);
 export function createPoseSolver(human) {
   const n = BONES.length;
   const parent = BONES.map((b) => b.parent);
-  const offset = BONES.map((b) => {
-    const p = b.parent >= 0 ? BONES[b.parent].pos : [0, 0, 0];
-    return new THREE.Vector3(b.pos[0] - p[0], b.pos[1] - p[1], b.pos[2] - p[2]);
-  });
+  const offset = BONES.map(() => new THREE.Vector3());
   const mPos = BONES.map(() => new THREE.Vector3());
   const mQuat = BONES.map(() => new THREE.Quaternion());
   const boneObj = BONES.map((b) => human.bones[b.name]);
@@ -56,21 +53,51 @@ export function createPoseSolver(human) {
     return out.setFromRotationMatrix(m4);
   }
   const FWD = new THREE.Vector3(0, 0, 1);
-  const childDir = (name, child) => {
-    const a = BONES[B[name]].pos, b = BONES[B[child]].pos;
-    return new THREE.Vector3(b[0] - a[0], b[1] - a[1], b[2] - a[2]).normalize();
-  };
-  const AIMED = {
-    upperArmR: childDir('upperArmR', 'foreArmR'), foreArmR: childDir('foreArmR', 'handR'),
-    upperArmL: childDir('upperArmL', 'foreArmL'), foreArmL: childDir('foreArmL', 'handL'),
-    thighR: childDir('thighR', 'shinR'), shinR: childDir('shinR', 'footR'),
-    thighL: childDir('thighL', 'shinL'), shinL: childDir('shinL', 'footL'),
-  };
-  for (const [name, d] of Object.entries(AIMED)) {
-    basisQuat(d, FWD, bindInv[B[name]]);
-    bindInv[B[name]].invert();
+  const handBindInv = { R: new THREE.Quaternion(), L: new THREE.Quaternion() };
+  /** Limb lengths and heights of the current bind (model metres). */
+  const limbs = { ...LIMBS, hipX: 0.09, shoulderY: 1.445 };
+  let bindVersion = null;
+  const DEFAULT_POS = BONES.map((b) => b.pos);
+  const _d = new THREE.Vector3(), _e = new THREE.Vector3(), _f = new THREE.Vector3();
+  /**
+   * Bind data (offsets, aimed-bone bind bases, hand frames, limb lengths) from human.bind (the
+   * realistic athletes each have their own skeleton) or the procedural BONES / LIMBS.
+   */
+  function rebind() {
+    const b = human.bind || null;
+    bindVersion = b ? b.version : 0;
+    const pos = b ? b.positions : DEFAULT_POS;
+    BONES.forEach((bone, i) => {
+      const p = pos[i];
+      const pp = bone.parent >= 0 ? pos[bone.parent] : [0, 0, 0];
+      offset[i].set(p[0] - pp[0], p[1] - pp[1], p[2] - pp[2]);
+    });
+    const P = (name) => pos[B[name]];
+    const dir = (a, c, out) => out.set(P(c)[0] - P(a)[0], P(c)[1] - P(a)[1], P(c)[2] - P(a)[2]).normalize();
+    for (const S of SIDES) {
+      // Upper arm: secondary = the bind elbow bend (the forearm's direction across the upper arm),
+      // as solveArm aims it; a straight bind arm falls back to forward.
+      dir(`upperArm${S}`, `foreArm${S}`, _d);
+      dir(`foreArm${S}`, `hand${S}`, _e);
+      _f.copy(_e).addScaledVector(_d, -_e.dot(_d));
+      if (_f.lengthSq() < 0.02) _f.copy(FWD);
+      basisQuat(_d, _f, bindInv[B[`upperArm${S}`]]).invert();
+      // Forearm: secondary = the thumb side of the bind hand (solveArm twists the forearm by it).
+      const hb = b ? b.handBasis[S] : handBindBasis(S);
+      _f.set(hb.X[0], hb.X[1], hb.X[2]);
+      if (S === 'L') _f.negate();
+      if (!b) _f.copy(FWD);
+      basisQuat(_e, _f, bindInv[B[`foreArm${S}`]]).invert();
+      dir(`thigh${S}`, `shin${S}`, _d);
+      basisQuat(_d, FWD, bindInv[B[`thigh${S}`]]).invert();
+      dir(`shin${S}`, `foot${S}`, _d);
+      basisQuat(_d, FWD, bindInv[B[`shin${S}`]]).invert();
+    }
+    handBindInv.R.copy(human.handQuat.R).invert();
+    handBindInv.L.copy(human.handQuat.L).invert();
+    Object.assign(limbs, LIMBS, { hipX: 0.09, shoulderY: 1.445 }, b && b.limbs ? b.limbs : {});
   }
-  const handBindInv = { R: human.handQuat.R.clone().invert(), L: human.handQuat.L.clone().invert() };
+  rebind();
 
   /** Pose targets (model space, metres of the 1.80 m model; the rig scale maps to the person). */
   const T = {
@@ -137,7 +164,7 @@ export function createPoseSolver(human) {
       return;
     }
     const S = mPos[u];
-    twoBone(S, A.wrist, LIMBS.upperArm, LIMBS.foreArm, A.pole, elbow);
+    twoBone(S, A.wrist, limbs.upperArm, limbs.foreArm, A.pole, elbow);
     // Upper arm: toward the elbow; secondary = the side the forearm bends to.
     vC.subVectors(elbow, S);
     vD.subVectors(A.wrist, elbow);
@@ -148,8 +175,8 @@ export function createPoseSolver(human) {
     // Forearm: toward the (reachable) wrist; twist follows the hand's thumb side.
     wristReach.copy(A.wrist).sub(mPos[f]);
     const l = wristReach.length();
-    if (l > 1e-6) wristReach.multiplyScalar(LIMBS.foreArm / l);
-    else wristReach.set(0, -LIMBS.foreArm, 0);
+    if (l > 1e-6) wristReach.multiplyScalar(limbs.foreArm / l);
+    else wristReach.set(0, -limbs.foreArm, 0);
     thumb.set(1, 0, 0).applyQuaternion(A.hand);
     if (side === 'L') thumb.negate();
     aim(f, wristReach, thumb);
@@ -162,7 +189,7 @@ export function createPoseSolver(human) {
     const th = B[`thigh${side}`], sh = B[`shin${side}`], ft = B[`foot${side}`], to = B[`toe${side}`];
     fk(th);
     const H = mPos[th];
-    twoBone(H, L.ankle, LIMBS.thigh, LIMBS.shin, L.pole, knee);
+    twoBone(H, L.ankle, limbs.thigh, limbs.shin, L.pole, knee);
     vC.subVectors(knee, H);
     aim(th, vC, L.pole);
     fk(sh);
@@ -178,6 +205,7 @@ export function createPoseSolver(human) {
 
   const headDir = new THREE.Vector3();
   function solve() {
+    if ((human.bind ? human.bind.version : 0) !== bindVersion) rebind();
     // Root, pelvis, spine, chest.
     mQuat[0].identity();
     mPos[0].set(0, 0, 0);
@@ -212,7 +240,7 @@ export function createPoseSolver(human) {
       const A = T.arm[side];
       if (A.on) {
         vC.subVectors(A.wrist, mPos[u]);
-        const reach = (LIMBS.upperArm + LIMBS.foreArm) * 0.985;
+        const reach = (limbs.upperArm + limbs.foreArm) * 0.985;
         const excess = vC.length() - reach;
         if (excess > 0) {
           vD.subVectors(mPos[u], mPos[c]); // clavicle -> shoulder
@@ -262,7 +290,7 @@ export function createPoseSolver(human) {
     return out.copy(p).multiplyScalar(human.scale).applyQuaternion(human.root.quaternion).add(rootPos);
   }
 
-  return { T, solve, mPos, mQuat, B, setRoot, toModel, dirToModel, modelToWorld, basisQuat, fk };
+  return { T, solve, mPos, mQuat, B, setRoot, toModel, dirToModel, modelToWorld, basisQuat, fk, limbs, rebind, get bodyScale() { return human.bind && human.bind.bodyScale ? human.bind.bodyScale : 1; } };
 }
 
 // ------------------------------------------------------------------ actor animator
@@ -294,6 +322,10 @@ export function createActorAnimator(human) {
   let splitDone = -Infinity;
   let initialized = false;
   let lastStroke = null, lastPhase = 0, lateStart = -Infinity;
+  let alertS = 1; // 1: athletic ready stance (ball in play), 0: relaxed between points
+  let shiftS = 0; // weight shift along the stroke (-1 back foot .. 1 front foot)
+  let heelS = 0; // back-heel lift through the follow-through (rad)
+  const phaseOff = (hashPhase(human) % 1000) / 1000 * 6.283; // idle rhythms differ per person
 
   // Ball for the serve routine.
   const ball = new THREE.Mesh(new THREE.SphereGeometry(0.033, 14, 10), new THREE.MeshStandardMaterial({ color: '#d8f03c', roughness: 0.75, emissive: '#2a3005' }));
@@ -420,8 +452,23 @@ export function createActorAnimator(human) {
       // over ~0.2 s instead of snapping to the contact pose.
       if (stroke !== lastStroke || phase < lastPhase - 0.05) lateStart = phase > 0.25 ? time : -Infinity;
       lam = time - lateStart < 0.22 ? 16 : 40;
+      alertS = 1;
     } else {
       readySample(tgt);
+      // Between points (no ball in play) the athlete relaxes: upright, racket low at the side, the
+      // free hand loose; with the ball in play, the athletic ready stance.
+      const alert = ctx.ball ? 1 : 0;
+      alertS += (alert - alertS) * (initialized ? 1 - Math.exp(-(alert ? 6 : 1.5) * dt) : 1);
+      const rel = 1 - alertS;
+      if (rel > 0.001) {
+        toward(tgt.g, 0.24, 0.9, 0.2, rel);
+        toward(tgt.a, 0.1, 0.32, 0.94, rel);
+        toward(tgt.n, -0.96, 0.12, 0.15, rel);
+        tgt.offThroat *= 1 - rel;
+        toward(tgt.off, -0.24, 0.86 + 0.015 * Math.sin(time * 0.9 + phaseOff), 0.06, rel);
+        tgt.crouch += (0.18 - tgt.crouch) * rel;
+        tgt.lean += (0.03 - tgt.lean) * rel;
+      }
       if (speed > 0.6) {
         // Running: racket carried up at the side, the off arm swings with the stride.
         const r = clamp((speed - 0.6) / 2.4, 0, 1);
@@ -487,6 +534,19 @@ export function createActorAnimator(human) {
     footYaw.R = (mir > 0 ? -0.18 : 0.12) - (fam === 'fh' || fam === 'oh' || fam === 'serve' ? 0.5 * mir : 0) + (fam === 'bh' ? 0.4 * mir : 0);
     footYaw.L = (mir > 0 ? 0.12 : -0.18) - (fam === 'bh' ? 0.5 * -mir : 0);
     if (fam === 'ready' || fam === 'split' || fam === 'run') { footYaw.R = -0.12; footYaw.L = 0.12; }
+    // Weight transfer through a stroke: back foot in the backswing, onto the front foot through
+    // the contact, the back heel rising on the follow-through (ground strokes, overheads, serve).
+    let shiftT = 0, heelT = 0;
+    if (stroke) {
+      const ph = clamp(phase, 0, 1), cp = contactPhase(stroke);
+      const big = fam === 'fh' || fam === 'bh' || fam === 'oh' || fam === 'serve' || fam === 'low';
+      const amp = big ? 1 : 0.5;
+      shiftT = amp * (ph < cp * 0.55 ? -0.6 * smoothstep(0, cp * 0.55, ph) : ph < cp + 0.07 ? -0.6 + 1.6 * smoothstep(cp * 0.55, cp + 0.07, ph) : 1 - 0.5 * smoothstep(cp + 0.07, 1, ph));
+      if (big) heelT = 0.5 * smoothstep(cp - 0.04, cp + 0.14, ph) * (1 - smoothstep(0.86, 1, ph));
+    }
+    const kS = initialized ? 1 - Math.exp(-18 * dt) : 1;
+    shiftS += (shiftT - shiftS) * kS;
+    heelS += (heelT - heelS) * kS;
     if (!initialized) {
       stepper.reset(px, pz, yawS + runTurn, stance);
     }
@@ -496,20 +556,32 @@ export function createActorAnimator(human) {
 
     // ---- solve
     solver.setRoot(px, pz, yawS);
-    const crouchDrop = cur.crouch * 0.13 + Math.max(0, st.stride - 0.55) * 0.12;
-    T.hipsPos.set(-st.sway * 0.5, LIMBS.hipY - crouchDrop + st.bob + st.hopY + cur.jump, -0.02 - cur.lean * 0.05);
+    const limbs = solver.limbs;
+    const bs = solver.bodyScale; // stroke targets are authored for a 1.80 m body
+    const crouchDrop = (cur.crouch * 0.13 + Math.max(0, st.stride - 0.55) * 0.12) * bs;
+    T.hipsPos.set(-st.sway * 0.5 * bs, limbs.hipY - crouchDrop + (st.bob + st.hopY) * bs + cur.jump * bs, (-0.02 - cur.lean * 0.05) * bs);
+    // Weight transfer (toward the front foot: forward, and to the open side for the forehand family).
+    const frontSide = fam === 'bh' || fam === 'vbh' ? -1 : 1;
+    T.hipsPos.z += shiftS * 0.055 * bs;
+    T.hipsPos.x += shiftS * 0.02 * frontSide * mir * bs;
+    // Idle life: a light bounce on the balls of the feet in the ready stance, a slow weight shift and
+    // breathing between points.
+    if (!stroke && speed < 0.4) {
+      T.hipsPos.y += alertS * 0.006 * bs * Math.sin(time * 11.3 + phaseOff);
+      T.hipsPos.x += (1 - alertS) * 0.018 * bs * Math.sin(time * 1.4 + phaseOff);
+    }
     const chestYaw = -cur.turn * DEG * mir;
     const hipYaw = -cur.hip * DEG * mir + runTurn;
     const lean = cur.lean + cur.crouch * 0.1;
     const roll = -vR * 0.025 * (fam === 'ready' || fam === 'split' ? 1 : 0.3);
     T.hips.set(lean * 0.35, hipYaw, roll * 0.6 - st.sway * 1.5, 'YXZ');
     T.spine.set(lean * 0.7, hipYaw + (chestYaw - hipYaw) * 0.5, roll * 0.3, 'YXZ');
-    T.chest.set(lean, chestYaw + runTurn * 0.45, roll * 0.15, 'YXZ');
+    T.chest.set(lean + 0.012 * Math.sin(time * 1.9 + phaseOff), chestYaw + runTurn * 0.45, roll * 0.15, 'YXZ');
     T.clavRaise.R = 0; T.clavRaise.L = 0;
 
     // Racket frame (model space): the stroke target, or the real recorded racket (replay).
-    toM(cur.g, gM);
-    gM.y += cur.jump;
+    toM(cur.g, gM).multiplyScalar(bs);
+    gM.y += cur.jump * bs;
     toM(cur.a, aM);
     toM(cur.n, nM);
     if (ctx.racket && ctx.racket.grip) {
@@ -528,7 +600,7 @@ export function createActorAnimator(human) {
     T.arm[rs].wrist.copy(gM).sub(pWrist);
     T.arm[rs].hand.copy(qHand);
     // Elbow pole: down / out / back, swinging outward and forward for overheads.
-    const over = clamp((T.arm[rs].wrist.y - 1.35) / 0.35, 0, 1);
+    const over = clamp((T.arm[rs].wrist.y - 1.35 * bs) / (0.35 * bs), 0, 1);
     T.arm[rs].pole.set(-mir * (0.7 + 0.3 * over), -1 + 1.4 * over, -0.35 + 0.2 * over).normalize();
     T.clavRaise[rs] = over;
 
@@ -536,7 +608,7 @@ export function createActorAnimator(human) {
     mR.compose(gM, qR, one);
     mOff.multiplyMatrices(mR, cradle);
     mOff.decompose(offM, qOff, vS);
-    toM(cur.off, vT);
+    toM(cur.off, vT).multiplyScalar(bs);
     // Free hand frame: fingers forward-down, palm toward the body's midline.
     vU.set(0, -0.35, 1).normalize();
     vS.set(-mir, 0.15, 0);
@@ -570,7 +642,7 @@ export function createActorAnimator(human) {
     }
     T.arm[os].wrist.copy(offM);
     T.arm[os].hand.copy(qOff);
-    const overO = clamp((offM.y - 1.35) / 0.35, 0, 1);
+    const overO = clamp((offM.y - 1.35 * bs) / (0.35 * bs), 0, 1);
     T.arm[os].pole.set(mir * (0.7 + 0.2 * overO), -1 + 1.3 * overO, -0.4 + 0.3 * overO).normalize();
     T.clavRaise[os] = Math.max(T.clavRaise[os], overO);
 
@@ -582,7 +654,9 @@ export function createActorAnimator(human) {
       solver.toModel(lookW, T.look);
       T.lookWeight = 1;
     } else {
-      T.look.set(Math.sin(T.chest.y) * 5, 1.4, Math.cos(T.chest.y) * 5);
+      // No ball: the gaze wanders a little (partner, the other side, the racket strings).
+      const wx = 1.2 * Math.sin(time * 0.31 + phaseOff) + 0.6 * Math.sin(time * 0.17 + 2 * phaseOff);
+      T.look.set(Math.sin(T.chest.y) * 5 + wx, 1.4 + 0.25 * Math.sin(time * 0.23 + phaseOff), Math.cos(T.chest.y) * 5);
       T.lookWeight = 0.6;
     }
     if (cue && cue.react && cue.react.kind === 'frustrate') {
@@ -601,14 +675,19 @@ export function createActorAnimator(human) {
       vT.set(f.x, 0, f.z);
       solver.toModel(vT, vU);
       const L = T.leg[side];
-      const heel = Math.max(0, f.pitch) * 0.075;
-      L.ankle.set(vU.x, LIMBS.ankleY + f.y / human.scale + heel + cur.jump * 0.85, vU.z);
+      // The back foot (racket side for forehands / overheads / serve, the other one for backhands)
+      // comes up on its toes through the follow-through while planted.
+      const backSide = (fam === 'bh' || fam === 'vbh') === (mir > 0) ? 'L' : 'R';
+      const lift = side === backSide && f.planted ? heelS : 0;
+      const pitch = f.pitch + lift;
+      const heel = Math.max(0, pitch) * 0.075;
+      L.ankle.set(vU.x, limbs.ankleY + f.y / human.scale + heel + cur.jump * 0.85 * bs, vU.z);
       L.yaw = wrapPi(f.yaw - yawS);
-      L.pitch = f.pitch;
+      L.pitch = pitch;
       const sgn = side === 'R' ? -1 : 1;
       L.pole.set(Math.sin(L.yaw) + sgn * 0.12, 0, Math.cos(L.yaw)).normalize();
     }
-    keepFeetReachable(T);
+    keepFeetReachable(T, limbs);
     solver.solve();
 
     // Serve routine ball: dribbled while waiting, then dropped 0.95 s before the contact.
@@ -645,6 +724,19 @@ export function createActorAnimator(human) {
   };
 }
 
+function smoothstep(e0, e1, x) {
+  const t = clamp((x - e0) / (e1 - e0), 0, 1);
+  return t * t * (3 - 2 * t);
+}
+
+/** A stable per-person number (idle rhythm offsets). */
+function hashPhase(human) {
+  const k = human && human.kit ? JSON.stringify([human.kit.shirt, human.kit.skin, human.kit.hair, human.kit.body]) : 'x';
+  let h = 2166136261;
+  for (let i = 0; i < k.length; i++) h = Math.imul(h ^ k.charCodeAt(i), 16777619);
+  return h >>> 0;
+}
+
 function normalizeArr(v) {
   const l = Math.hypot(v[0], v[1], v[2]) || 1;
   v[0] /= l; v[1] /= l; v[2] /= l;
@@ -659,12 +751,13 @@ function orthoArr(nv, a) {
  * Lowers the pelvis (bends both knees) when a foot target is beyond the leg's reach from its hip
  * joint, so planted feet stay planted in wide stances and lunges (at most 0.22 m).
  */
-export function keepFeetReachable(T) {
-  const reach = (LIMBS.thigh + LIMBS.shin) * 0.985;
+export function keepFeetReachable(T, limbs = LIMBS) {
+  const reach = (limbs.thigh + limbs.shin) * 0.985;
+  const hipX = limbs.hipX || 0.09;
   let maxY = Infinity;
   for (const side of SIDES) {
     const a = T.leg[side].ankle;
-    const hx = T.hipsPos.x + (side === 'R' ? -0.09 : 0.09), hz = T.hipsPos.z;
+    const hx = T.hipsPos.x + (side === 'R' ? -hipX : hipX), hz = T.hipsPos.z;
     const dh = Math.hypot(a.x - hx, a.z - hz);
     const vy = dh < reach ? Math.sqrt(reach * reach - dh * dh) : 0;
     maxY = Math.min(maxY, a.y + vy + 0.05);

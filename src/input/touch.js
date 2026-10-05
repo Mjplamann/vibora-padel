@@ -72,7 +72,7 @@ export const TOUCH = Object.freeze({
 });
 
 /** World settings swipe mode keeps (applied every tick; app/game.js may also pass them as overrides). */
-export const TOUCH_OVERRIDES = Object.freeze({ latency: 0, hitMode: 'timing' });
+export const TOUCH_OVERRIDES = Object.freeze({ latency: 0, hitMode: 'timing', swingDirWeight: 0.35 });
 
 const { createTimingJudge, timingConfig, flightKeyOf, contactTimeFor, TIMING } = SA;
 
@@ -452,6 +452,7 @@ export function createTouchController({ handed = 'right', simTimeOf: simTimeOf0 
     const s = world.settings;
     if (s.latency !== TOUCH_OVERRIDES.latency) s.latency = TOUCH_OVERRIDES.latency;
     if (s.hitMode !== TOUCH_OVERRIDES.hitMode) s.hitMode = TOUCH_OVERRIDES.hitMode;
+    if (s.swingDirWeight !== TOUCH_OVERRIDES.swingDirWeight) s.swingDirWeight = TOUCH_OVERRIDES.swingDirWeight;
     if (world.tracking) {
       world.tracking.delay = TOUCH.detectDelay;
       world.tracking.frameDt = h;

@@ -169,7 +169,7 @@ export function timingConfig(world) {
   const mode = s.hitMode || 'auto';
   if (mode === 'physical') return null;
   const a = ASSIST[s.assist] || ASSIST[DEFAULT_ASSIST];
-  if (mode === 'timing') return a.timing || ASSIST.club.timing;
+  if (mode === 'timing') return (world.input === 'touch' && a.swipeTiming) || a.timing || ASSIST.club.timing;
   return a.mode === 'timing' && a.timing ? a.timing : null;
 }
 
@@ -969,7 +969,8 @@ export function timingAnalysis(world, ball, contact, t, extra, ctx, isServe) {
   if (Number.isFinite(tm.az) && !isServe) {
     const typ = typeOfFamily(fam) === 'overhead' ? 0 : (back ? dom : -dom) * TIMING.typicalSwingAz;
     const dev = clamp(angleDiff(typ, tm.az), -0.45, 0.45);
-    tx += TIMING.swingDirWeight * Math.tan(dev) * dist;
+    // Swipe mode aims harder with the swipe's direction (input/touch.js TOUCH_OVERRIDES.swingDirWeight).
+    tx += (world.settings.swingDirWeight ?? TIMING.swingDirWeight) * Math.tan(dev) * dist;
     side += clamp(-dev * 700, -400, 400);
   }
   // The timing / swing aim stays inside the court; only a poor contact (scatter) can miss it.

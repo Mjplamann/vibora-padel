@@ -137,9 +137,14 @@ export const TRACKING = {
 // early is held and strikes when the ball arrives (pulled cross-court, weaker), one up to
 // `bufferLate` s late is a late hit (down the line, weaker). A player whose camera measures slow
 // swings gets a lower threshold than minSpeed (their own p25 x 0.6), never below minSpeedFloor m/s.
-// Pro stays physical.
+// Pro stays physical. Swipe mode (input 'touch', always hitMode 'timing') reads `swipeTiming` when the
+// level has one: Pro gets narrow windows there instead of falling back to Club's (round 6 swipe report:
+// timing almost never decided a hit). Camera / mouse play never reads it.
 export const ASSIST = {
-  pro: { label: 'Pro', mode: 'physical', contactMargin: 0.02, shotBlend: 0.0, magnet: 0.0, netSafety: 0.0 },
+  pro: {
+    label: 'Pro', mode: 'physical', contactMargin: 0.02, shotBlend: 0.0, magnet: 0.0, netSafety: 0.0,
+    swipeTiming: { early: 0.09, late: 0.1, bufferEarly: 0.16, bufferLate: 0.14, reach: 0.6, minSpeed: 4.5, minSpeedFloor: 1.8, position: 0.6 },
+  },
   club: {
     label: 'Club', mode: 'timing', contactMargin: 0.1, shotBlend: 0.35, magnet: 0.35, netSafety: 0.5,
     timing: { early: 0.2, late: 0.22, bufferEarly: 0.4, bufferLate: 0.3, reach: 0.75, minSpeed: 4.0, minSpeedFloor: 1.7, position: 0.75 },

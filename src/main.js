@@ -30,6 +30,9 @@ import { installPrivacyGuard } from './app/privacy.js';
 import { initPwa } from './app/pwa.js';
 import { buildDiagnostics, browserEnv } from './app/diagnostics.js';
 import { installGlasses } from './xr/boot.js';
+// Swipe mode for phones and tablets (iPhone first): touch input, chase camera, mobile render tier.
+import { createMobile, savePrefs } from './app/mobile.js';
+import { QUALITY } from './render/scene.js';
 // Round 4: career, arcade, progression, achievements.
 import { createProgress, xpForSession, levelOf, rankTitle, RACKETS, OUTFITS, racketById, outfitById, unlockText } from './game/progression.js';
 import { createCareer, EVENT_BY_ID, PARTNERS, PAIRS, VENUES, venueById, playerCard, matchSpec, trophyName } from './game/career.js';
@@ -96,6 +99,10 @@ const frameWatch = createFrameWatch({ upperBody: true, handsTop: true });
 let frameWarning = null; // out-of-frame warning for the play HUD (camera input)
 
 let inputMode = P.autopilot ? 'autopilot' : P.fallback ? 'fallback' : 'camera';
+// Swipe mode ('touch'): on by default on touch-first devices (iPhone / iPad), or ?input=swipe;
+// ?autopilot and ?fallback still win, and the Mac keeps the camera (src/app/mobile.js decideInput).
+const mobile = createMobile({ storage, QUALITY });
+if (mobile.input === 'touch' && inputMode === 'camera') inputMode = 'touch';
 let game = null;
 let unbindGame = null;
 let paused = false;
@@ -175,6 +182,8 @@ function setVenue(venue) {
   try {
     if (typeof stage.setVenue === 'function') stage.setVenue(venue);
     else if (stage.env && typeof stage.env.setVenue === 'function') stage.env.setVenue(venue);
+    // Mobile tier: one shadow-casting light per venue.
+    mobile.applyBudget(stage);
     // The venue's acoustics, ambience bed and crowd (audio/engine.js setVenue; a no-op when unchanged).
     if (audio && stage.env) audio.setVenue(stage.env.venue);
   } catch (err) {
@@ -205,10 +214,17 @@ function nextSeed() {
   return seedCounter % 2147483647;
 }
 
+/** Enters the play view: first person, or in swipe mode the player's choice (behind / first person). */
+function playView() {
+  if (inputMode === 'touch') mobile.enterPlayView(stage);
+  else stage.setView('fp');
+}
+
 function endGame() {
   if (unbindGame) unbindGame();
   unbindGame = null;
   venueBinding = null;
+  mobile.detachGame();
   if (game) game.dispose();
   game = null;
   results = null;
@@ -261,6 +277,8 @@ function startGame(spec, { attract = false } = {}) {
     onFrame: input === 'autopilot' && !attract ? (frame) => { lastPoseFrame = frame; ui.setSkeleton(frame); } : null,
   });
   game = g;
+  if (input === 'touch') mobile.attachGame(g, { clock });
+  else mobile.detachGame();
   // Fun review r5 ("guided first rally", the cheap part): a player who has never finished a session
   // gets a timing prompt on the HUD until their first FIRST_HITS hits (`?firsthits=1` forces it).
   const life = progress.data && progress.data.lifetime;
@@ -295,6 +313,8 @@ function startGame(spec, { attract = false } = {}) {
     glassTargets,
     arcade: spec.kind === 'challenge',
   };
+  // Swipe mode: wiring sees the behind (chase) view as a play view (approach circle, ghost, timing tick).
+  if (input === 'touch') wctx.stage = mobile.playStage(stage);
   unbindGame = bindWorld(g.world, wctx);
   venueBinding = wctx.venue || null;
   stage.effects.targets(g.drill ? g.drill.targets : null);
@@ -306,7 +326,7 @@ function startGame(spec, { attract = false } = {}) {
   pendingStart = null;
   paused = false;
   stage.setGaze(S.gazeFollow && input !== 'fallback');
-  stage.setView('fp');
+  playView();
   if (fallback) fallback.enabled = input === 'fallback';
   cursor.setEnabled(false);
   ui.show('play', { mode: spec.kind, hud: g.hud() });
@@ -567,7 +587,7 @@ function hubData() {
     const p = reader.bests(d.id);
     if (p !== null) bests[d.id] = { points: p, stars: starsFor(d, p) };
   }
-  const input = inputMode === 'fallback' ? 'Mouse controls' : inputMode === 'autopilot' ? 'Autopilot' : tracking && tracking.camera ? tracking.camera.label : null;
+  const input = inputMode === 'touch' ? 'Swipe controls' : inputMode === 'fallback' ? 'Mouse controls' : inputMode === 'autopilot' ? 'Autopilot' : tracking && tracking.camera ? tracking.camera.label : null;
   const cur = career.current();
   const evs = career.events();
   const d = dailyChallenge(dateKey());
@@ -605,7 +625,7 @@ function resume() {
   paused = false;
   clock.resume();
   cursor.setEnabled(false);
-  stage.setView('fp');
+  playView();
   ui.show('play');
 }
 
@@ -688,10 +708,10 @@ function stopReplay() {
   if (to === 'play' && game) {
     paused = false;
     clock.resume();
-    stage.setView('fp');
+    playView();
     ui.show('play');
   } else if (to === 'pause') {
-    stage.setView('fp');
+    playView();
     ui.show('pause');
   } else {
     stage.setView('orbit');
@@ -989,6 +1009,14 @@ const handlers = {
         startAttract();
         break;
       case 'camera':
+        // Swipe mode: Settings → Camera switches the controls to the camera (saved, then a reload), as the
+        // swipe settings sheet's "Use the camera instead" does, instead of tracking under the swipe overlay.
+        if (inputMode === 'touch') {
+          mobile.prefs.controls = 'camera';
+          savePrefs(storage, mobile.prefs);
+          location.reload();
+          break;
+        }
         enterCamera();
         break;
       case 'hub':
@@ -1097,7 +1125,8 @@ function stepGame(nowMs, dtReal) {
   }
   // The live racket is drawn as predicted for this frame (player.renderRacket, game/swingPredict.js),
   // so no display extrapolation is passed here (fpRig's extrapolation only serves replay frames).
-  let selfActor = null;
+  // Swipe mode, behind view: the player's own body is drawn as an actor (src/app/mobile.js).
+  let selfActor = !g.attract && inputMode === 'touch' ? mobile.selfActor(w) : null;
   if (g.attract && g.feed) {
     const st = g.feed.actorStroke(w);
     const sp = Math.hypot(w.player.vel.x, w.player.vel.z);
@@ -1107,6 +1136,7 @@ function stepGame(nowMs, dtReal) {
     };
   }
   stage.syncWorld(w, dtView, { alpha, selfActor, showRig: !g.attract });
+  if (!g.attract && inputMode === 'touch') mobile.afterSync(w, dtReal);
   // HUD at 10 Hz.
   hudAcc += dtReal;
   if (!g.attract && hudAcc >= 0.1 && (ui.screen === 'play' || ui.screen === 'pause')) {
@@ -1206,12 +1236,13 @@ function frame(nowMs) {
     else stage.syncWorld(null, dtReal, {});
     if (fallback) fallback.enabled = inputMode === 'fallback' && !!game && !game.attract && ui.screen === 'play' && !paused && !replay;
     if (audio && audioUnlocked) {
-      const L = stage.listener();
+      const L = (inputMode === 'touch' && game && !game.attract && !replay && mobile.listener(game.world)) || stage.listener();
       audio.setListener(L.pos, L.fwd, L.up);
     }
     // Glass Breaker targets and shatters run on sim time (slow motion, pauses and freezes apply).
     if (glassTargets) glassTargets.update(replay || paused || !clock.running ? 0 : dtReal * (clock.rate || 1) * (clock.speed || 1));
     stage.render(dtReal);
+    mobile.frame({ screen: ui.screen, playing: !!game && !game.attract && ui.screen === 'play', paused, replay: !!replay, now: nowMs });
     if (debug) {
       debug.update(dtReal, {
         render: stage.app.stats, pose: tracking ? tracking.stats : null, poseStatus: tracking ? tracking.status.message : '',
@@ -1283,7 +1314,9 @@ async function boot() {
   stage = await createStage({
     canvas,
     settings: S,
-    quality: S.quality,
+    // Phones and tablets: the mobile tier (QUALITY.mobile, registered by createMobile) unless ?quality=.
+    // Never stored in S: settings.js clamps quality to ultra / high / balanced.
+    quality: P.quality ? S.quality : (mobile.quality || S.quality),
     progress: async (p, text) => {
       ui.setLoading(p, text);
       await new Promise((r) => requestAnimationFrame(() => r()));
@@ -1310,6 +1343,26 @@ async function boot() {
   voice.setCoach(S.voice !== 'off');
   voice.setVolume(S.volumes.master ?? 1);
   installGestureUnlock();
+  // Swipe mode overlay (pause / view buttons, trails, tutorial, swipe settings), touch input on the
+  // canvas, the mobile shadow budget and the iOS audio unlock on touchend.
+  // Only on phones / tablets or in swipe mode: on the Mac (camera, mouse, autopilot) the page keeps its
+  // desktop layout (mobile.css applies under html.vp-mobile) and shows no swipe overlay.
+  if (mobile.swipe || mobile.device.touchPrimary) mobile.install({
+    canvas, stage, ui,
+    handlers: {
+      pause: () => pause(),
+      isPlaying: () => !!game && !game.attract && ui.screen === 'play' && !paused && !replay,
+      isReplay: () => !!replay,
+      skipReplay: () => stopReplay(),
+      unlockAudio: () => {
+        tryUnlockAudio();
+        return audioUnlocked;
+      },
+      // The choice is saved under 'vibora.mobile.v1' before the reload.
+      useCamera: () => location.reload(),
+      useSwipe: () => location.reload(),
+    },
+  });
 
   human = createHumanController({ settings: S });
   applyCameraTilt();
@@ -1348,6 +1401,15 @@ async function boot() {
     ui.show('hub', hubData());
     if (P4.screen === 'settings' || P4.screen === 'help') ui.show(P4.screen, P4.screen === 'settings' ? S : undefined);
     else handlers.onScreen(P4.screen, P4.screen === 'event-intro' ? { eventId: P.event || career.current().id } : P4.screen === 'trophies' ? { tab: P.tab || 'trophies' } : P4.screen === 'freeplay' ? { mode: P.fpMode || 'rally' } : {});
+    markReady();
+    return;
+  }
+  // Swipe mode: no title camera warm-up and no enterCamera, so MediaPipe is never downloaded and the
+  // camera never asked for. First visit: the 3-step swipe tutorial, then the hub (or the ?drill / ?mode).
+  if (inputMode === 'touch') {
+    const go = () => (direct ? startGame(spec) : ui.show('hub', hubData()));
+    if (mobile.needsTutorial()) mobile.showTutorial(go);
+    else go();
     markReady();
     return;
   }
@@ -1463,6 +1525,10 @@ const vibora = {
   get fallback() { return fallback; },
   get errors() { return errors.slice(); },
   get pwa() { return pwa; },
+  /** Swipe mode layer (src/app/mobile.js) and the sim clock (tests: the swipe bot times touches with them). */
+  get mobile() { return mobile; },
+  get clock() { return clock; },
+  get inputMode() { return inputMode; },
   get stats() {
     const s = game && !game.attract ? game.stats : null;
     return {

@@ -2,12 +2,16 @@
 // ScenePass: linear HDR render into its own MSAA half-float target (+ resolved depth), resolved
 // once into the single-sample chain with the contact AO and a NaN guard folded in
 // -> subtle bloom that only catches emissive LEDs
-// -> GradedOutputPass (ACES filmic tone mapping + sRGB + the venue grade) -> FXAA on balanced.
+// -> GradedOutputPass (the venue's tone mapping + sRGB + the venue grade) -> SMAA (ultra / high, on
+// top of the scene's MSAA: catches shader aliasing such as wire glints and line edges) or FXAA
+// (balanced). Dynamic resolution steers by the GPU frame time when the browser exposes timer
+// queries (EXT_disjoint_timer_query_webgl2), by the frame rate otherwise.
 import * as THREE from 'three';
 import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
 import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
 import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
 import { FXAAPass } from 'three/addons/postprocessing/FXAAPass.js';
+import { SMAAPass } from 'three/addons/postprocessing/SMAAPass.js';
 import { Pass, FullScreenQuad } from 'three/addons/postprocessing/Pass.js';
 
 /**
@@ -121,20 +125,29 @@ export class ContactAOPass extends Pass {
     this.aoMat = new THREE.ShaderMaterial({
       uniforms: {
         tDepth: { value: null }, uNear: { value: 0.02 }, uFar: { value: 120 }, uProj: { value: new THREE.Vector2(1, 1) },
-        uRadius: { value: radius }, uRes: { value: new THREE.Vector2(1, 1) },
+        uRadius: { value: radius }, uRes: { value: new THREE.Vector2(1, 1) }, uBias: { value: 0.06 }, uEps: { value: 0.001 },
+        uDepthTexel: { value: new THREE.Vector2(1, 1) },
       },
       vertexShader: 'varying vec2 vUv; void main(){ vUv = uv; gl_Position = vec4(position.xy, 0.0, 1.0); }',
       fragmentShader: /* glsl */ `
         ${common}
-        uniform float uRadius;
-        uniform vec2 uRes;
+        uniform float uRadius, uBias, uEps;
+        uniform vec2 uRes, uDepthTexel;
         varying vec2 vUv;
         void main() {
           float d0 = texture2D(tDepth, vUv).x;
           if (d0 >= 0.99999) { gl_FragColor = vec4(1.0); return; }
           float z = viewZ(vUv);
           vec3 P = viewPos(vUv, z);
-          vec3 N = normalize(cross(dFdx(P), dFdy(P)));
+          // Normal from the full-resolution depth: per axis the neighbour on the flatter side
+          // (screen-space derivatives of the half-resolution reconstruction stepped across depth
+          // texels in rows, which read as horizontal self-occlusion bands on the flat turf).
+          vec2 tx = uDepthTexel * 3.0; // a 3-texel baseline: depth quantisation steps average out
+          vec2 uL = vUv - vec2(tx.x, 0.0), uR = vUv + vec2(tx.x, 0.0), uD = vUv - vec2(0.0, tx.y), uU = vUv + vec2(0.0, tx.y);
+          vec3 PL = viewPos(uL, viewZ(uL)), PR = viewPos(uR, viewZ(uR)), PD = viewPos(uD, viewZ(uD)), PU = viewPos(uU, viewZ(uU));
+          vec3 ddx = abs(PR.z - P.z) < abs(P.z - PL.z) ? PR - P : P - PL;
+          vec3 ddy = abs(PU.z - P.z) < abs(P.z - PD.z) ? PU - P : P - PD;
+          vec3 N = normalize(cross(ddx, ddy));
           if (dot(N, P) > 0.0) N = -N;
           float rPx = clamp(uRadius * uProj.y * 0.5 * uRes.y / -z, 2.0, 48.0);
           float ign = fract(52.9829189 * fract(dot(gl_FragCoord.xy, vec2(0.06711056, 0.00583715))));
@@ -149,7 +162,9 @@ export class ContactAOPass extends Pass {
             vec3 S = viewPos(suv, viewZ(suv));
             vec3 v = S - P;
             float dist = length(v);
-            float occ = max(0.0, dot(N, v) / max(dist, 1e-4) - 0.06);
+            // Height above the receiver's plane, less a depth-precision allowance that grows with
+            // z^2 (a step of the depth buffer must not read as an occluder on flat ground).
+            float occ = max(0.0, (dot(N, v) - uEps * z * z) / max(dist, 1e-4) - uBias);
             float fall = 1.0 - smoothstep(uRadius * 0.6, uRadius * 1.6, dist);
             ao += sd >= 0.99999 ? 0.0 : occ * fall;
           }
@@ -245,6 +260,7 @@ export class ContactAOPass extends Pass {
     }
     this.aoMat.uniforms.uRadius.value = this.radius;
     this.aoMat.uniforms.uRes.value.set(this.aoTarget.width, this.aoTarget.height);
+    this.aoMat.uniforms.uDepthTexel.value.set(1 / Math.max(1, src.width), 1 / Math.max(1, src.height));
     this.quad.material = this.aoMat;
     renderer.setRenderTarget(this.aoTarget);
     this.quad.render(renderer);
@@ -349,18 +365,21 @@ export function applyGradeUniforms(u, grade, aspect = 16 / 9) {
  */
 export const QUALITY = {
   ultra: {
-    msaa: 4, fxaa: false, maxPixelRatio: 2, shadowMapSize: 4096, shadowRadius: 6,
-    bloom: true, bloomStrength: 0.22, turfSize: 2048, envSize: 512, neighbors: true, fillLights: true, ao: 0.85,
+    msaa: 4, fxaa: false, smaa: true, maxPixelRatio: 2, shadowMapSize: 4096, shadowRadius: 6,
+    bloom: true, bloomStrength: 0.22, turfSize: 2048, envSize: 512, neighbors: true, fillLights: true, ao: 0.85, turfShells: 4,
   },
   high: {
-    msaa: 4, fxaa: false, maxPixelRatio: 1.5, shadowMapSize: 2048, shadowRadius: 5,
-    bloom: true, bloomStrength: 0.2, turfSize: 2048, envSize: 256, neighbors: true, fillLights: true, ao: 0.7,
+    msaa: 4, fxaa: false, smaa: true, maxPixelRatio: 1.5, shadowMapSize: 2048, shadowRadius: 5,
+    bloom: true, bloomStrength: 0.2, turfSize: 2048, envSize: 256, neighbors: true, fillLights: true, ao: 0.7, turfShells: 3,
   },
   balanced: {
-    msaa: 0, fxaa: true, maxPixelRatio: 1.0, shadowMapSize: 1024, shadowRadius: 3,
-    bloom: true, bloomStrength: 0.18, turfSize: 1024, envSize: 256, neighbors: true, fillLights: false, ao: 0,
+    msaa: 0, fxaa: true, smaa: false, maxPixelRatio: 1.0, shadowMapSize: 1024, shadowRadius: 3,
+    bloom: true, bloomStrength: 0.18, turfSize: 1024, envSize: 256, neighbors: true, fillLights: false, ao: 0, turfShells: 0,
   },
 };
+
+/** GPU frame time the dynamic resolution aims for when timer queries are available (ms). */
+export const GPU_TARGET_MS = 12.5;
 
 export const BLOOM_THRESHOLD = 3.2; // linear HDR luminance; lit surfaces stay below, LED diffusers exceed it
 export const DEFAULT_EXPOSURE = 1.0;
@@ -400,7 +419,21 @@ export function createRenderer(canvas, { quality = 'high', dynamicResolution = t
   camera.lookAt(0, 1.2, -10);
 
   const deviceRatio = () => (typeof window !== 'undefined' ? window.devicePixelRatio || 1 : 1);
-  const maxRatio = () => Math.min(deviceRatio(), 2, q.maxPixelRatio);
+  // Apple-silicon GPUs on a Retina / HiDPI display (dpr 2) with GPU timing available: the high tier
+  // may climb to 1.75 (the GPU-time controller below holds 60 fps); otherwise the tier's cap.
+  const gpuName = (() => {
+    try {
+      const gl = renderer.getContext();
+      const ext = gl.getExtension('WEBGL_debug_renderer_info');
+      return String(gl.getParameter(ext ? ext.UNMASKED_RENDERER_WEBGL : gl.RENDERER) || '');
+    } catch {
+      return '';
+    }
+  })();
+  const appleGpu = /apple/i.test(gpuName) && !/swiftshader|software/i.test(gpuName);
+  let gpuTimerReady = false;
+  const tierCap = () => q.maxPixelRatio + (appleGpu && gpuTimerReady && tier === 'high' ? 0.25 : 0);
+  const maxRatio = () => Math.min(deviceRatio(), 2, tierCap());
   let pixelRatio = maxRatio();
   let width = canvas.clientWidth || canvas.width || 1280;
   let height = canvas.clientHeight || canvas.height || 720;
@@ -411,6 +444,7 @@ export function createRenderer(canvas, { quality = 'high', dynamicResolution = t
   let bloomPass = null;
   let outputPass = null;
   let fxaaPass = null;
+  let smaaPass = null;
   let gradeSeen = -1;
 
   function buildComposer() {
@@ -420,6 +454,7 @@ export function createRenderer(canvas, { quality = 'high', dynamicResolution = t
     scenePass?.dispose();
     outputPass?.dispose();
     fxaaPass?.dispose?.();
+    smaaPass?.dispose?.();
     const tw = Math.max(1, width * pixelRatio), th = Math.max(1, height * pixelRatio);
     // Single-sample, depthless HDR ping-pong: MSAA and depth live in the ScenePass target only.
     const target = new THREE.WebGLRenderTarget(tw, th, { type: THREE.HalfFloatType, depthBuffer: false });
@@ -435,6 +470,9 @@ export function createRenderer(canvas, { quality = 'high', dynamicResolution = t
     outputPass = new GradedOutputPass();
     composer.addPass(outputPass);
     gradeSeen = -1;
+    smaaPass = new SMAAPass();
+    smaaPass.enabled = !!q.smaa;
+    composer.addPass(smaaPass);
     fxaaPass = new FXAAPass();
     fxaaPass.enabled = q.fxaa;
     composer.addPass(fxaaPass);
@@ -496,7 +534,12 @@ export function createRenderer(canvas, { quality = 'high', dynamicResolution = t
   }
 
   // Dynamic resolution: hold 60 fps by scaling the pixel ratio in small, rate-limited steps.
+  // With GPU timer queries (Chrome on macOS / Windows) it steers by the measured GPU time of the
+  // frame toward GPU_TARGET_MS, so it also climbs back up while the display is vsync-capped at 60;
+  // without them (Safari, software GL) by the frame rate.
   const dyn = { enabled: dynamicResolution, acc: 0, frames: 0, slow: 0, fast: 0, lastChange: 0, now: 0 };
+  const gpuTimer = createGpuTimer(renderer);
+  gpuTimerReady = !!gpuTimer;
   function updateDynamicResolution(dt) {
     if (!dyn.enabled) return;
     dyn.now += dt;
@@ -506,19 +549,27 @@ export function createRenderer(canvas, { quality = 'high', dynamicResolution = t
     const fps = dyn.frames / dyn.acc;
     dyn.acc = 0;
     dyn.frames = 0;
-    if (fps < 54) {
-      dyn.slow++;
-      dyn.fast = 0;
-    } else if (fps > 58.5) {
-      dyn.fast++;
-      dyn.slow = 0;
-    } else {
-      dyn.slow = dyn.fast = 0;
-    }
     const since = dyn.now - dyn.lastChange;
     let next = pixelRatio;
-    if (dyn.slow >= 2 && since > 1.0) next = Math.max(MIN_PIXEL_RATIO, pixelRatio * 0.88);
-    else if (dyn.fast >= 6 && since > 3.0) next = Math.min(maxRatio(), pixelRatio * 1.08);
+    const gpu = gpuTimer ? gpuTimer.ms : 0;
+    if (gpu > 0) {
+      // Fill-rate bound: GPU time scales ~ with the pixel count (ratio squared).
+      if (gpu > GPU_TARGET_MS * 1.12 && since > 0.75) next = pixelRatio * Math.max(0.82, Math.min(0.96, Math.sqrt(GPU_TARGET_MS / gpu)));
+      else if (gpu < GPU_TARGET_MS * 0.72 && fps > 55 && since > 2.0) next = pixelRatio * Math.min(1.08, Math.sqrt(GPU_TARGET_MS / gpu));
+    } else {
+      if (fps < 54) {
+        dyn.slow++;
+        dyn.fast = 0;
+      } else if (fps > 58.5) {
+        dyn.fast++;
+        dyn.slow = 0;
+      } else {
+        dyn.slow = dyn.fast = 0;
+      }
+      if (dyn.slow >= 2 && since > 1.0) next = pixelRatio * 0.88;
+      else if (dyn.fast >= 6 && since > 3.0) next = pixelRatio * 1.08;
+    }
+    next = Math.max(MIN_PIXEL_RATIO, Math.min(maxRatio(), next));
     if (Math.abs(next - pixelRatio) > 0.01) {
       pixelRatio = Math.round(next * 100) / 100;
       dyn.lastChange = dyn.now;
@@ -527,19 +578,20 @@ export function createRenderer(canvas, { quality = 'high', dynamicResolution = t
     }
   }
 
-  const stats = { fps: 0, drawCalls: 0, triangles: 0, pixelRatio, frameMs: 0 };
+  const stats = { fps: 0, drawCalls: 0, triangles: 0, pixelRatio, frameMs: 0, gpuMs: 0 };
   let lastT = null;
 
   // Shader warm-up: compile every material in the scene graph in one batch, hidden pools included
   // (skid marks, impact rings, ball motion blur, crowd poses...). Otherwise each one compiles on
   // first use mid-rally, and three's compile check is a synchronous GL round trip that also waits
   // for the previous frame: one hitch per new shader (seconds each on a software rasteriser).
-  // Re-runs when the venue changes (gradeVersion) and on frames 3 / 30 for content added late.
-  let warmSeen = -1;
+  // Re-runs when the venue changes (gradeVersion), when the realistic people / forearms rebuild
+  // after their assets load (peopleVersion), and on frames 3 / 30 for content added late.
+  let warmSeen = '';
   let frameNo = 0;
   function warmShaders() {
     frameNo++;
-    const key = scene.userData.gradeVersion ?? 0;
+    const key = `${scene.userData.gradeVersion ?? 0}|${scene.userData.peopleVersion ?? 0}`;
     if (key === warmSeen && frameNo !== 3 && frameNo !== 30) return;
     warmSeen = key;
     const prev = renderer.getRenderTarget();
@@ -582,6 +634,10 @@ export function createRenderer(canvas, { quality = 'high', dynamicResolution = t
     get pixelRatio() {
       return pixelRatio;
     },
+    /** Renderer string (WEBGL_debug_renderer_info) and whether GPU timing drives the resolution. */
+    get gpu() {
+      return { name: gpuName, apple: appleGpu, timer: !!gpuTimer, ms: gpuTimer ? gpuTimer.ms : 0 };
+    },
     setQuality(next) {
       if (!QUALITY[next]) return;
       const msaaChanged = QUALITY[next].msaa !== q.msaa;
@@ -595,6 +651,7 @@ export function createRenderer(canvas, { quality = 'high', dynamicResolution = t
       aoPass.enabled = (q.ao || 0) > 0;
       aoPass.strength = q.ao || 0;
       fxaaPass.enabled = q.fxaa;
+      smaaPass.enabled = !!q.smaa;
       applyShadowQuality();
       applySceneTier();
       applySize();
@@ -624,8 +681,11 @@ export function createRenderer(canvas, { quality = 'high', dynamicResolution = t
       syncGrade();
       warmShaders();
       const t0 = typeof performance !== 'undefined' ? performance.now() : 0;
+      gpuTimer?.begin();
       composer.render(dt);
+      gpuTimer?.end();
       stats.frameMs = (typeof performance !== 'undefined' ? performance.now() : 0) - t0;
+      stats.gpuMs = gpuTimer ? Math.round(gpuTimer.ms * 100) / 100 : 0;
       stats.drawCalls = renderer.info.render.calls;
       stats.triangles = renderer.info.render.triangles;
       stats.pixelRatio = pixelRatio;
@@ -637,6 +697,8 @@ export function createRenderer(canvas, { quality = 'high', dynamicResolution = t
     dispose() {
       composer.renderTarget1.dispose();
       composer.renderTarget2.dispose();
+      gpuTimer?.dispose();
+      smaaPass?.dispose?.();
       scenePass?.dispose();
       outputPass?.dispose();
       bloomPass.dispose?.();
@@ -651,4 +713,56 @@ export function createRenderer(canvas, { quality = 'high', dynamicResolution = t
   buildComposer();
   applySize();
   return api;
+}
+
+/**
+ * GPU frame timer from EXT_disjoint_timer_query_webgl2 (null when unavailable). Non-blocking: a
+ * small ring of queries, results read a few frames later; `ms` is a smoothed GPU time per frame.
+ */
+export function createGpuTimer(renderer) {
+  let gl = null, ext = null;
+  try {
+    gl = renderer.getContext();
+    ext = gl && typeof gl.createQuery === 'function' ? gl.getExtension('EXT_disjoint_timer_query_webgl2') : null;
+  } catch {
+    ext = null;
+  }
+  if (!ext) return null;
+  const ring = [];
+  let active = null;
+  const t = {
+    ms: 0,
+    samples: 0,
+    begin() {
+      if (active) return;
+      // Collect finished queries first (oldest first), never waiting on the GPU.
+      while (ring.length) {
+        const q = ring[0];
+        if (!gl.getQueryParameter(q, gl.QUERY_RESULT_AVAILABLE)) break;
+        ring.shift();
+        const disjoint = gl.getParameter(ext.GPU_DISJOINT_EXT);
+        const ns = gl.getQueryParameter(q, gl.QUERY_RESULT);
+        gl.deleteQuery(q);
+        if (!disjoint && Number.isFinite(ns) && ns > 0) {
+          const v = ns / 1e6;
+          t.ms = t.samples ? t.ms + (v - t.ms) * 0.15 : v;
+          t.samples++;
+        }
+      }
+      if (ring.length > 4) return; // results not coming back: skip measuring this frame
+      active = gl.createQuery();
+      gl.beginQuery(ext.TIME_ELAPSED_EXT, active);
+    },
+    end() {
+      if (!active) return;
+      gl.endQuery(ext.TIME_ELAPSED_EXT);
+      ring.push(active);
+      active = null;
+    },
+    dispose() {
+      for (const q of ring) gl.deleteQuery(q);
+      ring.length = 0;
+    },
+  };
+  return t;
 }

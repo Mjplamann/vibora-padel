@@ -10,6 +10,7 @@ import { pavingTexture, PAVING_TILE_M } from '../textures.js';
 import { boxAt, merge, tint, instancedFrom, disposeTree, seeded, keepSet, NEIGHBOR_OFFSET, floorAround, courtFootprints } from './common.js';
 import { createSky, skyRadiance } from './sky.js';
 import { createCrowd, randomLook } from '../crowd.js';
+import { detailNormal, addTriplanarDetail } from '../detailMaps.js';
 import { VEIL_GLSL, veilLightsChunk } from './veil.js';
 
 /** Sun: 9.5° above the sea, 52° to the left of looking down the court from the near baseline. */
@@ -132,20 +133,29 @@ function palmCrownGeometry(rng, top) {
     const base = top.clone().add(new THREE.Vector3(0, -0.15, 0));
     const at = (s) => base.clone().addScaledVector(dir, s).add(new THREE.Vector3(0, -droop * s * s, 0));
     const c = age > 0.92 ? dry : green.clone().lerp(dark, rng() * 0.5);
-    const steps = 30;
+    // Round 6: leaflets are tapered blades (3 triangles), in two ranks per side folded up and down
+    // into the V of a Phoenix frond, and dense enough to read as a plume rather than a fishbone.
+    const steps = 32;
+    const tipC = c.clone().lerp(new THREE.Color(0x8fa45a), 0.25);
     for (let k = 0; k < steps; k++) {
-      const s = 0.25 + (k / steps) * (L - 0.25);
+      const s = 0.3 + (k / steps) * (L - 0.3);
       const p = at(s);
       tng.copy(at(s + 0.05)).sub(p).normalize();
       side.crossVectors(tng, up).normalize();
-      const len = 0.9 * Math.sin(Math.PI * Math.min(1, (s / L) * 1.05)) ** 0.7 + 0.08;
+      const len = (0.95 * Math.sin(Math.PI * Math.min(1, (s / L) * 1.05)) ** 0.7 + 0.1) * (0.85 + rng() * 0.3);
       for (const sgn of [-1, 1]) {
-        // Leaflet: a thin blade from the rachis, folded down into a V.
-        const dirL = side.clone().multiplyScalar(sgn).addScaledVector(tng, 0.45).addScaledVector(up, -0.35).normalize();
-        const a = push(p, c);
-        const b = push(v.copy(p).addScaledVector(tng, 0.06), c);
-        const tip = push(v.copy(p).addScaledVector(dirL, len), c.clone().multiplyScalar(1.12));
-        idx.push(a, b, tip);
+        for (const rank of [0.28, -0.42]) {
+          const dirL = side.clone().multiplyScalar(sgn).addScaledVector(tng, 0.5 + rng() * 0.15).addScaledVector(up, rank + (rng() - 0.5) * 0.15).normalize();
+          const w0 = 0.012, w1 = 0.03;
+          const shade = 0.85 + rng() * 0.3;
+          const cb = c.clone().multiplyScalar(0.75 * shade), cm = c.clone().multiplyScalar(shade), ct = tipC.clone().multiplyScalar(shade);
+          const a = push(v.copy(p).addScaledVector(tng, -w0), cb);
+          const b = push(v.copy(p).addScaledVector(tng, w0), cb);
+          const m1 = push(v.copy(p).addScaledVector(dirL, len * 0.45).addScaledVector(tng, w1), cm);
+          const m2 = push(v.copy(p).addScaledVector(dirL, len * 0.45).addScaledVector(tng, -w1 * 0.6), cm);
+          const t = push(v.copy(p).addScaledVector(dirL, len), ct);
+          idx.push(a, b, m1, a, m1, m2, m2, m1, t);
+        }
       }
     }
     // Rachis.
@@ -265,6 +275,7 @@ export function buildSunset(ctx) {
   const props = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.7 });
   const glow = new THREE.MeshBasicMaterial({ vertexColors: true });
   const trunkMat = new THREE.MeshStandardMaterial({ color: 0x6a5a48, roughness: 0.95 });
+  addTriplanarDetail(trunkMat, detailNormal('grit-normal'), { scale: 2.5, strength: 0.6, key: 'bark' });
   const frondMat = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.7, side: THREE.DoubleSide });
   addTranslucency(frondMat, sunDir, sunCol, 2.2);
   const houseMat = new THREE.MeshStandardMaterial({ color: 0xf1ebe0, roughness: 0.9 });
@@ -474,6 +485,64 @@ export function buildSunset(ctx) {
     group.add(gm);
   }
 
+  // ---- terrace life (round 6): bougainvillea planters, parasols and loungers by the balustrade ---
+  {
+    const parts = [], leaves = [];
+    const rd = seeded(2024);
+    const terracotta = new THREE.Color(0xb0603a), canvas = new THREE.Color(0xf3eee4), teak = new THREE.Color(0x7a5232), steelC = new THREE.Color(0x9aa0a8);
+    const greens = [0x3f6a2c, 0x4d7a33, 0x2f5524], blooms = [0xc2266e, 0xd8408a, 0xe86aa6];
+    const planter = (x, z, big = 1) => {
+      const pot = new THREE.CylinderGeometry(0.38 * big, 0.3 * big, 0.62 * big, 18);
+      pot.translate(x, 0.31 * big, z);
+      parts.push(tint(pot, terracotta));
+      const rim = new THREE.TorusGeometry(0.38 * big, 0.03, 6, 18);
+      rim.rotateX(Math.PI / 2);
+      rim.translate(x, 0.62 * big, z);
+      parts.push(tint(rim, terracotta.clone().multiplyScalar(0.85)));
+      for (let k = 0; k < 16; k++) {
+        const r = 0.14 + rd() * 0.12;
+        const g = new THREE.IcosahedronGeometry(r, 1);
+        const a = rd() * Math.PI * 2, d = Math.sqrt(rd()) * 0.42 * big;
+        g.translate(x + Math.cos(a) * d, (0.7 + rd() * 0.75) * big, z + Math.sin(a) * d);
+        const bloom = rd() < 0.38;
+        leaves.push(tint(g, new THREE.Color((bloom ? blooms : greens)[(rd() * 3) | 0])));
+      }
+    };
+    for (let z = -9; z <= 9; z += 4.5) planter(-10.2, z, 1.1);
+    for (let x = -11; x <= 9; x += 5) planter(x, -21.6, 1.15);
+    const parasol = (x, z) => {
+      const top = new THREE.ConeGeometry(1.35, 0.42, 12, 1, true);
+      top.translate(x, 2.42, z);
+      parts.push(tint(top, canvas));
+      const pole = new THREE.CylinderGeometry(0.025, 0.03, 2.5, 8);
+      pole.translate(x, 1.25, z);
+      parts.push(tint(pole, teak));
+      const base = new THREE.CylinderGeometry(0.22, 0.25, 0.08, 12);
+      base.translate(x, 0.04, z);
+      parts.push(tint(base, steelC));
+      for (const dx of [-0.75, 0.75]) {
+        // Teak lounger with a white cushion, back rest raised.
+        parts.push(tint(boxAt(0.62, 0.06, 1.9, x + dx, 0.32, z + 0.35), teak));
+        parts.push(tint(boxAt(0.6, 0.07, 1.35, x + dx, 0.39, z + 0.62), canvas));
+        parts.push(tint(boxAt(0.6, 0.07, 0.6, x + dx, 0.62, z - 0.42, { rotX: -0.75 }), canvas));
+        for (const [ox, oz] of [[-0.26, -0.5], [0.26, -0.5], [-0.26, 1.2], [0.26, 1.2]]) parts.push(tint(boxAt(0.04, 0.3, 0.04, x + dx + ox, 0.15, z + oz), teak));
+      }
+    };
+    parasol(-8.5, -17.5);
+    parasol(-3.5, -18.2);
+    parasol(4.0, -17.8);
+    parasol(-12.6, -12.0);
+    const pm = new THREE.Mesh(merge(parts), props);
+    pm.castShadow = true;
+    pm.receiveShadow = true;
+    pm.name = 'terrace-dressing';
+    group.add(pm);
+    const lm = new THREE.Mesh(merge(leaves), frondMat);
+    lm.castShadow = true;
+    lm.name = 'terrace-planting';
+    group.add(lm);
+  }
+
   // ---- spectators -----------------------------------------------------------------------------
   const people = [];
   {
@@ -486,7 +555,11 @@ export function buildSunset(ctx) {
       people.push({ x, y: 0, z, seated: false, ...randomLook(rl), lit: 1 });
     }
   }
-  const crowd = createCrowd({ people, msaa: q.msaa > 0, name: 'sunset-spectators', light: sunCol.clone().lerp(new THREE.Color(1, 1, 1), 0.5), lightK: 1.5 });
+  const crowd = createCrowd({
+    people, msaa: q.msaa > 0, name: 'sunset-spectators', light: new THREE.Color(1, 1, 1), lightK: 1.5,
+    keyDir: sunDir, key: 0.95, sky: new THREE.Color(zen[0], zen[1], zen[2]).multiplyScalar(1.6).getHex(), ground: 0x9a7356, hemiK: 0.4,
+  });
+  crowd.mesh.material.uniforms.uKey.value.copy(sunCol).multiplyScalar(0.95);
   group.add(crowd.mesh);
 
   // ---- atmosphere -----------------------------------------------------------------------------
@@ -504,6 +577,9 @@ export function buildSunset(ctx) {
     courts: SUNSET_COURTS,
     envIntensity: 0.6,
     reflectScale: 1.1,
+    // Image-based light: the photographed seafront at sunset below the horizon (paving, buildings);
+    // above it the venue's own analytic sky stays in charge (sky weight 0.25).
+    ibl: { ambient: [1, 0.8], reflect: [1, 0.45], sky: 0.25 },
     capturePosition: new THREE.Vector3(0, 2.2, 0),
     turf: { dust: 0.55, wear: 1.15, grain: 0.14, ao: 0.9 },
     glass: { grease: 1.1, felt: 1, water: 1 },

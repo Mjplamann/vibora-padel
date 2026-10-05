@@ -373,7 +373,7 @@ function buildBeams(group) {
  * @param {{ scene, renderer, mats, q }} ctx
  */
 export function buildStadium(ctx) {
-  const { mats: courtMats, q } = ctx;
+  const { mats: courtMats, q, scene } = ctx;
   const group = new THREE.Group();
   group.name = 'venue-stadium';
   const rng = seeded(1717);
@@ -422,7 +422,42 @@ export function buildStadium(ctx) {
   const screen = ribbon([[-S.w / 2, S.z], [S.w / 2, S.z]], S.y - S.h / 2, S.y + S.h / 2);
   group.add(Object.assign(new THREE.Mesh(screen, screenMat), { name: 'big-screen' }));
   group.add(new THREE.Mesh(boxAt(S.w + 0.6, S.h + 0.6, 0.5, 0, S.y, S.z - 0.3), mats.props));
-  const ledMats = [boardMat, fasciaMat, screenMat];
+  // Round 6: a centre-hung video cube over the court (four LED faces, high above the lob ceiling)
+  // and four sports-light banks in the roof corners; the arena's haze below gives them depth.
+  const cubeY = 19.5, cw = 3.6, ch = 2.2;
+  const cubeMat = makeLedMaterial(banner, { height: ch * 0.4, gain: 1.15, pitch: 0.02, segLen: cw, band: [0.5, 0.32] });
+  const cube = ribbon([[-cw / 2, cw / 2], [cw / 2, cw / 2], [cw / 2, -cw / 2], [-cw / 2, -cw / 2], [-cw / 2, cw / 2]], cubeY - ch / 2, cubeY + ch / 2);
+  group.add(Object.assign(new THREE.Mesh(cube, cubeMat), { name: 'video-cube' }));
+  {
+    const fr = [];
+    const dark = new THREE.Color(0x0b0c0f);
+    fr.push(tint(boxAt(cw + 0.2, 0.25, cw + 0.2, 0, cubeY + ch / 2 + 0.12, 0), dark));
+    fr.push(tint(boxAt(cw + 0.2, 0.25, cw + 0.2, 0, cubeY - ch / 2 - 0.12, 0), dark));
+    fr.push(tint(boxAt(cw - 0.1, ch, cw - 0.1, 0, cubeY, 0), dark));
+    for (const sx of [-1, 1]) for (const sz of [-1, 1]) fr.push(tint(boxAt(0.03, ARENA.roof - cubeY - ch / 2, 0.03, sx * cw * 0.4, (ARENA.roof + cubeY + ch / 2) / 2, sz * cw * 0.4), new THREE.Color(0x30343b)));
+    // Light banks: a frame of 3 x 4 lamp heads aimed down at the court from each roof corner.
+    const faces = [];
+    for (const sx of [-1, 1]) {
+      for (const sz of [-1, 1]) {
+        const bx = sx * 10.5, bz = sz * 15.5, by = 21.5;
+        fr.push(tint(boxAt(2.2, 1.5, 0.25, bx, by, bz, { rotY: -sx * sz * 0.6, rotX: sz * 0.5 }), dark));
+        for (let i = 0; i < 4; i++) {
+          for (let j = 0; j < 3; j++) {
+            const d = new THREE.CircleGeometry(0.2, 16);
+            d.rotateX(sz * 0.5 + Math.PI * (sz > 0 ? 1 : 0));
+            d.rotateY(-sx * sz * 0.6);
+            const lx = (i - 1.5) * 0.5, ly = (j - 1) * 0.45;
+            const off = new THREE.Vector3(lx, ly, -sz * 0.14).applyEuler(new THREE.Euler(sz * 0.5, -sx * sz * 0.6, 0));
+            d.translate(bx + off.x, by + off.y, bz + off.z);
+            faces.push(tint(d, new THREE.Color(1.0, 0.97, 0.92).multiplyScalar(22)));
+          }
+        }
+      }
+    }
+    group.add(Object.assign(new THREE.Mesh(merge(fr), mats.props), { name: 'roof-rigging' }));
+    group.add(Object.assign(new THREE.Mesh(merge(faces), mats.glow), { name: 'light-banks' }));
+  }
+  const ledMats = [boardMat, fasciaMat, screenMat, cubeMat];
 
   // Spectators: one per seat (a few empty), dimmer further up; the umpire, ball kids, camera crew.
   const people = [];
@@ -442,7 +477,15 @@ export function buildStadium(ctx) {
   for (const [x, z, h] of [[-10.6, -15.6, 4.2], [10.6, -15.6, 4.2], [-10.6, 15.6, 3.0]]) {
     people.push({ x: x + 0.3 * Math.sign(-x), y: h + 0.05, z: z + 0.35, seated: false, shirt: '#111316', skin: '#a46b4b', hair: '#1a1310', trousers: '#111316', cap: 1, lit: 0.9, threshold: 2 });
   }
-  const crowd = createCrowd({ people, msaa: q.msaa > 0, name: 'stadium-crowd', light: 0xf4f0ff, lightK: 0.62 });
+  // Arena haze (the TV lights' beams hang in it): fog on the stands and roof, matched by the crowd.
+  const hazeCol = new THREE.Color(0x1b2130);
+  const HAZE = 0.016;
+  if (scene) scene.fog = new THREE.FogExp2(hazeCol, HAZE);
+  const crowd = createCrowd({
+    people, msaa: q.msaa > 0, name: 'stadium-crowd', light: 0xf4f0ff, lightK: 0.62,
+    keyDir: { x: 0, y: 1, z: 0.15 }, key: 0.8, sky: 0x8d9ab8, ground: 0x1d2230, hemiK: 0.4,
+    haze: { color: hazeCol, density: HAZE },
+  });
   group.add(crowd.mesh);
 
   let waveAt = Infinity;
@@ -455,8 +498,12 @@ export function buildStadium(ctx) {
     courts: 1,
     envIntensity: 0.5,
     reflectScale: 1.15,
+    // Image-based light: a dark indoor concourse with downlights (render/ibl.js).
+    ibl: { ambient: [1, 1.0], reflect: [1, 0.35] },
+    // Box-projected glass reflections: the boards / lower stands ring and the truss height.
+    reflectBox: { min: new THREE.Vector3(-ARENA.side.x0 - 2, -0.05, -ARENA.end.z0 - 2), max: new THREE.Vector3(ARENA.side.x0 + 2, ARENA.truss, ARENA.end.z0 + 2) },
     capturePosition: new THREE.Vector3(0, 2.5, 0),
-    turf: { dust: 0, wear: 0.45, grain: 0.12, ao: 1, tint: 0xf4f8ff },
+    turf: { dust: 0, wear: 0.45, grain: 0.12, ao: 1, tint: 0xe4ecff },
     glass: { grease: 0.45, felt: 0.6, water: 0 },
     capture: {
       ambient() { beams.visible = false; faceMesh.visible = false; },
@@ -484,6 +531,7 @@ export function buildStadium(ctx) {
     },
     dispose() {
       crowd.dispose();
+      if (scene && scene.fog) scene.fog = null;
       disposeTree(group, { keep: keepSet(courtMats) });
     },
   };

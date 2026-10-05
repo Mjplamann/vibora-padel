@@ -295,3 +295,8 @@ html.vp-swipe .vp-hud .hud-bar { right: calc(var(--safe-r, 12px) + var(--vpm-bar
 html.vp-swipe .load-foot { visibility: hidden; }
 /* The rotate hint (portrait, bottom centre) spans the gear's corner: the gear sits above it. */
 .vpm:has(.vpm-rotate:not([hidden])) .vpm-gear { bottom: calc(var(--safe-b, 8px) + 8px + var(--tap) + 1.6rem); }
+/* Portrait phones: the clean HUD's message line (app.css .hud-feed, centred under the top bar) would run
+   under the view / pause buttons; it drops just below them instead (still above the play region). */
+@media (orientation: portrait) {
+  html.vp-swipe .vp-hud .hud-feed { top: calc(var(--safe-t, 8px) + var(--tap, 44px) + 10px); max-width: 92vw; }
+}

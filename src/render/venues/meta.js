@@ -14,6 +14,9 @@ export const DEFAULT_VENUE = 'club';
  *   sources: positions the crowd is heard from (court frame) }
  * grade: display-referred colour grade applied after tone mapping (scene.js GRADE_SHADER):
  *   { lift [r,g,b], gamma [r,g,b], gain [r,g,b], saturation, contrast, vignette, warmth }
+ * hdri: the photographed panorama mixed into the venue's image-based lighting (assets/env/<hdri>.exr,
+ *   render/ibl.js; loaded lazily when the venue is shown)
+ * toneMapping: 'aces' | 'agx' | 'neutral' (render/scene.js output pass), chosen by eye per venue
  */
 const VENUES = {
   club: {
@@ -29,8 +32,12 @@ const VENUES = {
       sources: [{ x: -6.6, y: 1.1, z: -1.4 }, { x: 6.6, y: 1.1, z: 1.4 }, { x: 0, y: 2.0, z: -14 }],
     },
     ambience: 'club',
-    exposure: 1.0,
-    grade: { lift: [0.004, 0.004, 0.008], gamma: [1, 1, 1], gain: [1.0, 1.0, 1.02], saturation: 1.06, contrast: 1.05, vignette: 0.2, warmth: 0 },
+    hdri: 'warehouse',
+    // Round 6, chosen by eye (ACES / AgX / Neutral side by side): Neutral keeps the turf a true
+    // saturated court blue and the LED whites clean; ACES pushed it toward pastel cyan, AgX grey.
+    toneMapping: 'neutral',
+    exposure: 1.12,
+    grade: { lift: [0.004, 0.004, 0.008], gamma: [1, 1, 1], gain: [1.0, 1.0, 1.02], saturation: 1.04, contrast: 1.08, vignette: 0.2, warmth: 0 },
   },
   sunset: {
     id: 'sunset',
@@ -46,6 +53,9 @@ const VENUES = {
       sources: [{ x: -7.5, y: 1.2, z: 2.0 }, { x: -7.5, y: 1.2, z: -3.0 }, { x: 4, y: 1.4, z: 19.5 }],
     },
     ambience: 'sunset',
+    hdri: 'sunset',
+    // ACES: its warm highlight roll-off is the golden-hour look (Neutral kept the sky too pink).
+    toneMapping: 'aces',
     exposure: 1.0,
     grade: { lift: [0.014, 0.004, 0.022], gamma: [0.97, 1.0, 1.04], gain: [1.07, 1.0, 0.9], saturation: 1.12, contrast: 1.07, vignette: 0.28, warmth: 0.6 },
   },
@@ -65,8 +75,13 @@ const VENUES = {
       ],
     },
     ambience: 'stadium',
+    // 'esplanade' (a dark concourse with downlights): the 'hall' ballroom's chandeliers reflected as
+    // big white cones in the far glass, the 'night' field's horizon as white panes.
+    hdri: 'esplanade',
+    // Neutral: broadcast colour (saturated boards, a deep court blue under the TV lights).
+    toneMapping: 'neutral',
     exposure: 0.95,
-    grade: { lift: [0.0, 0.002, 0.008], gamma: [1, 1, 1], gain: [1.02, 1.01, 1.0], saturation: 1.1, contrast: 1.1, vignette: 0.16, warmth: 0.1 },
+    grade: { lift: [0.0, 0.002, 0.008], gamma: [1, 1, 1], gain: [1.02, 1.01, 1.0], saturation: 1.06, contrast: 1.12, vignette: 0.16, warmth: 0.1 },
   },
 };
 

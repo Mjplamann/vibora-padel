@@ -16,14 +16,14 @@ import { buildActorRacket } from './actorRacket.js';
  * @param {'right'|'left'} [o.handed]
  * @param {THREE.Group} [o.racket] racket to hold (default: a one-draw-call actor racket)
  * @param {string} [o.racketColor]
- * @param {number} [o.height] m
+ * @param {number|null} [o.height] m (null: the kit's height — kitFor gives every person one)
  * @param {0|1|'auto'} [o.lod]
  * @returns {{ root, update(actorState, dt, ctx?), setHanded(h), setKit(k), setLodFor(camPos), racket, human, animator, handed }}
  *   ctx (optional): { time, ball: {x,y,z}|null, cue, partner: {x,z}|null, racket: {grip, axis, normal}|null }
  */
 export function createHumanoid({
   shirt, shorts, skin, cap, shoe, accent, kit = null, seed = 'humanoid', handed = 'right', racket = null, racketColor = '#e8572a',
-  height = 1.8, lod = 'auto',
+  height = null, lod = 'auto',
 } = {}) {
   const base = {};
   if (shirt) base.shirt = shirt;

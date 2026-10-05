@@ -7,8 +7,11 @@
 // slumped) and a Mexican wave travelling round the venue. Each spectator has a response threshold,
 // so a small applause only gets part of the crowd going and a roar gets everyone up.
 //
-// API: createCrowd({ people, msaa, name }) -> { mesh, count, react(kind, level), update(dt, t),
-//   setLight(color, k), mood, dispose() }
+// API: createCrowd({ people, msaa, name, light, lightK, keyDir, key, sky, ground, hemiK }) -> { mesh,
+//   count, react(kind, level), update(dt, t), setLight(color, k), mood, dispose() }
+// Round 6: the figures are shaded as volumes (pseudo-normals per part: round limbs, a cylindrical
+// torso tapering to the waist, a spherical head) under the venue's key light and a sky / ground
+// hemisphere; tapered limbs, long or short sleeves, soft facial planes instead of drawn features.
 // people: [{ x, y (floor of the row), z, seated, shirt, skin, hair, trousers, scale, lit, seed }]
 import * as THREE from 'three';
 import { createRng } from '../util/math.js';
@@ -59,6 +62,10 @@ const VERT = /* glsl */ `
   varying vec3 vSkin;
   varying vec3 vHair;
   varying vec4 vMisc;
+  varying vec3 vRight;
+  varying vec3 vFwd;
+  varying float vSeed;
+  varying float vDist;
   const float W = 0.84;
   const float H = 2.3;
   float angDiff(float a, float b) { float d = a - b; return atan(sin(d), cos(d)); }
@@ -109,13 +116,26 @@ const VERT = /* glsl */ `
     vec3 fwd = lc > 1e-4 ? toCam / lc : vec3(0.0, 0.0, 1.0);
     vec3 right = vec3(fwd.z, 0.0, -fwd.x);
     vec3 wp = iPos + right * local.x + vec3(0.0, local.y, 0.0);
-    gl_Position = projectionMatrix * viewMatrix * vec4(wp, 1.0);
+    vRight = right;
+    vFwd = fwd;
+    vSeed = iSeed.x;
+    vec4 mv = viewMatrix * vec4(wp, 1.0);
+    vDist = length(mv.xyz);
+    gl_Position = projectionMatrix * mv;
   }
 `;
 
 const FRAG = /* glsl */ `
   uniform vec3 uLight;
   uniform float uA2C;
+  // Round 6 lighting: a key light (direction toward the light, colour x intensity) and a hemisphere
+  // (sky / ground) on volumetric pseudo-normals, so the figures read as round bodies, not cut-outs.
+  uniform vec3 uKeyDir;
+  uniform vec3 uKey;
+  uniform vec3 uSky;
+  uniform vec3 uGround;
+  uniform vec4 uHaze;     // venue haze: linear colour, FogExp2 density (the stands' own fog)
+  varying float vDist;
   varying vec2 vP;
   varying vec4 vPose;
   varying vec4 vHands;
@@ -123,28 +143,48 @@ const FRAG = /* glsl */ `
   varying vec3 vSkin;
   varying vec3 vHair;
   varying vec4 vMisc;
+  varying vec3 vRight;
+  varying vec3 vFwd;
+  varying float vSeed;
   float sdBox(vec2 p, vec2 b, float r) { vec2 q = abs(p) - b + r; return length(max(q, 0.0)) + min(max(q.x, q.y), 0.0) - r; }
   float sdSeg(vec2 p, vec2 a, vec2 b, float r) { vec2 pa = p - a, ba = b - a; float h = clamp(dot(pa, ba) / max(dot(ba, ba), 1e-6), 0.0, 1.0); return length(pa - ba * h) - r; }
+  // Tapered segment (round cone): radius ra at a, rb at b.
+  float sdCone(vec2 p, vec2 a, vec2 b, float ra, float rb) { vec2 pa = p - a, ba = b - a; float h = clamp(dot(pa, ba) / max(dot(ba, ba), 1e-6), 0.0, 1.0); return length(pa - ba * h) - mix(ra, rb, h); }
+  // Pseudo-normal of a limb seen side-on: round across its axis.
+  vec3 segN(vec2 p, vec2 a, vec2 b, float r) {
+    vec2 pa = p - a, ba = b - a; float h = clamp(dot(pa, ba) / max(dot(ba, ba), 1e-6), 0.0, 1.0);
+    vec2 q = (pa - ba * h) / r; float l2 = min(dot(q, q), 0.98);
+    return vec3(q, sqrt(1.0 - l2));
+  }
+  vec3 cylN(float x, float halfW, float top) { float q = clamp(x / halfW, -0.98, 0.98); return normalize(vec3(q, top, sqrt(1.0 - q * q))); }
+  float h1(float n) { return fract(sin(n * 127.1) * 43758.5453); }
   void main() {
     vec2 p = vP;
     float hipY = vPose.x, shY = vPose.y, headY = vPose.z, sc = vPose.w;
     float fw = max(fwidth(p.y), 1e-4) * 0.75;
-    // Parts (signed distance, metres).
-    float dLegs = min(sdBox(p - vec2(-0.085, hipY * 0.5), vec2(0.065, hipY * 0.5), 0.03), sdBox(p - vec2(0.085, hipY * 0.5), vec2(0.065, hipY * 0.5), 0.03));
-    float dTorso = sdBox(p - vec2(0.0, (hipY + shY) * 0.5), vec2(0.165 * sc, (shY - hipY) * 0.5), 0.07);
-    float dNeck = sdBox(p - vec2(0.0, shY + 0.04), vec2(0.04, 0.05), 0.02);
-    float dHead = length((p - vec2(0.0, headY)) * vec2(1.0, 0.92)) - 0.105 * sc;
-    vec2 shL = vec2(-0.165 * sc, shY - 0.04), shR = vec2(0.165 * sc, shY - 0.04);
+    float seated = step(hipY, 0.75 * sc);
+    // Parts (signed distance, metres). Thighs come toward the viewer when seated (short legs).
+    float legTop = hipY;
+    float dLegs = min(sdCone(p, vec2(-0.08, legTop), vec2(-0.085, 0.06), 0.075 * sc, 0.05), sdCone(p, vec2(0.08, legTop), vec2(0.085, 0.06), 0.075 * sc, 0.05));
+    float waist = 0.15 * sc, chest = 0.19 * sc;
+    float ty = clamp((p.y - hipY) / max(shY - hipY, 1e-3), 0.0, 1.0);
+    float halfT = mix(waist, chest, smoothstep(0.1, 0.8, ty));
+    float dTorso = sdBox(p - vec2(0.0, (hipY + shY) * 0.5 - 0.01), vec2(halfT, (shY - hipY) * 0.5 + 0.01), 0.06);
+    float dNeck = sdBox(p - vec2(0.0, shY + 0.045), vec2(0.045 * sc, 0.05), 0.02);
+    vec2 hc = vec2(0.0, headY);
+    float dHead = length((p - hc) * vec2(1.08, 0.9)) - 0.1 * sc;
+    vec2 shL = vec2(-0.17 * sc, shY - 0.035), shR = vec2(0.17 * sc, shY - 0.035);
     vec2 hL = vHands.xy, hR = vHands.zw;
     vec2 elL = mix(shL, hL, 0.5) + vec2(-0.05, -0.03), elR = mix(shR, hR, 0.5) + vec2(0.05, -0.03);
-    float dUpper = min(sdSeg(p, shL, elL, 0.05), sdSeg(p, shR, elR, 0.05));
-    float dFore = min(sdSeg(p, elL, hL, 0.042), sdSeg(p, elR, hR, 0.042));
-    float dHand = min(length(p - hL) - 0.045, length(p - hR) - 0.045);
+    float dUpL = sdCone(p, shL, elL, 0.055, 0.045), dUpR = sdCone(p, shR, elR, 0.055, 0.045);
+    float dFoL = sdCone(p, elL, hL, 0.043, 0.035), dFoR = sdCone(p, elR, hR, 0.043, 0.035);
+    float dUpper = min(dUpL, dUpR), dFore = min(dFoL, dFoR);
+    float dHand = min(length(p - hL) - 0.043, length(p - hR) - 0.043);
     // Hair: top / back of the head; long hair falls to the shoulders. Cap: crown and a brim.
-    float crown = step(headY + 0.01 - 0.05 * vMisc.w, p.y) * step(dHead, 0.0);
-    float longHair = vMisc.w * step(sdBox(p - vec2(0.0, headY - 0.07), vec2(0.12, 0.13), 0.05), 0.0) * step(0.075, abs(p.x));
-    float cap = vMisc.y * step(dHead, 0.0) * step(headY + 0.03, p.y);
-    float brim = vMisc.y * step(sdBox(p - vec2(0.03, headY + 0.03), vec2(0.13, 0.012), 0.008), 0.0);
+    float crown = smoothstep(headY - 0.01 - 0.05 * vMisc.w, headY + 0.03 - 0.05 * vMisc.w, p.y + 0.02 * abs(p.x) / 0.1);
+    float longHair = vMisc.w * step(sdBox(p - vec2(0.0, headY - 0.08), vec2(0.115, 0.14), 0.05), 0.0) * step(0.07, abs(p.x));
+    float cap = vMisc.y * step(dHead, 0.0) * step(headY + 0.025, p.y);
+    float brim = vMisc.y * step(sdBox(p - vec2(0.03, headY + 0.025), vec2(0.125, 0.011), 0.008), 0.0);
     // Coverage (anti-aliased by the pixel footprint).
     float cLegs = clamp(0.5 - dLegs / fw, 0.0, 1.0);
     float cTorso = clamp(0.5 - dTorso / fw, 0.0, 1.0);
@@ -153,27 +193,54 @@ const FRAG = /* glsl */ `
     float cUpper = clamp(0.5 - dUpper / fw, 0.0, 1.0);
     float cFore = clamp(0.5 - dFore / fw, 0.0, 1.0);
     float cHand = clamp(0.5 - dHand / fw, 0.0, 1.0);
-    vec3 trousers = vec3(vMisc.z);
-    vec3 col = trousers * 0.8;
+    // Sleeves: long (jackets, half the people) or short; shorts vs trousers by the seed.
+    float longSleeve = step(0.55, h1(vSeed * 31.0));
+    vec3 trousers = vec3(vMisc.z) * mix(vec3(1.0), vec3(0.85, 0.9, 1.15), step(0.5, h1(vSeed * 7.0)));
+    vec3 sleeveCol = mix(vSkin, vShirt, longSleeve);
+    // Albedo and pseudo-normal per part, later parts on top.
+    vec3 col = trousers * 0.85;
+    vec3 N = cylN(p.x - sign(p.x) * 0.08, 0.075, 0.0);
     float a = cLegs;
-    col = mix(col, vShirt, cTorso); a = max(a, cTorso);
-    col = mix(col, vSkin, cNeck); a = max(a, cNeck);
-    col = mix(col, vShirt, cUpper); a = max(a, cUpper);
-    col = mix(col, vSkin, cFore); a = max(a, cFore);
-    col = mix(col, vSkin * 1.05, cHand); a = max(a, cHand);
-    col = mix(col, vSkin, cHead); a = max(a, cHead);
-    col = mix(col, vHair, max(crown * (1.0 - vMisc.y), longHair) * cHead + longHair * (1.0 - cHead));
+    vec3 nT = cylN(p.x, halfT + 0.02, smoothstep(shY - 0.1, shY + 0.02, p.y) * 0.8 - 0.25 * (1.0 - ty));
+    col = mix(col, vShirt, cTorso); N = mix(N, nT, cTorso); a = max(a, cTorso);
+    // Shirt hem / collar / placket detail (low contrast).
+    col *= 1.0 - 0.18 * cTorso * (1.0 - smoothstep(0.0, 0.035, abs(p.y - hipY - 0.02)));
+    col = mix(col, vSkin * 0.85, cNeck); N = mix(N, cylN(p.x, 0.05, 0.0), cNeck); a = max(a, cNeck);
+    vec3 nUp = dUpL < dUpR ? segN(p, shL, elL, 0.055) : segN(p, shR, elR, 0.055);
+    col = mix(col, vShirt * 0.96, cUpper); N = mix(N, nUp, cUpper); a = max(a, cUpper);
+    vec3 nFo = dFoL < dFoR ? segN(p, elL, hL, 0.043) : segN(p, elR, hR, 0.043);
+    col = mix(col, sleeveCol, cFore); N = mix(N, nFo, cFore); a = max(a, cFore);
+    col = mix(col, vSkin, cHand); a = max(a, cHand);
+    vec2 hq = (p - hc) / (0.1 * sc);
+    vec3 nH = vec3(hq * vec2(0.92, 1.1), sqrt(max(0.02, 1.0 - dot(hq, hq))));
+    // Face: soft eye sockets and a lit brow / nose ridge (no cartoon features).
+    float ey = (p.y - headY - 0.005) / 0.018;
+    float eyes = exp(-ey * ey) * smoothstep(0.012, 0.03, abs(p.x)) * smoothstep(0.075, 0.04, abs(p.x));
+    // Nose ridge catches the light, a soft mouth line, darker ears / jaw edge (all low contrast).
+    float nx = p.x / 0.012;
+    float nose = exp(-nx * nx) * smoothstep(headY - 0.045, headY - 0.005, p.y) * smoothstep(headY + 0.02, headY - 0.005, p.y);
+    float my = (p.y - headY + 0.052) / 0.008;
+    float mouth = exp(-my * my) * smoothstep(0.04, 0.015, abs(p.x));
+    float rim = smoothstep(0.06, 0.1, abs(p.x));
+    vec3 face = vSkin * (1.0 - 0.3 * eyes - 0.18 * mouth - 0.15 * rim) * (1.0 + 0.12 * nose) + vec3(0.04, 0.0, 0.0) * mouth * vSkin;
+    col = mix(col, face, cHead); N = mix(N, nH, cHead); a = max(a, cHead);
+    float hairK = max(crown * (1.0 - vMisc.y), longHair) * cHead + longHair * (1.0 - cHead);
+    col = mix(col, vHair, hairK);
     a = max(a, longHair);
-    col = mix(col, vShirt * 0.9, max(cap, brim));
+    col = mix(col, vShirt * 0.85, max(cap, brim));
     a = max(a, brim);
-    // Simple form shading: lit from above / front, darker toward the silhouette and the legs.
-    float body = clamp(1.0 - abs(p.x) / 0.22, 0.0, 1.0);
-    float shade = 0.62 + 0.38 * body;
-    shade *= mix(0.75, 1.0, smoothstep(hipY - 0.3, shY, p.y));
+    N = normalize(N);
+    // Lighting: key (wrapped a little: cloth), hemisphere, a touch of occlusion low on the body.
+    vec3 Nw = normalize(vRight * N.x + vec3(0.0, N.y, 0.0) + vFwd * N.z);
+    float ndl = max(0.0, (dot(Nw, uKeyDir) + 0.25) / 1.25);
+    vec3 hemi = mix(uGround, uSky, 0.5 + 0.5 * Nw.y);
+    float occ = mix(0.55, 1.0, smoothstep(hipY - 0.35, hipY + 0.25, p.y)) * mix(0.8, 1.0, smoothstep(0.0, 0.35, N.z));
     // Crowds read less saturated than their shirts under arena light; a per-person exposure jitter.
     float lum = dot(col, vec3(0.2126, 0.7152, 0.0722));
-    col = mix(vec3(lum), col, 0.78);
-    vec3 c = col * shade * uLight * vMisc.x * (0.86 + 0.28 * fract(vMisc.z * 13.7 + vP.x * 0.0 + vPose.w * 9.1));
+    col = mix(vec3(lum), col, 0.82);
+    vec3 c = col * (uKey * ndl + hemi) * occ * uLight * vMisc.x * (0.88 + 0.24 * fract(vMisc.z * 13.7 + vPose.w * 9.1));
+    float hz = 1.0 - exp(-uHaze.w * uHaze.w * vDist * vDist);
+    c = mix(c, uHaze.rgb, hz);
     if (uA2C < 0.5 && a < 0.5) discard;
     if (a < 0.02) discard;
     gl_FragColor = vec4(c, uA2C > 0.5 ? a : 1.0);
@@ -183,7 +250,10 @@ const FRAG = /* glsl */ `
 /**
  * @param {{ people: object[], msaa?: boolean, name?: string, light?: THREE.Color|number, center?: {x,z} }} o
  */
-export function createCrowd({ people, msaa = true, name = 'crowd', light = 0xffffff, lightK = 1, center = { x: 0, z: 0 } } = {}) {
+export function createCrowd({
+  people, msaa = true, name = 'crowd', light = 0xffffff, lightK = 1, center = { x: 0, z: 0 },
+  keyDir = { x: 0.2, y: 0.9, z: 0.4 }, key = 0.78, sky = 0x9fb0c8, ground = 0x3a3530, hemiK = 0.42, haze = null,
+} = {}) {
   const n = people.length;
   const quad = new THREE.PlaneGeometry(1, 1);
   const geo = new THREE.InstancedBufferGeometry();
@@ -226,6 +296,11 @@ export function createCrowd({ people, msaa = true, name = 'crowd', light = 0xfff
     uCenter: { value: new THREE.Vector3(center.x, 0, center.z) },
     uLight: { value: new THREE.Color(light).multiplyScalar(lightK) },
     uA2C: { value: msaa ? 1 : 0 },
+    uKeyDir: { value: new THREE.Vector3(keyDir.x, keyDir.y, keyDir.z).normalize() },
+    uKey: { value: new THREE.Color(1, 1, 1).multiplyScalar(key) },
+    uSky: { value: new THREE.Color(sky).multiplyScalar(hemiK) },
+    uGround: { value: new THREE.Color(ground).multiplyScalar(hemiK) },
+    uHaze: { value: haze ? new THREE.Vector4(haze.color.r, haze.color.g, haze.color.b, haze.density) : new THREE.Vector4(0, 0, 0, 0) },
   };
   const mat = new THREE.ShaderMaterial({
     uniforms, vertexShader: VERT, fragmentShader: FRAG, alphaToCoverage: !!msaa, transparent: false, side: THREE.DoubleSide,

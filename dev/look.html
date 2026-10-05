@@ -1,0 +1,214 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Víbora Padel — look dev</title>
+<script type="importmap">{"imports":{"three":"../vendor/three/three.module.js","three/addons/":"../vendor/three/addons/"}}</script>
+<style>
+  html, body { margin: 0; height: 100%; background: #050608; overflow: hidden; }
+  canvas { display: block; width: 100vw; height: 100vh; }
+  #hud { position: fixed; left: 12px; bottom: 10px; font: 12px/1.3 ui-monospace, monospace; color: #8fa3b8; opacity: 0.8; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="hud"></div>
+<script type="module">
+// Look-development page (round 6: lighting, materials, pipeline). Like dev/venues.html, plus:
+//   ?tm=aces|agx|neutral  ?exp=1.0       tone mapping / exposure override
+//   ?hdri=name&wa=0.3&wr=0.2&rot=0      panorama and its ambient / reflection weights (render/ibl.js)
+//   ?racket=0                            no first-person racket in view (default: one in the right hand)
+//   ?ibl=0                               venue-only capture (no panorama)
+// window.shot(view, { tm, exp }) re-renders a view; window.perf(n) times n frames with a GPU sync
+// (1-pixel readPixels after each), a fill-rate / shading proxy on the software rasteriser.
+import * as THREE from 'three';
+import { createRenderer } from '../src/render/scene.js';
+import { buildEnvironment, preloadVenueIbl, TONE_MAPPINGS } from '../src/render/environment.js';
+import { requestHdri } from '../src/render/ibl.js';
+import { createEffects } from '../src/render/effects.js';
+import { createBallView } from '../src/render/ballView.js';
+import { buildRacket } from '../src/render/racket.js';
+import { loadFonts } from '../src/render/textures.js';
+
+const qs = new URLSearchParams(location.search);
+const view0 = qs.get('view') || 'baseline';
+const quality = qs.get('quality') || 'high';
+const venue = qs.get('venue') || 'club';
+const frames = Number(qs.get('frames') || 2);
+const num = (k) => (qs.has(k) ? Number(qs.get(k)) : undefined);
+
+await loadFonts();
+const iblOverrides = {};
+if (qs.get('hdri')) iblOverrides.hdri = qs.get('hdri');
+if (qs.has('wa')) iblOverrides.ambient = [num('va') ?? 1, num('wa')];
+if (qs.has('ei')) iblOverrides.envIntensity = num('ei');
+if (qs.has('sky')) iblOverrides.sky = num('sky');
+if (qs.has('floor')) iblOverrides.floor = num('floor');
+if (qs.has('wr')) iblOverrides.reflect = [num('vr') ?? 1, num('wr')];
+if (qs.has('rot')) iblOverrides.rotationDeg = num('rot');
+if (qs.get('ibl') === '0') iblOverrides.hdri = null;
+if (iblOverrides.hdri) await requestHdri(iblOverrides.hdri).catch(() => null);
+else if (qs.get('ibl') !== '0') await preloadVenueIbl(venue);
+
+const canvas = document.getElementById('c');
+const app = createRenderer(canvas, { quality, dynamicResolution: false });
+app.resize(innerWidth, innerHeight);
+const t0 = performance.now();
+const env = buildEnvironment(app.scene, app.renderer, { quality, venue, iblOverrides: Object.keys(iblOverrides).length ? iblOverrides : null, debug: true });
+const buildMs = Math.round(performance.now() - t0);
+const fx = createEffects(app.scene, { net: env.net });
+const ballView = createBallView(app.scene, {});
+window.env = env;
+window.app = app;
+// Turf diagnostics: ?turfdbg=nonormal,nomap,norough,nosheen
+for (const k of (qs.get('turfdbg') || '').split(',')) {
+  const t = env.materials.turf;
+  if (k === 'nonormal') t.normalScale.set(0, 0);
+  if (k === 'nomap') { t.map = null; t.needsUpdate = true; }
+  if (k === 'norough') { t.roughnessMap = null; t.roughness = 0.9; t.needsUpdate = true; }
+  if (k === 'nosheen') t.sheen = 0;
+}
+// Pipeline diagnostics: ?dbg=noao,noshadow,noshell,nosmaa
+for (const k of (qs.get('dbg') || '').split(',')) {
+  if (k === 'noao') app.aoPass.enabled = false;
+  if (k === 'aoview') app.aoPass.compMat.uniforms.uDebug.value = 1;
+  if (k.startsWith('aoeps')) app.aoPass.aoMat.uniforms.uEps.value = Number(k.slice(5));
+  if (k.startsWith('aobias')) app.aoPass.aoMat.uniforms.uBias.value = Number(k.slice(6));
+  if (k === 'noshell') app.scene.traverse((o) => { if (o.name === 'turf-shells') o.visible = false; });
+  if (k === 'noshadow') {
+    app.renderer.shadowMap.enabled = false;
+    app.scene.traverse((o) => { if (o.material) for (const m of [].concat(o.material)) m.needsUpdate = true; });
+  }
+}
+const baseTone = app.renderer.toneMapping;
+const baseExp = app.renderer.toneMappingExposure;
+
+const cam = app.camera;
+const racket = buildRacket({ color: '#e8572a' });
+racket.visible = qs.get('racket') !== '0';
+app.scene.add(racket);
+const fp = (x, z, yaw = 0, pitch = -14, fov = 74) => () => {
+  cam.fov = fov;
+  cam.position.set(x, 1.64, z);
+  cam.rotation.order = 'YXZ';
+  cam.rotation.set(THREE.MathUtils.degToRad(pitch), THREE.MathUtils.degToRad(yaw), 0);
+  return true;
+};
+const look = (p, t, fov) => () => {
+  cam.fov = fov;
+  cam.position.set(...p);
+  cam.lookAt(...t);
+  return false;
+};
+const views = {
+  baseline: fp(2.3, 8.3),
+  net: fp(1.2, 2.6, 0, -10),
+  left: fp(2.3, 8.3, 45, -6),
+  right: fp(-2.3, 8.3, -40, -6),
+  back: fp(0.5, 3, 180, -8),
+  down: fp(2.3, 8.3, 0, -38),
+  overview: look([0, 9.5, 21], [0, 0.5, -2], 55),
+  side: look([-13, 4.0, 4], [0, 1.0, -1.5], 55),
+  crowd: look([3, 1.7, 6], [14, 4, -2], 60),
+  stand: look([4.5, 2.2, 2], [13, 3.5, 0], 50),
+  racket: look([2.25, 1.62, 8.32], [2.55, 1.2, 7.7], 40),
+  pane: look([2.0, 1.3, 7.6], [2.6, 1.2, 10], 55),
+  glass: look([3.4, 1.5, 7.2], [5, 1.2, 9.6], 60),
+  feet: look([2.3, 1.64, 7.8], [2.3, 0, 6.2], 70),
+  people: look([-4.2, 1.1, -1.0], [-6.6, 0.85, -1.4], 40),
+  bar: look([0, 1.5, -9.0], [0, 1.2, -14], 50),
+  post: look([4.1, 1.0, 1.6], [5.6, 0.2, -0.2], 55),
+  umpire: look([-3.2, 1.5, 3.4], [-6.4, 1.5, 0], 50),
+  ceiling: fp(2.3, 8.3, 0, 22),
+};
+// First-person racket: held in the right hand at the ready position (racket frame: +Y handle -> tip,
+// +Z face normal), placed relative to the camera.
+const placeRacket = () => {
+  // Camera space: x right, y up, -z forward. Handle -> tip leans up, left and away; face toward the net.
+  const y = new THREE.Vector3(-0.32, 0.78, -0.54).normalize();
+  const z = new THREE.Vector3(0.15, 0.35, 1).normalize();
+  z.addScaledVector(y, -z.dot(y)).normalize();
+  const x = new THREE.Vector3().crossVectors(y, z);
+  const q = new THREE.Quaternion().setFromRotationMatrix(new THREE.Matrix4().makeBasis(x, y, z));
+  racket.position.set(0.2, -0.36, -0.4).applyQuaternion(cam.quaternion).add(cam.position);
+  racket.quaternion.copy(cam.quaternion).multiply(q);
+};
+const setView = (name) => {
+  const isFp = (views[name] || views.baseline)();
+  racket.visible = qs.get('racket') !== '0' && (isFp || name === 'racket');
+  cam.updateProjectionMatrix();
+  cam.updateMatrixWorld();
+  if (name === 'racket') {
+    views.baseline();
+    cam.updateMatrixWorld();
+    placeRacket();
+    (views.racket)();
+    cam.updateProjectionMatrix();
+    cam.updateMatrixWorld();
+  } else placeRacket();
+};
+setView(view0);
+const applyTone = (tm, exp) => {
+  app.renderer.toneMapping = tm ? TONE_MAPPINGS[tm] : baseTone;
+  app.renderer.toneMappingExposure = exp ?? baseExp;
+};
+applyTone(qs.get('tm'), num('exp'));
+
+/** Test hook: switch view (and tone mapping / exposure), advance the animation by t seconds, render twice. */
+window.shot = (name, { react: r = null, t = 0, tm = qs.get('tm'), exp = num('exp') } = {}) => {
+  setView(name);
+  applyTone(tm, exp);
+  if (r) env.react(r, 1);
+  for (let i = 0; i < Math.round(t * 30); i++) env.update(1 / 30, cam);
+  app.render(1 / 60);
+  app.render(1 / 60);
+  const st = app.stats;
+  hud.textContent = `${env.venue.id} · ${name} · ${app.quality} · ${tm || 'venue'} · draws ${st.drawCalls} · tris ${(st.triangles / 1000).toFixed(0)}k`;
+  return { venue: env.venue.id, view: name, tm: tm || 'venue', drawCalls: st.drawCalls, triangles: st.triangles, hdri: env.ibl.withHdri, venueMean: +(env.ibl.venueMean || 0).toFixed(3) };
+};
+/** GPU proxy: n synced frames, median ms. */
+window.perf = (n = 5) => {
+  const gl = app.renderer.getContext();
+  const px = new Uint8Array(4);
+  const ms = [];
+  for (let i = 0; i < n; i++) {
+    const a = performance.now();
+    app.render(1 / 60);
+    gl.readPixels(0, 0, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, px);
+    ms.push(performance.now() - a);
+  }
+  ms.sort((x, y) => x - y);
+  const st = app.stats;
+  return { venue: env.venue.id, medianMs: Math.round(ms[n >> 1]), drawCalls: st.drawCalls, triangles: st.triangles, pixelRatio: st.pixelRatio,
+    programs: app.renderer.info.programs.length, textures: app.renderer.info.memory.textures, geometries: app.renderer.info.memory.geometries };
+};
+
+const ball = { pos: { x: 1.05, y: 1.32, z: 2.4 }, vel: { x: -2, y: 3, z: 24 }, spin: { x: 40, y: 0, z: 0 }, id: 1, atRest: false };
+if (qs.get('ball') !== '0') {
+  for (let i = 0; i < 8; i++) {
+    ball.pos.x += ball.vel.x / 120; ball.pos.y += ball.vel.y / 120; ball.pos.z += ball.vel.z / 120;
+    ballView.update(ball, 1 / 120, 1);
+  }
+}
+fx.update(1 / 60);
+// Advance the venue animation (LED programmes fade in from black at t = 0) by ?t= seconds (default 2).
+for (let i = 0, nT = Math.round((num('t') ?? 2) * 30); i < nT; i++) env.update(1 / 30, cam);
+const hud = document.getElementById('hud');
+let n = 0;
+function frame() {
+  app.render(1 / 60);
+  n++;
+  const s = app.stats;
+  hud.textContent = `${venue} · ${view0} · ${app.quality} · build ${buildMs} ms · draws ${s.drawCalls} · tris ${(s.triangles / 1000).toFixed(0)}k · hdri ${env.ibl.withHdri}`;
+  if (n === frames) {
+    window.__stats = { venue, view: view0, quality, drawCalls: s.drawCalls, triangles: s.triangles, buildMs, hdri: env.ibl.withHdri };
+    window.__ready = true;
+    if (qs.get('hud') === '0') hud.remove();
+  }
+  if (n < frames) requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>

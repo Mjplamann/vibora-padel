@@ -11,6 +11,7 @@
 // swaps the layer at run time; env.venue is the venue metadata the audio engine reads.
 import * as THREE from 'three';
 import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
+import { RoundedBoxGeometry } from 'three/addons/geometries/RoundedBoxGeometry.js';
 import { COURT, netHeightAt } from '../config.js';
 import { QUALITY } from './scene.js';
 import {
@@ -23,6 +24,8 @@ import { venueMeta, venueId } from './venues/meta.js';
 import { buildClub } from './venues/club.js';
 import { buildSunset } from './venues/sunset.js';
 import { buildStadium } from './venues/stadium.js';
+import { createIblCapture, requestHdri, hdriIfReady } from './ibl.js';
+import { detailNormal, addTriplanarDetail } from './detailMaps.js';
 
 export { VENUE_IDS, venueMeta } from './venues/meta.js';
 
@@ -43,6 +46,21 @@ export { HALL, LIGHT } from './venues/club.js';
 const REFLECTIVE = ['glass', 'glassEdge', 'bolt', 'steel'];
 const REFLECT_INTENSITY = { glass: 1.5, glassEdge: 1.0, bolt: 0.8, steel: 0.45 };
 const VENUE_BUILDERS = { club: buildClub, sunset: buildSunset, stadium: buildStadium };
+/** Output tone mapping per venue (venues/meta.js toneMapping). */
+export const TONE_MAPPINGS = { aces: THREE.ACESFilmicToneMapping, agx: THREE.AgXToneMapping, neutral: THREE.NeutralToneMapping };
+
+/**
+ * Starts loading a venue's panorama (render/ibl.js) before the environment is built, so the first
+ * capture already includes it. Resolves true when loaded, false on failure or after `timeoutMs`.
+ */
+export function preloadVenueIbl(id, timeoutMs = 4000) {
+  const name = venueMeta(id).hdri;
+  if (!name) return Promise.resolve(false);
+  return Promise.race([
+    requestHdri(name).then(() => true, () => false),
+    new Promise((ok) => setTimeout(() => ok(false), timeoutMs)),
+  ]);
+}
 
 // ---------------------------------------------------------------------------------------------
 // Materials
@@ -54,7 +72,21 @@ const VENUE_BUILDERS = { club: buildClub, sunset: buildSunset, stadium: buildSta
  */
 function makeGlassMaterial() {
   const smudge = glassSmudgeTexture();
-  const uniforms = { uSmudge: { value: smudge }, uSmudgeK: { value: new THREE.Vector4(1, 1, 0, 0) } }; // grease, felt, water, unused
+  const uniforms = {
+    uSmudge: { value: smudge },
+    uSmudgeK: { value: new THREE.Vector4(1, 1, 0, 0) }, // grease, felt, water, unused
+    // Round 6: box-projected (parallax-corrected) reflections: the reflection ray is intersected with
+    // the venue's interior box and looked up from the capture point, so the hall's lights and walls
+    // sit where they really are in the glass and slide correctly as the player moves.
+    uBoxMin: { value: new THREE.Vector3(-21, -0.5, -15.5) },
+    uBoxMax: { value: new THREE.Vector3(21, 11, 15.5) },
+    uProbe: { value: new THREE.Vector3(0, 2.2, 0) },
+    uBoxOn: { value: 0 },
+  };
+  const boxChunk = THREE.ShaderChunk.envmap_physical_pars_fragment.replace(
+    'reflectVec = transformDirectionByInverseViewMatrix( reflectVec, viewMatrix );',
+    'reflectVec = transformDirectionByInverseViewMatrix( reflectVec, viewMatrix );\n\t\t\treflectVec = glassBoxProject( vGlassW, reflectVec );',
+  );
   const m = new THREE.MeshPhysicalMaterial({
     color: 0xd6ece4,
     roughness: 0.04,
@@ -62,7 +94,7 @@ function makeGlassMaterial() {
     ior: 1.52,
     specularIntensity: 1,
     transparent: true,
-    opacity: 0.14,
+    opacity: 0.1,
     premultipliedAlpha: true,
     depthWrite: false,
     envMapIntensity: 1.5,
@@ -85,7 +117,17 @@ function makeGlassMaterial() {
         varying vec3 vGlassN;
         uniform sampler2D uSmudge;
         uniform vec4 uSmudgeK;
-        vec4 gSm = vec4(0.0);`)
+        uniform vec3 uBoxMin, uBoxMax, uProbe;
+        uniform float uBoxOn;
+        vec4 gSm = vec4(0.0);
+        vec3 glassBoxProject(vec3 p, vec3 r) {
+          if (uBoxOn < 0.5) return r;
+          vec3 rr = vec3(abs(r.x) < 1e-4 ? 1e-4 : r.x, abs(r.y) < 1e-4 ? 1e-4 : r.y, abs(r.z) < 1e-4 ? 1e-4 : r.z);
+          vec3 t = mix((uBoxMin - p) / rr, (uBoxMax - p) / rr, step(0.0, rr));
+          float d = max(0.0, min(min(t.x, t.y), t.z));
+          return normalize(p + r * d - uProbe);
+        }`)
+      .replace('#include <envmap_physical_pars_fragment>', boxChunk)
       .replace('#include <roughnessmap_fragment>', `#include <roughnessmap_fragment>
         {
           // Panel-space smudge lookup: lateral coordinate along the wall, height; each 2 m panel
@@ -99,7 +141,9 @@ function makeGlassMaterial() {
           vec2 suv = vec2((u + step(0.5, ofs.x)) * 0.5, clamp(vGlassW.y / 3.0, 0.0, 1.0));
           gSm = texture2D(uSmudge, suv) * vec4(uSmudgeK.xyz, 1.0);
           float smear = clamp(gSm.r * 0.9 + gSm.g * 0.6 + gSm.b * 0.5, 0.0, 1.0);
-          roughnessFactor = mix(roughnessFactor, 0.32, smear);
+          // Round 6: smears haze the reflection but stay glassy (0.32 spread one floodlight's glint
+          // into a blown-out patch across a whole panel).
+          roughnessFactor = mix(roughnessFactor, 0.15, smear);
         }`)
       .replace('#include <opaque_fragment>', `
         // Sand dust film near the bottom of the panels and faint haze overall.
@@ -123,7 +167,7 @@ function makeGlassMaterial() {
         gl_FragColor = vec4(totalDiffuse * diffuseColor.a * 0.3 + dustCol * dust + smCol * smA * 0.9 + totalSpecular + totalEmissiveRadiance, a);`)
       .replace('#include <premultiplied_alpha_fragment>', '');
   };
-  m.customProgramCacheKey = () => 'vibora-glass-2';
+  m.customProgramCacheKey = () => 'vibora-glass-3';
   return m;
 }
 
@@ -131,8 +175,13 @@ function makeGlassMaterial() {
  * Sand-filled artificial turf. Fibres lean with the grain (lighter looking along it, darker into
  * it), sand shows between the tufts and drifts against the walls, contact occlusion where the
  * glass meets the floor, and (outdoors) the analytic shadow of the glass / mesh / net.
+ * Round 6: the fibre maps are read with a small LOD bias (the 9.5 mm tuft rows beat against the
+ * pixel grid at standing distance), the polyethylene fibres get a broader, brighter sheen toward
+ * the lights, and `shell: true` builds the near-field pile layers (turfShells below) that share
+ * every uniform with the carpet.
  */
-function makeTurfMaterial(renderer, q) {
+const TURF_SHELL_H = 0.0105; // free pile above the sand (m) covered by the shells
+function makeTurfMaterial(renderer, q, { shell = false, uniforms: shared = null } = {}) {
   const tt = turfTextures(renderer, { size: q.turfSize });
   const reps = new THREE.Vector2((HW * 2) / TURF_TILE_M, (HL * 2) / TURF_TILE_M);
   for (const t of [tt.map, tt.normalMap, tt.roughnessMap]) t.repeat.copy(reps);
@@ -144,12 +193,17 @@ function makeTurfMaterial(renderer, q) {
     roughnessMap: tt.roughnessMap,
     roughness: 1,
     metalness: 0,
-    sheen: 0.12,
-    sheenColor: new THREE.Color(0.32, 0.46, 0.72),
-    sheenRoughness: 0.5,
-    envMapIntensity: 0.6,
+    specularIntensity: 0.75,
+    sheen: shell ? 0 : 0.24,
+    sheenColor: new THREE.Color(0.34, 0.5, 0.82),
+    sheenRoughness: 0.55,
+    envMapIntensity: 0.45,
   });
-  const uniforms = {
+  if (shell) {
+    m.transparent = true;
+    m.depthWrite = false;
+  }
+  const uniforms = shared || {
     uWear: { value: wear },
     uLineHalf: { value: COURT.lineWidth / 2 },
     uService: { value: COURT.serviceLine - COURT.lineWidth / 2 },
@@ -158,24 +212,37 @@ function makeTurfMaterial(renderer, q) {
     // x: dust (outdoor sand film), y: wear scale, z: grain sheen, w: contact occlusion strength
     uTurfK: { value: new THREE.Vector4(0, 1, 0.1, 1) },
     uTurfTint: { value: new THREE.Color(1, 1, 1) },
+    uTurfBias: { value: 0.7 },
+    uShellFade: { value: new THREE.Vector2(2.4, 3.4) },
   };
   m.userData.uniforms = uniforms;
+  const biased = (chunk, tex, uv) => THREE.ShaderChunk[chunk].replace(`texture2D( ${tex}, ${uv} )`, `texture2D( ${tex}, ${uv}, uTurfBias )`);
   m.onBeforeCompile = (sh) => {
     Object.assign(sh.uniforms, uniforms);
     sh.vertexShader = sh.vertexShader
-      .replace('#include <common>', '#include <common>\nvarying vec2 vCourt;\nvarying vec3 vTurfW;')
+      .replace('#include <common>', `#include <common>\nvarying vec2 vCourt;\nvarying vec3 vTurfW;\n${shell ? 'varying float vShellL;' : ''}`)
       .replace('#include <begin_vertex>', '#include <begin_vertex>\nvCourt = position.xz;')
       .replace('#include <worldpos_vertex>', `#include <worldpos_vertex>
         vTurfW = (modelMatrix * vec4(transformed, 1.0)).xyz;
         #ifdef USE_INSTANCING
         vTurfW = (modelMatrix * instanceMatrix * vec4(transformed, 1.0)).xyz;
-        #endif`);
+        #endif
+        ${shell ? `
+        // Shells follow the camera: court coordinates and texture coordinates from the world position
+        // (the carpet's own mapping: u = x + 5, v = 10 - z, one tile per TURF_TILE_M).
+        vCourt = vTurfW.xz;
+        vec2 tuv = vec2(vTurfW.x + ${HW.toFixed(1)}, ${HL.toFixed(1)} - vTurfW.z) / ${TURF_TILE_M.toFixed(3)};
+        vMapUv = tuv;
+        vNormalMapUv = tuv;
+        vRoughnessMapUv = tuv;
+        vShellL = instanceMatrix[3].y / ${TURF_SHELL_H.toFixed(4)};` : ''}`);
     sh.fragmentShader = sh.fragmentShader
       .replace('#include <common>', `#include <common>
         varying vec2 vCourt;
         varying vec3 vTurfW;
+        ${shell ? 'varying float vShellL;\nuniform vec2 uShellFade;' : ''}
         uniform sampler2D uWear;
-        uniform float uLineHalf, uService, uCenterEnd;
+        uniform float uLineHalf, uService, uCenterEnd, uTurfBias;
         uniform vec4 uTurfK;
         uniform vec3 uTurfTint;
         ${VEIL_GLSL}
@@ -187,8 +254,9 @@ function makeTurfMaterial(renderer, q) {
           return clamp((min(d + 0.5 * f, h) - max(d - 0.5 * f, -h)) / f, 0.0, 1.0);
         }`)
       .replace('#include <map_fragment>', `
-        vec4 texel = texture2D(map, vMapUv);
-        float sandMask = texture2D(roughnessMap, vRoughnessMapUv).r;
+        vec4 texel = texture2D(map, vMapUv, uTurfBias);
+        vec4 rmS = texture2D(roughnessMap, vRoughnessMapUv, uTurfBias);
+        float sandMask = rmS.r;
         vec4 wearS = texture2D(uWear, vec2((vCourt.x + 5.0) / 10.0, (vCourt.y + 10.0) / 20.0));
         float wear = wearS.r * uTurfK.y;
         float loose = wearS.g;
@@ -210,7 +278,7 @@ function makeTurfMaterial(renderer, q) {
         col = mix(col, sandCol * (0.85 + 0.3 * lum / 0.06), clamp(wear * 0.16 * (1.0 - sandMask) + loose * 0.6, 0.0, 0.85));
         // Outdoors: a film of wind-blown sand and dust over the whole carpet.
         col = mix(col, sandCol * 1.25, uTurfK.x * (0.12 + 0.3 * sandMask + 0.25 * loose));
-        // Playing lines: exact 5 cm, box-filtered against the pixel footprint (alias-free).
+        // Playing lines: inlaid white turf, exact 5 cm, box-filtered against the pixel footprint.
         float fz = max(fwidth(vCourt.y), 1e-4);
         float fx = max(fwidth(vCourt.x), 1e-4);
         float edgeNoise = (lum - 0.05) * 0.06 * (1.0 - smoothstep(0.004, 0.02, fz));
@@ -229,18 +297,75 @@ function makeTurfMaterial(renderer, q) {
         float ao = 1.0 - 0.32 * exp(-dW / 0.09) - 0.12 * exp(-dW / 0.55) - 0.18 * corner;
         ao *= 1.0 - 0.28 * exp(-az / 0.05) * step(abs(vCourt.x), 5.0);
         gAO = mix(1.0, clamp(ao, 0.0, 1.0), uTurfK.w);
-        gSunVeil = uSun.w > 0.5 ? enclosureVeil(vec3(vCourt.x, 0.0, vCourt.y), uSun.xyz) : vec3(1.0);`)
-      .replace('#include <roughnessmap_fragment>', `#include <roughnessmap_fragment>
-        roughnessFactor = mix(roughnessFactor, 0.93, clamp(gWear * 0.3, 0.0, 1.0));`)
-      .replace('#include <normal_fragment_maps>', `#include <normal_fragment_maps>
+        gSunVeil = uSun.w > 0.5 ? enclosureVeil(vec3(vCourt.x, 0.0, vCourt.y), uSun.xyz) : vec3(1.0);
+        ${shell ? `
+        {
+          // Pile shells: a fibre is present at this layer where the pile height reaches it; tips
+          // catch more light than the shaded lower pile. Faded out with distance and at the walls.
+          float ph = texture2D(roughnessMap, vRoughnessMapUv, 0.35).b;
+          float th = 0.3 + 0.6 * vShellL;
+          float a = smoothstep(th - 0.06, th + 0.06, ph);
+          float dc = length(vTurfW.xz - cameraPosition.xz);
+          a *= 1.0 - smoothstep(uShellFade.x, uShellFade.y, dc);
+          a *= step(abs(vCourt.x), 4.97) * step(az, 9.97) * (1.0 - smoothstep(0.0, 0.03, -dW));
+          if (a < 0.02) discard;
+          diffuseColor.rgb *= mix(0.88, 1.08, vShellL);
+          diffuseColor.a = a;
+        }` : ''}`)
+      .replace('#include <roughnessmap_fragment>', `${biased('roughnessmap_fragment', 'roughnessMap', 'vRoughnessMapUv')}
+        roughnessFactor = mix(roughnessFactor, 0.93, clamp(gWear * 0.3, 0.0, 1.0));
+        // Round 6: the white line fibres are a denser, glossier yarn than the blue pile (a soft
+        // painted sheen toward the lights), dulled where sand sits on them.
+        roughnessFactor = mix(roughnessFactor, 0.6 + 0.25 * uTurfK.x, gLine);`)
+      .replace('#include <normal_fragment_maps>', `${biased('normal_fragment_maps', 'normalMap', 'vNormalMapUv')}
         normal = normalize(mix(normal, nonPerturbedNormal, clamp(gWear * 0.55, 0.0, 0.8)));`)
       .replace('#include <lights_fragment_begin>', veilLightsChunk())
       .replace('#include <aomap_fragment>', `#include <aomap_fragment>
         reflectedLight.indirectDiffuse *= gAO;
         reflectedLight.directDiffuse *= mix(1.0, gAO, 0.55);`);
   };
-  m.customProgramCacheKey = () => 'vibora-turf-2';
+  m.customProgramCacheKey = () => (shell ? 'vibora-turf-shell-3' : 'vibora-turf-3');
   return m;
+}
+
+/**
+ * Near-field pile: a few alpha-blended shell layers (3 / 6 / 9 mm…) of the same carpet on a disc
+ * that follows the camera, so the fibres near the player have real parallax as the view moves
+ * (classic shell texturing). One instanced draw, no depth write (decals and the ball's contact
+ * shadow on the turf stay on top), faded out beyond ~3 m where the pile is sub-pixel.
+ */
+function createTurfShells(mats, layers) {
+  const MAX = 4;
+  const geo = new THREE.CircleGeometry(3.6, 40);
+  geo.rotateX(-Math.PI / 2);
+  const mesh = new THREE.InstancedMesh(geo, mats.turfShell, MAX);
+  const m4 = new THREE.Matrix4();
+  const setLayers = (n) => {
+    const k = Math.max(0, Math.min(MAX, n | 0));
+    for (let i = 0; i < k; i++) mesh.setMatrixAt(i, m4.makeTranslation(0, (TURF_SHELL_H * (i + 1)) / k, 0));
+    mesh.count = k;
+    mesh.visible = k > 0;
+    mesh.instanceMatrix.needsUpdate = true;
+    mesh.userData.layers = k;
+  };
+  setLayers(layers);
+  // scene.js applySceneTier: the tier's shell count, live.
+  mats.turfShell.userData.onTier = (q) => {
+    if ((q.turfShells ?? 0) !== mesh.userData.layers) setLayers(q.turfShells ?? 0);
+  };
+  mesh.frustumCulled = false;
+  mesh.castShadow = false;
+  mesh.receiveShadow = true;
+  mesh.renderOrder = -1;
+  mesh.name = 'turf-shells';
+  mesh.onBeforeRender = (r, s, camera) => {
+    const e = camera.matrixWorld.elements;
+    if (Number.isFinite(e[12]) && Number.isFinite(e[14])) {
+      mesh.position.set(e[12], 0, e[14]);
+      mesh.updateMatrixWorld();
+    }
+  };
+  return mesh;
 }
 
 function makeMaterials(renderer, q) {
@@ -248,10 +373,12 @@ function makeMaterials(renderer, q) {
   const meshAlpha = meshAlphaTexture();
   const netAlpha = netAlphaTexture();
   const m = {
-    steel: new THREE.MeshStandardMaterial({ color: 0x0d0e10, roughness: 0.38, metalness: 0.0, envMapIntensity: 1.2 }),
+    // Black polyester powder coat: semi-gloss with a fine orange-peel texture (triplanar detail
+    // normal below) that breaks up the reflections of the lights along the posts.
+    steel: new THREE.MeshStandardMaterial({ color: 0x0d0e10, roughness: 0.4, metalness: 0.0, envMapIntensity: 1.2 }),
     glass: makeGlassMaterial(),
     glassEdge: new THREE.MeshStandardMaterial({
-      color: 0x78b8a2, roughness: 0.1, metalness: 0, transparent: true, opacity: 0.38, depthWrite: false, envMapIntensity: 1.4,
+      color: 0x78b8a2, roughness: 0.1, metalness: 0, transparent: true, opacity: 0.3, depthWrite: false, envMapIntensity: 1.4,
     }),
     bolt: new THREE.MeshStandardMaterial({ color: 0xc9ced3, roughness: 0.22, metalness: 1.0 }),
     mesh: new THREE.MeshStandardMaterial({
@@ -265,10 +392,14 @@ function makeMaterials(renderer, q) {
     netStatic: null,
     band: new THREE.MeshStandardMaterial({ color: 0xf1f1ec, roughness: 0.8 }),
     turf: makeTurfMaterial(renderer, q),
+    turfShell: null,
     dummy: new THREE.MeshStandardMaterial({ color: 0x1c2b4a, roughness: 0.7 }),
     dummyStripe: new THREE.MeshStandardMaterial({ color: 0xd9f03a, roughness: 0.5, emissive: 0x2a3008 }),
   };
   m.netStatic = m.net.clone();
+  addTriplanarDetail(m.steel, detailNormal('orange-peel-normal'), { scale: 14, strength: 0.16, key: 'peel' });
+  m.turfShell = makeTurfMaterial(renderer, q, { shell: true, uniforms: m.turf.userData.uniforms });
+  m.turfShell.alphaToCoverage = false;
   // Wire materials use alpha-to-coverage under MSAA, alpha blending otherwise (scene.setQuality flips it).
   for (const w of [m.mesh, m.net, m.netStatic]) w.userData.alphaMode = 'coverage-or-blend';
   return m;
@@ -284,6 +415,13 @@ function sideBands() {
     out.push({ z0: -b.zMax, z1: -b.zMin, glassTop: b.glassTop, meshTop: b.meshTop });
   }
   return out;
+}
+
+/** Steel tube with rounded edges (r 6 mm): the edges catch a line of light as real posts do. */
+function tubeAt(w, h, d, x, y, z) {
+  const g = new RoundedBoxGeometry(w, h, d, 1, Math.min(0.006, Math.min(w, d) * 0.3));
+  g.translate(x, y, z);
+  return g;
 }
 
 function buildEnclosureGeometry() {
@@ -354,10 +492,10 @@ function buildEnclosureGeometry() {
       addMesh('back', s, x, x + 2, COURT.backWall.glassTop, COURT.backWall.meshTop);
     }
     for (let x = -HW; x <= HW + 1e-6; x += COURT.postSpacing) {
-      steel.push(boxAt(POST, COURT.backWall.meshTop, POST, x, COURT.backWall.meshTop / 2, s * (HL + POST_OFF)));
+      steel.push(tubeAt(POST, COURT.backWall.meshTop, POST, x, COURT.backWall.meshTop / 2, s * (HL + POST_OFF)));
     }
-    steel.push(boxAt(HW * 2 + POST, 0.06, 0.06, 0, COURT.backWall.meshTop - 0.03, s * (HL + POST_OFF)));
-    steel.push(boxAt(HW * 2, 0.05, 0.05, 0, COURT.backWall.glassTop + 0.025, s * (HL + POST_OFF - 0.02)));
+    steel.push(tubeAt(HW * 2 + POST, 0.06, 0.06, 0, COURT.backWall.meshTop - 0.03, s * (HL + POST_OFF)));
+    steel.push(tubeAt(HW * 2, 0.05, 0.05, 0, COURT.backWall.glassTop + 0.025, s * (HL + POST_OFF - 0.02)));
   }
   for (const sx of [-1, 1]) {
     for (const b of sideBands()) {
@@ -366,13 +504,13 @@ function buildEnclosureGeometry() {
         addMesh('side', sx, z, z + 2, b.glassTop, b.meshTop);
       }
       const railZ = (b.z0 + b.z1) / 2;
-      steel.push(boxAt(0.06, 0.06, b.z1 - b.z0, sx * (HW + POST_OFF), b.meshTop - 0.03, railZ));
-      if (b.glassTop > 0) steel.push(boxAt(0.05, 0.05, b.z1 - b.z0, sx * (HW + POST_OFF - 0.02), b.glassTop + 0.025, railZ));
+      steel.push(tubeAt(0.06, 0.06, b.z1 - b.z0, sx * (HW + POST_OFF), b.meshTop - 0.03, railZ));
+      if (b.glassTop > 0) steel.push(tubeAt(0.05, 0.05, b.z1 - b.z0, sx * (HW + POST_OFF - 0.02), b.glassTop + 0.025, railZ));
     }
     for (let z = -HL + COURT.postSpacing; z <= HL - COURT.postSpacing + 1e-6; z += COURT.postSpacing) {
       const az = Math.abs(z);
       const h = az >= 8 - 1e-6 ? 4 : 3;
-      steel.push(boxAt(POST, h, POST, sx * (HW + POST_OFF), h / 2, z));
+      steel.push(tubeAt(POST, h, POST, sx * (HW + POST_OFF), h / 2, z));
       // Base plates bolted to the slab.
       steel.push(boxAt(0.2, 0.012, 0.2, sx * (HW + POST_OFF), 0.006, z));
     }
@@ -571,7 +709,7 @@ function buildOpponents(root, mats) {
  * @param {{quality?: string, venue?: 'club'|'sunset'|'stadium', envMode?: 'hall'|'room', neighbors?: boolean,
  *   overrides?: object, debug?: boolean}} opts
  */
-export function buildEnvironment(scene, renderer, { quality = 'high', venue = 'club', envMode = 'hall', neighbors, overrides = null, debug = false } = {}) {
+export function buildEnvironment(scene, renderer, { quality = 'high', venue = 'club', envMode = 'hall', neighbors, overrides = null, iblOverrides = null, debug = false } = {}) {
   const tierOf = () => (scene.userData && QUALITY[scene.userData.quality] ? scene.userData.quality : QUALITY[quality] ? quality : 'high');
   const qualityNow = () => ({ ...QUALITY[tierOf()], ...(overrides || {}) });
   const q = qualityNow();
@@ -590,6 +728,7 @@ export function buildEnvironment(scene, renderer, { quality = 'high', venue = 'c
   const roomEnv = pmrem.fromScene(new RoomEnvironment(), 0.04);
   scene.environment = roomEnv.texture;
   scene.environmentIntensity = 0.25;
+  const iblCap = createIblCapture(renderer, pmrem);
 
   mark('room env');
   const mats = makeMaterials(renderer, q);
@@ -607,6 +746,10 @@ export function buildEnvironment(scene, renderer, { quality = 'high', venue = 'c
   const turfGeo = new THREE.PlaneGeometry(HW * 2, HL * 2, 1, 1);
   turfGeo.rotateX(-Math.PI / 2);
   addKit(instanced(turfGeo, mats.turf, courtXs, { name: 'turf' }));
+
+  // Near-field fibre shells on the main court (quality tier: ultra 4, high 3, balanced none).
+  const shells = createTurfShells(mats, q.turfShells ?? 0);
+  root.add(shells);
 
   const kit = buildEnclosureGeometry();
   const steelInst = addKit(instanced(kit.steel, mats.steel, courtXs, { cast: true, name: 'steel' }));
@@ -650,8 +793,15 @@ export function buildEnvironment(scene, renderer, { quality = 'high', venue = 'c
    * Captures the venue into two PMREMs: a dim one for ambient image-based light (scene.environment)
    * and one with the emitters at a realistic brightness ratio, used as the reflection map of the
    * glass and powder-coated steel so the lights / sky glint in the panels as they do on real courts.
+   * Round 6: each capture is mixed with the venue's photographed panorama (layer.ibl, render/ibl.js)
+   * once it has loaded (lazily, per venue): real-world texture in the reflections and a softer,
+   * fuller ambient. Until then (or offline without it) the venue-only capture is used.
    */
   const hiddenForCapture = [];
+  function iblParams() {
+    const base = { hdri: meta.hdri, ...((layer && layer.ibl) || {}) };
+    return iblOverrides ? { ...base, ...iblOverrides } : base;
+  }
   function captureEnvironment(position = new THREE.Vector3(0, 2.2, 0)) {
     const prevOpp = opponents.visible;
     opponents.visible = false;
@@ -668,15 +818,26 @@ export function buildEnvironment(scene, renderer, { quality = 'high', venue = 'c
       mats[k].envMap = null;
       mats[k].needsUpdate = true;
     }
+    const shellsOn = shells.visible;
+    shells.visible = false;
     const hooks = (layer && layer.capture) || {};
     const size = qualityNow().envSize;
+    const ib = iblParams();
+    const hdri = ib.hdri ? hdriIfReady(ib.hdri) : null;
+    const common = { size, position, hdri, rotationDeg: ib.rotationDeg || 0, tint: ib.tint, floor: ib.floor ?? 1, sky: ib.sky ?? 1, measure: debug };
+    // The capture sees the venue lit by its own lights only (deterministic: no feedback from the
+    // previous venue's or the previous capture's environment).
+    const prevEnv = scene.environment;
+    scene.environment = null;
     let rt, rt2;
     try {
       hooks.ambient?.();
-      rt = pmrem.fromScene(scene, 0, 0.05, 140, { size, position });
+      rt = iblCap.capture(scene, { ...common, venue: ib.ambient?.[0] ?? 1, weight: ib.ambient?.[1] ?? 0 });
       hooks.reflect?.();
-      rt2 = pmrem.fromScene(scene, 0, 0.05, 140, { size, position });
+      rt2 = iblCap.capture(scene, { ...common, venue: ib.reflect?.[0] ?? 1, weight: ib.reflect?.[1] ?? 0 });
     } finally {
+      scene.environment = prevEnv;
+      shells.visible = shellsOn;
       hooks.restore?.();
       opponents.visible = prevOpp;
       for (const c of hiddenForCapture) c.visible = true;
@@ -687,17 +848,40 @@ export function buildEnvironment(scene, renderer, { quality = 'high', venue = 'c
     hallEnv = rt;
     reflectEnv = rt2;
     scene.environment = rt.texture;
-    scene.environmentIntensity = layer ? layer.envIntensity ?? 0.45 : 0.45;
+    scene.environmentIntensity = ib.envIntensity ?? (layer ? layer.envIntensity ?? 0.45 : 0.45);
     for (const k of REFLECTIVE) {
       mats[k].envMap = rt2.texture;
       mats[k].envMapIntensity = REFLECT_INTENSITY[k] * (layer?.reflectScale ?? 1);
       mats[k].needsUpdate = true;
     }
+    iblState.withHdri = !!hdri;
+    iblState.captures++;
+    iblState.venueMean = iblCap.lastMean;
     return rt.texture;
   }
+  const iblState = { withHdri: false, captures: 0, pending: null };
+
+  /** Loads the venue's panorama (if any) and recaptures once it arrives. */
+  function ensureHdri(vid) {
+    const ib = iblParams();
+    iblState.pending = null;
+    if (!ib.hdri || envMode !== 'hall') return Promise.resolve(false);
+    if (hdriIfReady(ib.hdri)) return Promise.resolve(true);
+    const p = requestHdri(ib.hdri)
+      .then(() => {
+        if (!layer || layer.id !== vid || disposed) return false;
+        captureEnvironment(layer.capturePosition);
+        return true;
+      })
+      .catch(() => false);
+    iblState.pending = p;
+    return p;
+  }
+  let disposed = false;
 
   function applyMeta() {
     renderer.toneMappingExposure = meta.exposure;
+    renderer.toneMapping = TONE_MAPPINGS[meta.toneMapping] ?? THREE.ACESFilmicToneMapping;
     scene.userData.grade = meta.grade;
     scene.userData.gradeVersion = ++gradeVersion;
     scene.userData.venue = meta.id;
@@ -729,7 +913,15 @@ export function buildEnvironment(scene, renderer, { quality = 'high', venue = 'c
     if (layer.sunDir) tu.uSun.value.set(layer.sunDir.x, layer.sunDir.y, layer.sunDir.z, 1);
     else tu.uSun.value.set(0, 1, 0, 0);
     const gk = layer.glass || {};
-    mats.glass.userData.uniforms.uSmudgeK.value.set(gk.grease ?? 1, gk.felt ?? 1, gk.water ?? 0, 0);
+    const gu = mats.glass.userData.uniforms;
+    gu.uSmudgeK.value.set(gk.grease ?? 1, gk.felt ?? 1, gk.water ?? 0, 0);
+    // Interior box for parallax-corrected reflections (indoor venues; outdoors the sky is at infinity).
+    if (layer.reflectBox) {
+      gu.uBoxMin.value.copy(layer.reflectBox.min);
+      gu.uBoxMax.value.copy(layer.reflectBox.max);
+      gu.uProbe.value.copy(layer.capturePosition || new THREE.Vector3(0, 2.2, 0));
+      gu.uBoxOn.value = 1;
+    } else gu.uBoxOn.value = 0;
     // Outdoors the sun's analytic veil replaces the net's solid shadow-map shadow.
     net.mesh.castShadow = net.band.castShadow = !layer.sunDir;
     steelInst.castShadow = true;
@@ -738,6 +930,7 @@ export function buildEnvironment(scene, renderer, { quality = 'high', venue = 'c
     if (hadLayer) issueCompiles();
     if (envMode === 'hall') captureEnvironment(layer.capturePosition);
     else useRoomEnvironment();
+    ensureHdri(vid);
     mark(`venue ${vid} (${Math.round(performance.now() - t0)} ms)`);
     return meta;
   }
@@ -820,7 +1013,17 @@ export function buildEnvironment(scene, renderer, { quality = 'high', venue = 'c
     },
     captureEnvironment,
     useRoomEnvironment,
+    /** Image-based lighting state: { withHdri, captures, pending: Promise|null }. */
+    get ibl() {
+      return iblState;
+    },
+    /** Resolves once the current venue's panorama is in the lighting (false if it could not load). */
+    whenLit() {
+      return iblState.pending || Promise.resolve(iblState.withHdri);
+    },
     dispose() {
+      disposed = true;
+      iblCap.dispose();
       layer?.dispose();
       scene.remove(root);
       hallEnv?.dispose();

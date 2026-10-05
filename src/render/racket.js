@@ -697,15 +697,18 @@ export function buildRacket({ style = null, color = '#e8572a', gripColor = '#f1f
   const { face, frame } = buildHeadGeometries(m0.shape);
 
   const tex = faceTextures(color, modelId);
+  // Round 6 materials: a sand-textured matte face (the grit reads in the highlights), a dielectric
+  // clear-coated carbon frame, and a soft-sheened overgrip.
   const faceMat = new THREE.MeshPhysicalMaterial({
     map: tex.map,
     roughnessMap: tex.rough,
     roughness: 1,
-    metalness: 0.05,
+    metalness: 0,
     normalMap: tex.normal,
-    normalScale: new THREE.Vector2(0.25, 0.25),
-    clearcoat: 0.25,
-    clearcoatRoughness: 0.45,
+    normalScale: new THREE.Vector2(0.38, 0.38),
+    clearcoat: 0.12,
+    clearcoatRoughness: 0.5,
+    specularIntensity: 0.8,
   });
   const foamMat = new THREE.MeshStandardMaterial({ color: '#2a2b2e', roughness: 0.95 });
   const faceMesh = new THREE.Mesh(face, [faceMat, foamMat]);
@@ -713,18 +716,19 @@ export function buildRacket({ style = null, color = '#e8572a', gripColor = '#f1f
 
   const capMat = new THREE.MeshPhysicalMaterial({
     color: st.frame, map: style === 'white' ? null : carbonTileTexture(), roughness: st.frameRough,
-    metalness: 0.1, clearcoat: 0.85, clearcoatRoughness: 0.2,
+    metalness: 0, clearcoat: 0.9, clearcoatRoughness: 0.12, envMapIntensity: 1.1,
   });
   const sideMat = new THREE.MeshPhysicalMaterial({
     map: frameSideTexture(color), color: style === 'white' ? '#ffffff' : '#ffffff', roughness: st.frameRough,
-    metalness: 0.1, clearcoat: 0.85, clearcoatRoughness: 0.18,
+    metalness: 0, clearcoat: 0.9, clearcoatRoughness: 0.1, envMapIntensity: 1.1,
   });
   const frameMesh = new THREE.Mesh(frame, [capMat, sideMat]);
   frameMesh.name = 'racket-frame';
 
   const grip = gripTextures(gripColor);
-  const gripMat = new THREE.MeshStandardMaterial({
+  const gripMat = new THREE.MeshPhysicalMaterial({
     map: grip.map, normalMap: grip.normal, normalScale: new THREE.Vector2(0.9, 0.9), roughness: 0.78, metalness: 0,
+    sheen: 0.5, sheenRoughness: 0.75, sheenColor: new THREE.Color(0.9, 0.9, 0.88),
   });
   const handle = new THREE.Mesh(handleGeometry(), gripMat);
   handle.name = 'racket-handle';

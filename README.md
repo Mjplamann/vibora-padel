@@ -7,7 +7,8 @@ is a real physics simulation: drag and Magnus lift, spin, grip–slip bounces on
 dead wire mesh, net cord trickles and *por tres* exits.
 
 It runs on an Apple-silicon MacBook in Chrome or Safari, and installs as a Mac app with its own Dock
-icon that works offline. No account, no upload: pose tracking runs on the Mac with MediaPipe and nothing
+icon that works offline. On an **iPhone or iPad** it plays with swipes instead of the camera
+([swipe mode](#play-on-iphone-or-ipad-swipe-mode)). No account, no upload: pose tracking runs on the Mac with MediaPipe and nothing
 leaves the device (MediaPipe's built-in usage logging to Google is blocked locally by
 `src/app/privacy.js`, and the offline cache only ever stores the app's own files).
 
@@ -65,37 +66,27 @@ leaves the device (MediaPipe's built-in usage logging to Google is blocked local
 
 ### What's new
 
-- **Nothing covers the ball.** The play screen now has one slim bar at the top (mode, reps or score,
-  points, streak, clock) and **one message line** under it. Miss reasons, the last shot (*Forehand · 96 km/h ·
-  On time · ●●●●○*), coaching notes, achievements and point banners take turns on that line, for at
-  most 1.6 s each, and the line waits while a ball is coming to you. Nothing is drawn over the middle
-  of the court while a ball is live. Settings → Ball & aids → *Screen text*: **Clean** (default) ·
-  **Standard** (adds the shot card between points) · **Coach** (every card and the timing meter).
-  **H** cycles them during play. The camera picture is off by default: a tracking dot in the bar shows
-  that the camera sees you, and the picture comes back by itself if it loses you.
-- **A timing cue that doesn't lie.** A circle closes on the ball at a steady speed and touches it
-  exactly at the moment to swing. It is white while it closes and turns **green only while a swing
-  would be a clean hit** (already allowing for your personal timing, below), with a flash at the
-  perfect moment. An optional tick sounds 0.2 s before (Settings → Ball & aids → *Timing tick*: on for
-  Rookie by default).
-- **You see the ball when you hit it.** You meet the ball out in front of you, as in real padel, and
-  the view keeps that point (and a ball dropping onto it) inside the picture instead of looking at your
-  feet. *Enhanced* ball visibility now draws the ball at its true size within 14 m, so it shrinks and
-  grows with distance again (a fixed minimum size made it look closer than it was, and swings came
-  early), with a soft glow so you can still find it far away.
-- **The game learns your timing.** If you tend to swing a little early or late, the timing window
-  follows your own moment (*Timing tuned to you: −0.14 s* in Settings → Play), learned per camera and
-  kept between sessions; *Reset timing* forgets it, and *Adapt timing to me* turns it off. A swing that
-  comes early is held until the ball arrives (Rookie up to 0.6 s early, Club 0.4 s) and a late one still
-  plays the ball (Rookie up to 0.45 s, Club 0.3 s) — but slower and pulled cross-court (early) or
-  pushed down the line (late). A swing whose hand leaves the camera's picture is still read when the
-  hand comes back.
-- **Swing harder, hit harder.** Your swing speed is measured against your own recent swings, so a
-  slow webcam counts as much as a fast one. A full swing sends a drive at up to 115 km/h, a gentle one
-  at 45 km/h (smashes 70–150). The message line shows the speed and five **power pips** (gold at full
-  power), and the swing whoosh follows your effort as you swing. When the camera has already seen a
-  hard swing at the moment of contact (a swing started early), the pock is louder, the racket trail
-  brighter and the view gives a small kick.
+- **Nothing covers the ball.** One slim bar at the top and one message line under it; nothing is drawn
+  over the middle of the court while a ball is live. Settings → Ball & aids → *Screen text*: **Clean**
+  (default) · **Standard** · **Coach**; **H** cycles them in play.
+- **Timing tuned to you.** An approach circle closes on the ball and turns **green only while a swing
+  would be a clean hit**. If you tend to swing early or late, the window follows your own moment
+  (Settings → Play: *Timing tuned to you*, *Reset timing*). Early swings are held until the ball
+  arrives and late ones still play it, slower and pulled cross-court / pushed down the line.
+- **Swing harder, hit harder.** Swing speed is measured against your own swings: a gentle swing sends
+  a drive at about 45 km/h, a full one up to 115 km/h (smashes 70–150), shown as five power pips.
+- **New lighting and materials.** Each venue is lit by a real HDR panorama (CC0, Poly Haven) with its
+  own tone mapping; deeper-blue turf with real fibre pile (the horizontal bands on the turf are gone),
+  clearer glass with true reflections, powder-coated steel, SMAA anti-aliasing on High / Ultra, and
+  more life around the court (racket bags and a ball cart at the club, terrace parasols at Sunset,
+  a hanging video cube and roof light banks in the stadium).
+- **Realistic players.** Opponents, coach, partner, your replay body and your own first-person
+  forearms and hands are realistic athletes baked from MakeHuman's CC0 assets — men and women with
+  real faces, hair, kit and shoes — loaded in the background (the old mannequins show for a moment on
+  a slow connection, and stay if the files can't load).
+- **iPhone and iPad: swipe mode.** No camera needed — swipe to swing (see
+  [Play on iPhone or iPad](#play-on-iphone-or-ipad-swipe-mode)). It is on by default on touch screens;
+  the Mac keeps the camera.
 
 Earlier:
 
@@ -147,8 +138,8 @@ From then on open **Víbora** from the Dock, Launchpad or Spotlight (⌘ Space, 
 own window without browser bars; press **F** (or ⌃⌘F) for full screen. While it is full screen, a short
 **Esc** still pauses / goes back in the game; hold **Esc** to leave full screen.
 
-- **Works offline.** The first launch (online) saves everything the app needs, about 25 MB: the 3D
-  engine, the pose-tracking runtime and model, hands, fonts. After that it starts and plays with no
+- **Works offline.** The first launch (online) saves everything the app needs, about 31 MB: the 3D
+  engine, the pose-tracking runtime and model, the players, lighting panoramas, hands, fonts. After that it starts and plays with no
   internet connection, camera tracking included. Optional extras (the *lite* / *heavy* pose models) are
   saved the first time you use them.
 - **Updates** arrive by themselves. When a new version is published, a small **Update ready — Restart**
@@ -157,6 +148,30 @@ own window without browser bars; press **F** (or ⌃⌘F) for full screen. While
 - The first time, allow camera access. Your settings, calibration and personal bests are kept on this
   Mac.
 - No camera to hand? Choose **Play with mouse** on the title screen.
+
+## Play on iPhone or iPad (swipe mode)
+
+Open **[mjplamann.github.io/vibora-padel](https://mjplamann.github.io/vibora-padel/)** in **Safari**,
+then install it: tap **Share** (the square with an arrow) → **Add to Home Screen** → **Add**. Open
+**Víbora** from the Home Screen: it runs full screen and works offline after the first launch.
+
+Swipe mode is on by default on iPhone and iPad (any other device: add `?input=swipe`; `?input=camera`
+goes back to the camera). The first time, a three-step tutorial shows the swipes.
+
+- **Swipe when the circle closes** on the ball. Swiping early or late moves the ball cross-court or
+  down the line.
+- **Faster = harder.** A gentle swipe places the ball, a fast long flick hits it hard. Lean the swipe
+  left or right to aim.
+- **Up** brushes topspin; **down** slices, or on a high ball plays a bandeja / smash; a **curve** cuts
+  (overhead: a víbora); a slow, steep, long swipe lobs.
+- **Tap** to serve. **Two-finger tap** pauses. The button at the top right switches between the view
+  **behind** your player and **first person**; the gear on the menus and the pause screen holds the
+  swipe settings (view, an optional left-thumb **movement stick**, the tutorial, camera instead).
+- Landscape gives the widest view; portrait works too (a hint suggests turning the phone, dismiss it
+  with ✕).
+
+Phones and tablets use a lighter graphics tier (lower resolution, one shadow light, no ambient
+occlusion). Swipe mode never downloads the pose-tracking model or asks for the camera.
 
 ## Connect your Mac to the TV
 
@@ -551,7 +566,7 @@ the same impact physics, then confirmed (or undone) by the lag-compensated detec
 
 ```
 npm start          # static server on http://localhost:5173
-npm test           # 624 unit / end-to-end tests (node --test), deterministic
+npm test           # 646 unit / end-to-end tests (node --test), deterministic
 npm run smoke      # headless Chromium (SwiftShader) smoke test + screenshots in tools/out/smoke-*.png
 node tools/precache.mjs [--write]   # check / regenerate the service worker's precache list in sw.js
 node tools/icons.mjs                # regenerate icons/*.svg and every PNG size (headless Chromium)
@@ -597,7 +612,9 @@ webcam measures at 2–9 m/s, wrists leaving the picture on wide swings),
 `?apjitter=` (extra random delivery delay of a 30 fps webcam-like feed) and `?apnoise=` (landmark noise,
 1 = a MacBook camera at 2.5 m), `?apclose=1` (the autopilot stands 1.7 m from a camera at chest height
 with its legs out of the picture: close mode), `?glasses=1` / `?stereo=1` / `?xrsim=1` (glasses mode),
-`?attract=0`, `?mute=1`, `?sw=0` (no service worker), `?source=app` (the installed app's start URL).
+`?attract=0`, `?mute=1`, `?sw=0` (no service worker), `?source=app` (the installed app's start URL),
+`?input=swipe|camera|mouse` (swipe mode on any device / back to the camera; also `&view=behind|fp`,
+`&stick=1`, `&tutorial=1`), `?people=sdf` (the procedural players instead of the realistic ones).
 Round 4: `?venue=club|sunset|stadium`, `?challenge=<id>|daily`, `?career=<eventId>` (`&quick=1`: sets
 to one game — 2-0 or a tie-break at 1-1), `?autoreplay=1|0`, `?firsthits=1` (the first-time timing prompt), `?screen=career|arcade|trophies|training|freeplay|event-intro|settings`
 (with `&event=`, `&tab=`, `&fpmode=`).
@@ -610,6 +627,14 @@ region is a regression); `dev/hud-clean.html` shows the clean HUD's states (`&ef
 pips). Tests: `tests/clarity.test.mjs` (feedback line, play region, approach circle, ball visibility,
 gaze), `tests/timing6.test.mjs` (contact in front, personal timing, held / late hits, effort and
 pace), `tests/release6.test.mjs` (diagnostics, settings, swing-power presentation).
+
+Round 5 (final) pages and harnesses: `dev/look.html` + `node dev/look-shot.mjs` (venue lighting and
+materials), `dev/look-perf.html` (draw calls, triangles, GPU time), `dev/people.html?view=close|kits|strokes|match|replay|swing|turn|hands`
+(the realistic athletes), `dev/mobile.html` + `node dev/mobile-bot.mjs <outDir>` (a Playwright iPhone 15 Pro
+that swipes at real balls). Rebuild the athletes: `node tools/people/fetch-sources.mjs`, then
+`npm i --no-save meshoptimizer@0.22 pngjs@7 @jsquash/webp`, `node tools/people/bake.mjs` and
+`node tools/people/encode-textures.mjs --pmndrs <@pmndrs/assets dir>`. Tests: `tests/look.test.mjs`,
+`tests/people.test.mjs`, `tests/swipe.test.mjs`, `tests/touch.test.mjs`, `tests/release7.test.mjs`.
 
 Round 4 developer pages and harnesses: `dev/calibrate.html` (the close-mode body check),
 `dev/humans.html` (skinned players, strokes, kits), `dev/venues.html` + `node dev/venues-shot.mjs` /
@@ -646,6 +671,9 @@ Actions*. Installed apps pick the new version up as an *Update ready* notice.
 
 Víbora Padel is MIT licensed (`LICENSE`). It bundles three.js (MIT), MediaPipe Tasks Vision and the
 pose landmarker models (Apache-2.0), the WebXR Input Profiles generic hand models (MIT, © Amazon) and
-the Big Shoulders Display and Barlow Semi Condensed fonts (SIL OFL 1.1). Details and licence files:
-`THIRD_PARTY_NOTICES.md`. Everything else — the club and the other venues, court, glass, crowd,
-rackets, ball, players, textures and all sounds — is generated procedurally (spoken lines use the system's voices). "VÍBORA" is a made-up club; no real brand is shown.
+the Big Shoulders Display and Barlow Semi Condensed fonts (SIL OFL 1.1). The players are baked from
+MakeHuman 1.1 assets (CC0; the AGPL MakeHuman application is not used or shipped). Lighting uses three
+CC0 HDR panoramas (Poly Haven via @pmndrs/assets), about 0.57 MB, loaded per venue; detail normal maps
+(CC0, @pmndrs/assets) about 0.24 MB. Details and licence files: `THIRD_PARTY_NOTICES.md`. Everything
+else — the club and the other venues, court, glass, crowd, rackets, ball, textures and all sounds — is
+generated procedurally (spoken lines use the system's voices). "VÍBORA" is a made-up club; no real brand is shown.
