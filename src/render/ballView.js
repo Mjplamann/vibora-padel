@@ -4,6 +4,7 @@
 import * as THREE from 'three';
 import { BALL, COURT, SIM, RACKET } from '../config.js';
 import { cached, hash2, tileNoise, heightToNormalCanvas, actorQuality } from './actorKit.js';
+import { APPROACH, approachRadius } from './approach.js';
 
 // Seam of a tennis/padel ball on the unit sphere: s(t) = (a cos t + b cos 3t, a sin t - b sin 3t, 2 sqrt(ab) sin 2t), a + b = 1.
 function seamSamples(n = 220, b = 0.27) {
@@ -157,45 +158,10 @@ function nearestGlass(p, reach, out) {
   return out;
 }
 
-/** Ring texture (white, tinted by the sprite material) for the reach ring. */
-function ringTexture() {
-  return cached('ballRing', () => {
-    const c = document.createElement('canvas');
-    c.width = c.height = 128;
-    const ctx = c.getContext('2d');
-    ctx.strokeStyle = 'rgba(255,255,255,1)';
-    ctx.lineWidth = 9;
-    ctx.beginPath();
-    ctx.arc(64, 64, 52, 0, Math.PI * 2);
-    ctx.stroke();
-    ctx.strokeStyle = 'rgba(255,255,255,0.25)';
-    ctx.lineWidth = 18;
-    ctx.beginPath();
-    ctx.arc(64, 64, 52, 0, Math.PI * 2);
-    ctx.stroke();
-    const t = new THREE.CanvasTexture(c);
-    t.colorSpace = THREE.SRGBColorSpace;
-    return t;
-  });
-}
-
-/**
- * Ball visibility (round 3, "like trying to hit a fruit fly" from 2-3 m on a TV): 'realistic' is the
- * true ball; 'enhanced' (default) keeps it at least minDeg of the view (drawn bigger with distance),
- * adds a soft glow, a stronger contact shadow and a thin drop-line to the floor; 'max' more so.
- */
-export const BALL_VISIBILITY = Object.freeze({
-  realistic: Object.freeze({ minDeg: 0, glow: 0, line: 0, shadow: 0.62, shadowFall: 2.2 }),
-  enhanced: Object.freeze({ minDeg: 0.45, glow: 0.38, line: 0.42, shadow: 0.85, shadowFall: 0.9 }),
-  max: Object.freeze({ minDeg: 0.8, glow: 0.6, line: 0.62, shadow: 0.95, shadowFall: 0.5 }),
-});
-
-/** Drawn-size factor that keeps a ball of radius r at distance d at least minDeg wide (>= 1). */
-export function ballDisplayScale(d, minDeg, r = BALL.radius) {
-  if (!(minDeg > 0) || !(d > 0)) return 1;
-  const want = 2 * d * Math.tan((minDeg * Math.PI) / 360);
-  return Math.max(1, want / (2 * r));
-}
+// Ball visibility modes and the drawn-size rule live in the pure render/ballVisibility.js (round 6:
+// tested under Node); re-exported here for compatibility.
+export { BALL_VISIBILITY, ballDisplayScale, ENHANCED_TRUE_SIZE_WITHIN } from './ballVisibility.js';
+import { BALL_VISIBILITY, ballDisplayScale } from './ballVisibility.js';
 
 /**
  * Felt fuzz: a slightly larger shell whose alpha rises toward the silhouette and is broken into
@@ -271,9 +237,46 @@ function createBlurMaterial() {
   });
 }
 
-const RING_YELLOW = new THREE.Color('#ffd84a');
 const RING_GREEN = new THREE.Color('#3dff7a');
 const GHOST_CYAN = new THREE.Color('#bff7ff');
+// Approach circle colours (linear, a little over 1 so they survive the ACES output; below the bloom).
+const APPROACH_WHITE = new THREE.Color(1.25, 1.27, 1.3);
+const APPROACH_GREEN = new THREE.Color(0.3, 1.35, 0.55);
+const APPROACH_PERFECT = new THREE.Color(0.55, 1.6, 0.75);
+/** Approach circle line half-width as a fraction of the view height (~2.2 px at 876 px). */
+const APPROACH_LINE = 0.00125;
+
+/**
+ * Approach circle (round 6, render/approach.js): one camera-facing quad, two rings drawn in its
+ * fragment shader with a constant on-screen line width and a dark edge for contrast on bright courts:
+ * the closing ring (uRa) and a faint target ring at the ball's outline (uRt), where it closes at t*.
+ */
+function createApproachMaterial() {
+  return new THREE.ShaderMaterial({
+    uniforms: {
+      uRa: { value: 0.4 }, uRt: { value: 0.1 }, uW: { value: 0.01 }, uA: { value: 0 }, uTA: { value: 0.35 },
+      uColor: { value: new THREE.Color(1, 1, 1) },
+    },
+    vertexShader: 'varying vec2 vUv; void main(){ vUv = uv; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }',
+    fragmentShader: /* glsl */ `
+      varying vec2 vUv; uniform float uRa, uRt, uW, uA, uTA; uniform vec3 uColor;
+      void main() {
+        float r = length(vUv - 0.5);
+        float px = fwidth(r);
+        float ring = 1.0 - smoothstep(uW - px, uW + px, abs(r - uRa));
+        float tgt = (1.0 - smoothstep(uW * 0.55 - px, uW * 0.55 + px, abs(r - uRt))) * uTA;
+        float edge = (1.0 - smoothstep(uW, uW * 2.6 + px, abs(r - uRa))) * 0.5;
+        float line = max(ring, tgt);
+        float a = line + edge * (1.0 - line);
+        float alpha = uA * a;
+        if (alpha < 0.004) discard;
+        gl_FragColor = vec4(uColor * (line / max(a, 1e-4)), alpha);
+      }`,
+    transparent: true,
+    depthWrite: false,
+    depthTest: false,
+  });
+}
 
 const TRAIL_N = 28;
 const TRAIL_SECONDS = 0.12;
@@ -355,11 +358,15 @@ export function createBallView(scene, { halo = false, trail = true, shadows = tr
   dropLine.renderOrder = 2;
   dropLine.frustumCulled = false;
   group.add(dropLine);
-  const ringMat = new THREE.SpriteMaterial({ map: ringTexture(), transparent: true, depthWrite: false, depthTest: false, color: RING_YELLOW, opacity: 0 });
-  const ring = new THREE.Sprite(ringMat);
+  // Approach circle (round 6): closes on the ball at t* (render/approach.js). Player's view only.
+  const ringMat = createApproachMaterial();
+  const ring = new THREE.Mesh(new THREE.PlaneGeometry(1, 1), ringMat);
+  ring.name = 'approach-circle';
   ring.renderOrder = 7;
+  ring.frustumCulled = false;
   ring.visible = false;
   group.add(ring);
+  const ringDraw = { k: 1, alpha: 0, green: 0, perfect: false, after: false };
   // Racket ghost at the planned contact (QA r5, game/swingAssist.js contactGhostPose): a faint
   // racket face (rim, light fill, throat and handle) drawn in the racket's own frame (origin at the
   // grip, +Y handle -> tip, +Z face normal), one quad shaded in the fragment shader: one draw call.
@@ -411,7 +418,6 @@ export function createBallView(scene, { halo = false, trail = true, shadows = tr
     // the player's view. When the ball is behind the player only the mirror draws it.
     const mirror = !!(camera.userData && camera.userData.isMirror);
     if (!mainCamera && !mirror) mainCamera = camera;
-    ringMat.opacity = !mirror && camera === mainCamera ? ringOpacity : 0;
     camera.getWorldPosition(_camPos);
     const d = _camPos.distanceTo(ball.position);
     const k = ballDisplayScale(d, vis.minDeg);
@@ -422,7 +428,9 @@ export function createBallView(scene, { halo = false, trail = true, shadows = tr
     }
     const rr = r * k;
     if (glow.visible) {
-      glow.scale.setScalar(rr * 2 * 4.2);
+      // A soft halo 4.2 ball diameters wide, never under glowMinDeg of the view (findable far away).
+      const gMin = vis.glowMinDeg > 0 ? 2 * d * Math.tan((vis.glowMinDeg * Math.PI) / 360) : 0;
+      glow.scale.setScalar(Math.max(rr * 2 * 4.2, gMin));
       glow.updateMatrixWorld();
     }
     if (dropLine.visible) {
@@ -435,12 +443,35 @@ export function createBallView(scene, { halo = false, trail = true, shadows = tr
       const dh = Math.hypot(_camPos.x - dropLine.position.x, _camPos.z - dropLine.position.z);
       lineMat.uniforms.uA.value = lineAlpha * THREE.MathUtils.smoothstep(dh, 0.35, 0.8);
     }
-    if (ring.visible && ringState) {
-      const p = ringState.progress;
-      const size = rr * 2 * (1.9 + 3.2 * (1 - p) * (1 - p)) * (ringState.green ? 1.15 : 1);
-      ring.scale.setScalar(Math.max(size, d * 0.012));
-      ring.updateMatrixWorld();
+  };
+  // The approach circle is sized for the camera drawing it: radii as fractions of the view height
+  // (render/approach.js approachRadius), so it closes at a constant on-screen rate onto the ball.
+  ring.onBeforeRender = (renderer, sc, camera) => {
+    const mirror = !!(camera.userData && camera.userData.isMirror);
+    if (!mainCamera && !mirror) mainCamera = camera;
+    const u = ringMat.uniforms;
+    if (mirror || camera !== mainCamera || !ringState) {
+      u.uA.value = 0;
+      return;
     }
+    camera.getWorldPosition(_camPos);
+    const d = Math.max(0.05, _camPos.distanceTo(ball.position));
+    const fov = camera.isPerspectiveCamera ? (camera.fov * Math.PI) / 180 : 1.2;
+    const viewH = 2 * d * Math.tan(fov / 2);
+    const ballFrac = (r * displayScale) / viewH;
+    const ra = approachRadius(ringDraw.k, ballFrac) * viewH;
+    const rt = (ballFrac * APPROACH.close + APPROACH.closePad) * viewH;
+    const line = APPROACH_LINE * viewH * (ringDraw.perfect ? 1.7 : 1);
+    const size = 2 * (ra + line * 4);
+    ring.position.copy(ball.position);
+    ring.quaternion.copy(camera.quaternion);
+    ring.scale.set(size, size, 1);
+    ring.updateMatrixWorld();
+    u.uRa.value = ra / size;
+    u.uRt.value = rt / size;
+    u.uW.value = line / size;
+    u.uA.value = ringOpacity;
+    u.uTA.value = ringDraw.after ? 0 : 0.4;
   };
 
   // Trail ribbon, rebuilt camera-facing just before it renders.
@@ -578,14 +609,23 @@ export function createBallView(scene, { halo = false, trail = true, shadows = tr
       lineAlpha = vis.line;
       lineMat.uniforms.uA.value = vis.line;
     }
+    // Presentation aids that run every frame (app/wiring.js: the timing tick before t*).
+    if (source && source.frame) source.frame(dt);
     ringState = source && source.ring ? source.ring() : null;
     ring.visible = !!(ringState && vis.minDeg > 0);
     if (ring.visible) {
-      ring.position.copy(ball.position);
-      ringMat.color.copy(ringState.green ? RING_GREEN : RING_YELLOW);
-      ringOpacity = Math.max(0, Math.min(1, ringState.fade)) * (ringState.green ? 1 : ringState.inWindow ? 0.85 : 0.5);
+      const rs = ringState;
+      // Round 6 approach state ({ k, alpha, green 0..1, perfect, after }); round-3 reach-ring states
+      // ({ progress, fade, green, inWindow }) still draw (closing linearly with progress).
+      ringDraw.k = Number.isFinite(rs.k) ? rs.k : 1 - Math.max(0, Math.min(1, rs.progress ?? 1));
+      ringDraw.alpha = Number.isFinite(rs.alpha) ? rs.alpha : Math.max(0, Math.min(1, rs.fade ?? 1));
+      ringDraw.green = rs.green === true ? 1 : Number(rs.green) || 0;
+      ringDraw.perfect = !!rs.perfect;
+      ringDraw.after = !!rs.after;
+      const c = ringMat.uniforms.uColor.value;
+      c.copy(APPROACH_WHITE).lerp(ringDraw.perfect ? APPROACH_PERFECT : APPROACH_GREEN, ringDraw.green);
+      ringOpacity = ringDraw.alpha * (0.62 + 0.38 * ringDraw.green);
     } else ringOpacity = 0;
-    ringMat.opacity = ringOpacity;
     const gs = source && source.ghost ? source.ghost() : null;
     ghost.visible = !!(gs && gs.alpha > 0.005);
     if (ghost.visible) {
@@ -645,12 +685,15 @@ export function createBallView(scene, { halo = false, trail = true, shadows = tr
     /** 'realistic' | 'enhanced' | 'max' (BALL_VISIBILITY). */
     setVisibility(mode) { vis = BALL_VISIBILITY[mode] || BALL_VISIBILITY.enhanced; },
     /**
-     * Live sources for the aids (app/wiring.js): { visibility: () => mode, ring: () => reach-ring
-     * state ({ progress 0..1, green, inWindow, fade }) | null } — or null to unbind.
+     * Live sources for the aids (app/wiring.js): { visibility: () => mode, ring: () => approach-circle
+     * state (render/approach.js approachCue: { k, alpha, green, perfect, after }) | null, ghost: () =>
+     * racket ghost pose | null, frame: (dt) => per-frame presentation hook } — or null to unbind.
      */
     bind(src) { source = src || null; },
     get visibility() { return vis; },
     get ringVisible() { return ring.visible; },
+    /** The approach circle as drawn last frame (tests / screenshots). */
+    get ringDraw() { return ring.visible ? { ...ringDraw, opacity: ringOpacity } : null; },
     get displayScale() { return displayScale; },
     /** kind: 'hit' | 'bounce' | 'wall' | 'net' */
     flash(kind = 'hit') {
@@ -667,6 +710,8 @@ export function createBallView(scene, { halo = false, trail = true, shadows = tr
       blurMat.dispose();
       ghostGeo.dispose();
       ghostMat.dispose();
+      ring.geometry.dispose();
+      ringMat.dispose();
     },
   };
 }

@@ -4,9 +4,10 @@
 // frames. Positions are kept relative to the player's court position (a glide does not smear it).
 // One draw call while visible, none at rest; no per-frame allocation.
 import * as THREE from 'three';
-import { TRAIL, trailStrength } from './racketTrailMath.js';
+import { TRAIL, trailStrength, TRAIL_POWER, trailPowerOf, trailPower as power, setTrailPower } from './racketTrailMath.js';
 
-export { TRAIL, trailStrength };
+// Round 6: a player stroke's power (setTrailPower, pure module) scales the ribbon for a moment.
+export { TRAIL, trailStrength, TRAIL_POWER, trailPowerOf, setTrailPower };
 
 /**
  * @param {object} o { color } ribbon tint
@@ -39,7 +40,7 @@ export function createRacketTrail({ color = '#f4efe4' } = {}) {
   mesh.visible = false;
 
   // Ring of samples: relative inner / outer points, age, strength.
-  const ring = Array.from({ length: N }, () => ({ ix: 0, iy: 0, iz: 0, ox: 0, oy: 0, oz: 0, age: Infinity, k: 0 }));
+  const ring = Array.from({ length: N }, () => ({ ix: 0, iy: 0, iz: 0, ox: 0, oy: 0, oz: 0, age: Infinity, k: 0, len: 1 }));
   let head = 0;
   let count = 0;
   let prevMid = null;
@@ -65,7 +66,12 @@ export function createRacketTrail({ color = '#f4efe4' } = {}) {
     prevMid.x = mid.x; prevMid.y = mid.y; prevMid.z = mid.z;
     const s = ring[head];
     s.ix = ix; s.iy = iy; s.iz = iz; s.ox = ox; s.oy = oy; s.oz = oz; s.age = 0;
-    s.k = trailStrength(speed) * (o.fade ?? 1);
+    // Swing power (setTrailPower): stronger for a hard swing, at least `floor` while it lasts.
+    const pw = power.left > 0;
+    if (pw) power.left -= dt;
+    const k0 = trailStrength(speed);
+    s.k = Math.min(1.4, pw ? Math.max(k0 * power.k, k0 > 0.01 || speed > 2 ? power.floor : 0) : k0) * (o.fade ?? 1);
+    s.len = pw ? power.k : 1;
     head = (head + 1) % N;
     if (count < N) count++;
     write(bodyPos, o.eye || null);
@@ -76,14 +82,14 @@ export function createRacketTrail({ color = '#f4efe4' } = {}) {
     for (let i = 0; i < N; i++) {
       // i = 0 newest.
       const s = i < count ? ring[(head - 1 - i + N) % N] : null;
-      const live = s && s.age <= TRAIL.maxAge;
+      const live = s && s.age <= TRAIL.maxAge * (s.len || 1);
       const src = live ? s : ring[(head - 1 + N) % N];
       const p = i * 6, c = i * 8;
       pos[p] = src.ix + bodyPos.x; pos[p + 1] = src.iy; pos[p + 2] = src.iz + bodyPos.z;
       pos[p + 3] = src.ox + bodyPos.x; pos[p + 4] = src.oy; pos[p + 5] = src.oz + bodyPos.z;
       let a = 0;
       if (live) {
-        const f = 1 - s.age / TRAIL.maxAge;
+        const f = 1 - s.age / (TRAIL.maxAge * (s.len || 1));
         a = TRAIL.opacity * s.k * f * f;
         if (eye) {
           const dx = (s.ix + s.ox) / 2 + bodyPos.x - eye.x, dy = (s.iy + s.oy) / 2 - eye.y, dz = (s.iz + s.oz) / 2 + bodyPos.z - eye.z;

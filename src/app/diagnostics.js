@@ -6,9 +6,11 @@
 //   src = { world, settings, tracking, calibration, pwa, stats, params, env: { ua, platform, lang,
 //           dpr, width, height, screen, displayMode, url }, glasses (src/xr glasses.diagnostics()),
 //           safety (stage.safety: black-screen safety-net counters), robust ({ stats: bodyTracker.stats,
-//           yawDeg, sideOn } of the last sample: side-on tracking guards) }
+//           yawDeg, sideOn } of the last sample: side-on tracking guards), input ('camera' |
+//           'fallback' | 'autopilot': the hitting mode of a copy taken with no game running),
+//           timingProfile (game/timingProfile.js: the camera player's learned timing bias) }
 import { ASSIST, TRACKING } from '../config.js';
-import { timingConfig, timingLog } from '../game/swingAssist.js';
+import { activeHitting, timingLog } from '../game/swingAssist.js';
 
 export const DIAGNOSTICS_VERSION = 1;
 
@@ -78,7 +80,9 @@ export function buildDiagnostics(src = {}) {
   const { world = null, settings = null, tracking = null, calibration = null, pwa = null, stats = null, params = null, env = {}, glasses = null, safety = null, robust = null, bodyTracker = null } = src;
   const s = settings || (world && world.settings) || null;
   const T = world && world.timing;
-  const cfg = world ? timingConfig(world) : null;
+  // Round 6: the hitting the player gets, also when no game runs (a copy from Settings reported
+  // 'physical' for a Rookie player: it read the absent world), with the personal timing in use.
+  const H = s ? activeHitting({ world, settings: s, input: world ? world.input : (src.input || 'camera'), profile: src.timingProfile || null }) : null;
   const swings = (timingLog.swings.length ? timingLog.swings : T ? T.swings : []).slice(-40);
   return {
     kind: 'vibora-diagnostics',
@@ -97,7 +101,8 @@ export function buildDiagnostics(src = {}) {
     calibration: calibration ? { x0: r3(calibration.x0), d0: r3(calibration.d0), eyeHeight: r3(calibration.eyeHeight), scale: r3(calibration.scale), ok: !!calibration.ok } : null,
     settings: settingsCopy(s),
     hitting: s ? {
-      assist: s.assist, mode: cfg ? 'timing' : 'physical', windows: cfg ? { early: cfg.early, late: cfg.late, reach: Number.isFinite(cfg.reach) ? cfg.reach : 'any', minSpeed: cfg.minSpeed } : null,
+      assist: s.assist, mode: H.mode, windows: jsonSafe(H.windows), active: H.active, bias: H.bias, tuned: H.text,
+      adapt: s.timingAdapt !== false, profile: jsonSafe(H.profile),
       latency: s.latency, presetCaptureOffsetMs: TRACKING.cameraPresets[s.cameraPreset] ? TRACKING.cameraPresets[s.cameraPreset].captureOffsetMs : null,
       assistPreset: ASSIST[s.assist] ? { contactMargin: ASSIST[s.assist].contactMargin, netSafety: ASSIST[s.assist].netSafety } : null,
     } : null,

@@ -33,7 +33,8 @@ import { BALL, RACKET, PLAYER, ASSIST, DEFAULT_ASSIST, COURT, netHeightAt } from
 import { interceptCandidates, solveShot } from '../physics/predict.js';
 import { spinFromComponents, racketProfile } from '../physics/racket.js';
 import { playableCandidates, pickGlassContact, stanceBounds } from './intercept.js';
-import { pickIntercept, contactFamily, idealStance } from './human.js';
+import { pickIntercept, contactFamily, idealStance, TIMING_CONTACT_OFFSETS } from './human.js';
+import { createTimingProfile, effortKind } from './timingProfile.js';
 import {
   applyPlayerHit, applySpeculativeHit, revertSpeculative, emit, emitView, predictFlight, currentStroke,
 } from './world.js';
@@ -54,14 +55,39 @@ export const TIMING = Object.freeze({
   /** s before t* when the plan stops being re-planned, and the refresh interval before that. */
   commit: 0.5,
   refresh: 0.15,
-  /** Body-relative swing speed (m/s, as a webcam measures it) mapped onto each stroke's pace range. */
-  speedRef: Object.freeze([4, 13]),
-  speedRefVolley: Object.freeze([2.4, 8.5]),
-  /** Outgoing pace ranges (km/h) per shot type. */
+  /**
+   * Outgoing pace ranges (km/h) per shot type, from effort 0 to effort 1 (round 6: "would be cool
+   * if swing speed made an impact"). Effort is the swing's speed against the player's own recent
+   * swings (game/timingProfile.js), so a slow webcam still spans the range.
+   */
   pace: Object.freeze({
-    ground: [52, 92], glass: [48, 80], volley: [40, 72], bandeja: [58, 82], vibora: [64, 92],
-    smash: [95, 142], lob: [46, 64], chiquita: [28, 42], serve: [46, 72],
+    ground: [45, 115], glass: [40, 100], volley: [30, 85], bandeja: [45, 85], vibora: [55, 100],
+    smash: [70, 150], lob: [40, 70], chiquita: [25, 45], serve: [45, 85],
   }),
+  /** pace = lo + (hi - lo) * effort^paceGamma. */
+  paceGamma: 0.9,
+  /** Lowest contact (m, x height / 1.75) an overhead family is still played as an overhead. */
+  overheadMin: 1.5,
+  /** Effort of a strike shown before the swing is seen (the player's median: their typical pace). */
+  predictedEffort: 0.5,
+  /** Topspin / slice scale with the swing: x (spinBase + spinGain * effort). */
+  spinBase: 0.6,
+  spinGain: 0.6,
+  /** A lob's apex (m) and how much shorter (m) a soft one lands than a full one. */
+  lobApex: Object.freeze([4.8, 6.9]),
+  lobShort: 2.2,
+  /**
+   * A slow drive / volley / glass return does not reach the back of the court on a drive's
+   * flight: it lands up to `max` m shorter (in `step`s) before it is ever struck harder.
+   */
+  shorten: Object.freeze({ step: 0.75, max: 7.5 }),
+  /** Held early / late hits (round 6, ASSIST bufferEarly / bufferLate): quality and pace factors. */
+  buffered: Object.freeze({ quality: 0.75, pace: 0.85 }),
+  /**
+   * An early swing at a ball still in the air within volley reach is played as a volley (U, m:
+   * up to `front` in front of the hips, `side` to either side, between `low` and `high`).
+   */
+  volleyReach: Object.freeze({ front: 1.3, side: 1.25, low: 0.45, high: 2.0 }),
   /** Far-court metres (x) of a full window of timing error: early -> cross-court, late -> down the line. */
   spread: Object.freeze({ ground: 3.0, glass: 2.6, volley: 2.6, overhead: 1.6, lob: 2.0, chiquita: 1.5, serve: 0.8 }),
   /** Weight of the swing's own horizontal direction (deviation from the family's usual path, ±0.45 rad). */
@@ -77,6 +103,19 @@ export const TIMING = Object.freeze({
   scatterZ: Object.freeze([0.25, 1.3]),
   /** Swing threshold factor by family (volleys are short punches, serves underhand). */
   minSpeedFactor: Object.freeze({ vfh: 0.6, vbh: 0.6, serve: 0.75 }),
+  /**
+   * Personal swing threshold (round 6: a webcam that measured a player's swings at 2-5 m/s left a
+   * quarter of their balls "no swing"): at most `personal` x the player's own p25 swing speed of
+   * that kind (after 2 swings), never below the assist's minSpeedFloor (default `minSpeedFloor`)
+   * x the family factor (m/s). The camera's jitter still raises it (noiseFactor).
+   */
+  personal: 0.5,
+  minSpeedFloor: 2.0,
+  /**
+   * The run into the peak (minTravel) shrinks with a personal threshold, as (th / th0)^2, down to
+   * this share (a still racket's jitter never travels: measured 0 m at 2x webcam noise).
+   */
+  minTravelScale: 0.5,
   /** Racket travel (m, body-relative, within 0.9 s) that counts as preparation for a predicted strike. */
   prepTravel: 0.3,
   prepTravelShort: 0.18,
@@ -97,6 +136,15 @@ export const TIMING = Object.freeze({
   stillSpeed: 1.2,
   stillFor: 0.1,
   minBuild: 0.1,
+  /**
+   * Swings out of the picture (round 6, 2d: close to a MacBook camera a low or wide swing leaves
+   * the frame and the arm is held rigid from the last frame that saw it, so the swing itself is
+   * never seen): when the hand comes back into the picture after >= minFrames hidden frames
+   * (<= maxGap s) at least minDist m (minHoriz across the court) from where it left, without a
+   * swing seen meanwhile, that was one: it peaked `lead` s before the re-entry at speedK x the
+   * mean speed of the move.
+   */
+  reentry: Object.freeze({ minFrames: 2, maxGap: 0.9, minDist: 0.3, minHoriz: 0.22, lead: 0.05, speedK: 2, maxSpeed: 12 }),
   /** Drawn racket magnetized onto the contact for this long (s). */
   magnetS: 0.12,
   /** Reach ring: green within ±green s of t*; shown from ringLead s before the window. */
@@ -123,6 +171,76 @@ export function timingConfig(world) {
   const a = ASSIST[s.assist] || ASSIST[DEFAULT_ASSIST];
   if (mode === 'timing') return a.timing || ASSIST.club.timing;
   return a.mode === 'timing' && a.timing ? a.timing : null;
+}
+
+/**
+ * Windows of a timing config (s, around the player's own moment: t* + timingBias):
+ * { early, late } a clean hit; down to -bufferEarly a held early swing strikes when the ball
+ * arrives, up to +bufferLate a late hit (round 6; both with consequences).
+ */
+export function windowsOf(cfg) {
+  if (!cfg) return null;
+  return {
+    early: cfg.early, late: cfg.late,
+    bufferEarly: Math.max(cfg.early, cfg.bufferEarly ?? cfg.early),
+    bufferLate: Math.max(cfg.late, cfg.bufferLate ?? cfg.late),
+  };
+}
+
+/**
+ * Windows around the player's own moment (t* + bias): the clean window moves with the bias, the
+ * outer (held / late-hit) limits never come closer to t* than without it, so tuning to a player
+ * never turns a swing the default window plays into a miss (round 6: user1's -0.11 s bias moved
+ * the Club late limit to +0.19 s after t* and on-time swings 0.2 s late became late misses).
+ * Returns windowsOf(cfg) with bufferEarly / bufferLate (relative to t* + bias) widened by |bias|
+ * on the side away from it.
+ */
+export function windowsAround(cfg, bias = 0) {
+  const W = windowsOf(cfg);
+  if (!W || !bias) return W;
+  return { ...W, bufferEarly: W.bufferEarly + Math.max(0, bias), bufferLate: W.bufferLate + Math.max(0, -bias) };
+}
+
+/**
+ * The player's timing / swing-speed profile (game/timingProfile.js): world.timingProfile (set by
+ * app/game.js: per device and camera for the camera player) or one kept per world.
+ */
+export function profileOf(world) {
+  if (world.timingProfile) return world.timingProfile;
+  const T = world.timing;
+  if (!T) return null;
+  if (!T.profile) T.profile = createTimingProfile();
+  return T.profile;
+}
+
+/** Timing bias (s) the windows are centred on: the profile's, unless settings.timingAdapt === false. */
+export function timingBias(world) {
+  if (!world || (world.settings && world.settings.timingAdapt === false)) return 0;
+  const p = profileOf(world);
+  return p ? p.bias : 0;
+}
+
+/**
+ * What the timing judge is running with (diagnostics, Settings): { mode: 'timing' | 'physical',
+ * windows, bias, text } for a world, or for settings + input when no game is running (the
+ * diagnostics copied from Settings reported 'physical' for a Rookie player: it read the absent
+ * world). profile: a timing profile to report (game/timingProfile.js), optional.
+ */
+export function activeHitting({ world = null, settings = null, input = null, profile = null } = {}) {
+  const w = world || { settings: settings || {}, input };
+  const cfg = timingConfig(w);
+  const p = profile || (world ? profileOf(world) : null);
+  const sum = p ? p.summary() : null;
+  const bias = cfg && sum && !(w.settings && w.settings.timingAdapt === false) ? sum.bias : 0;
+  return {
+    mode: cfg ? 'timing' : 'physical',
+    windows: cfg ? { ...windowsOf(cfg), reach: Number.isFinite(cfg.reach) ? cfg.reach : 'any', minSpeed: cfg.minSpeed, position: cfg.position } : null,
+    // The outer limits in use around t* + bias (windowsAround): s before / after the player's moment.
+    active: cfg ? (({ bufferEarly, bufferLate }) => ({ bufferEarly: +bufferEarly.toFixed(3), bufferLate: +bufferLate.toFixed(3) }))(windowsAround(cfg, bias)) : null,
+    bias: cfg ? bias : null,
+    text: cfg && sum ? sum.text : null,
+    profile: sum,
+  };
 }
 
 /** Learning slow motion off the glass: settings.learningSlowmo 'on' / 'off' (or true / false), or 'auto' (on for Rookie). */
@@ -216,7 +334,8 @@ function computePlan(world, key) {
     fam = c.kind === 'volley' ? (hint.family === 'bh' ? 'vbh' : 'vfh') : hint.family;
   }
   if (fam === 'oh' && hint && hint.family === 'sm') fam = 'sm';
-  const st = idealStance(c.pos, fam, handed, H);
+  // Met out in front, where the player sees it (round 6, human.js TIMING_CONTACT_OFFSETS).
+  const st = idealStance(c.pos, fam, handed, H, TIMING_CONTACT_OFFSETS);
   const bnd = stanceBounds();
   let bounceT = Infinity, wallT = Infinity;
   for (const e of pred.events) {
@@ -228,7 +347,7 @@ function computePlan(world, key) {
     key, tStar: c.t, pStar: c.pos.clone(), vStar: c.vel.clone(), kind: serving ? 'serve' : c.kind, family: fam,
     stance: { x: clamp(st.x, bnd.xMin, bnd.xMax), z: clamp(st.z, bnd.zMin, bnd.zMax) },
     serve: serving, receivingServe, bounceT, wallT, glass: c.kind === 'after-wall', made: world.time, nEv: world.flight.events.length,
-    early: null, specTried: false,
+    early: null, specTried: false, buffer: null,
   };
 }
 
@@ -245,6 +364,7 @@ export function planTiming(world) {
   if (P && P.key !== key) {
     T.plan = null; // a new flight (struck by somebody else, or replaced) before a decision: nobody's miss
     T.hold = null;
+    if (P.buffer && P.buffer.rec && P.buffer.rec.result === 'held') P.buffer.rec.result = 'taken'; // the ball went elsewhere
   }
   if (!incomingToPlayer(world) || isDecided(T, key)) return T.plan;
   const now = world.time;
@@ -259,6 +379,7 @@ export function planTiming(world) {
     else {
       np.early = plan.early;
       np.specTried = plan.specTried;
+      np.buffer = plan.buffer;
     }
     T.plan = np;
     T.flight.planned = true;
@@ -301,7 +422,7 @@ export function judgeHoldOf(world, untilClosed = false) {
   const cfg = timingConfig(world);
   if (!cfg) return Infinity;
   // Failsafe: a tracker that stalls must not freeze the rulings.
-  if (world.time > P.tStar + cfg.late + 1.2) return Infinity;
+  if (world.time > P.tStar + Math.max(0, timingBias(world)) + windowsAround(cfg, timingBias(world)).bufferLate + 1.2) return Infinity;
   return P.tStar - TIMING.kappa * cfg.early - 0.02;
 }
 
@@ -408,6 +529,8 @@ export function createSwingWatch({ racketTrack, posAt }) {
   const vr = new Vec3();
   const rp = new Vec3();
   const out = { lastT: -Infinity, threshold: 0 };
+  // Candidates found and those dropped for too little travel (diagnostics: why a swing was not one).
+  const stats = { candidates: 0, short: 0, lastShort: null, recent: [], inferred: 0 };
 
   /**
    * Body-relative sweet-spot velocity of stored pose i: a central difference of (sweet spot - the
@@ -488,14 +611,47 @@ export function createSwingWatch({ racketTrack, posAt }) {
   }
 
   let minTravel = TIMING.minTravel;
+  // Hidden hand (racketTrack pose.hidden: out of the picture): the run since it left the picture.
+  let hideRun = null; // { n, from: { t, x, y, z } | null, emitted }
+  let lastSeen = null;
+  let emitted = 0; // swing events so far (an inferred one only when none came during the run)
+  let muteUntil = -Infinity; // capture time until which samples are no swing (a re-entry jump)
+
+  /**
+   * The swing a hand re-entering the picture reveals (TIMING.reentry), or null. Only while a ball
+   * is due (win: capture-time window [c0, c1] of the planned contact): the hand coming back from
+   * a follow-through or a rest below the picture is no swing at another moment.
+   */
+  function reentrySwing(p, th, win) {
+    const R = TIMING.reentry;
+    const run = hideRun;
+    // A candidate that began while the hand was hidden is the jump back into the picture, not a swing seen.
+    if (!win || !run || !run.from || run.n < R.minFrames || emitted > run.emitted || (cur && cur.tStart < run.t0)) return null;
+    const f = run.from;
+    const gap = p.t - f.t;
+    const dx = rp.x - f.x, dy = rp.y - f.y, dz = rp.z - f.z;
+    const horiz = Math.hypot(dx, dz), dist = Math.hypot(dx, dy, dz);
+    if (!(gap > 0) || gap > R.maxGap || dist < R.minDist || horiz < R.minHoriz || dy < -0.7 * dist) return null;
+    const cPeak = p.t - Math.min(R.lead, gap / 3);
+    if (cPeak < win[0] || cPeak > win[1]) return null;
+    const speed = clamp((R.speedK * dist) / gap, th, R.maxSpeed);
+    const v = new Vec3(dx, dy, dz).scale(speed / dist);
+    return {
+      tStart: f.t, cPeak, peakSpeed: speed, vRel: v,
+      pathDeg: (Math.atan2(dy, Math.max(1e-6, horiz)) * 180) / Math.PI,
+      az: Math.atan2(dx, -dz), at: p.t, travel: dist, threshold: th, inferred: true,
+    };
+  }
   /**
    * gate (optional): { family, dom } of the planned stroke. A backswing is no swing: the racket
    * dropping into a low take-back, taken back to the hitting side, or (overheads) up behind the
    * head, without moving toward the net (round 4: in rallies off the glass these read as swings
    * 0.3-0.7 s early and the real stroke after them was dismissed as the recovery).
    */
+  let minSpeedNow = 4;
   function process(minSpeed, travel = TIMING.minTravel, gate = null) {
     minTravel = travel;
+    minSpeedNow = minSpeed;
     const events = [];
     const settled = racketTrack.settledTime();
     const n = racketTrack.length;
@@ -514,13 +670,33 @@ export function createSwingWatch({ racketTrack, posAt }) {
       const fwd = -vr.z;
       let s = fwd >= -0.1 * raw ? raw : 0; // forward (or across): a backswing never counts
       if (s > 0 && gate && raw > 1e-6 && isBackswing(vr, raw, gate)) s = 0;
+      // Out of the picture and back (TIMING.reentry).
+      if (p.hidden) {
+        if (!hideRun) hideRun = { n: 0, t0: p.t, from: lastSeen ? { ...lastSeen } : null, emitted };
+        hideRun.n++;
+      } else {
+        const inferred = hideRun ? reentrySwing(p, Math.min(1.6 * minSpeedNow, Math.max(minSpeedNow, TIMING.noiseFactor * noiseFloor())), gate && gate.window) : null;
+        hideRun = null;
+        lastSeen = { t: p.t, x: rp.x, y: rp.y, z: rp.z };
+        if (inferred && (armed || cur)) {
+          stats.inferred++;
+          events.push(inferred);
+          emitted++;
+          cur = null;
+          armed = false;
+          // The jump back into the picture is no swing of its own: the velocities that span it
+          // (+-2 frames) are muted.
+          muteUntil = p.t + 2.5 * Math.max(1 / 60, p.t - (prev ? prev.t : p.t - 1 / 30));
+        }
+      }
+      if (p.t <= muteUntil) s = 0;
       recent.push({ t: p.t, s, raw, back: Math.max(0, vr.z), up: Math.max(0, vr.y), x: rp.x, y: rp.y, z: rp.z });
       while (recent.length && recent[0].t < p.t - 2) recent.shift();
       // Tracking noise sets the floor: a swing must stand well above the jitter of a still racket.
       const th = Math.min(1.6 * minSpeed, Math.max(minSpeed, TIMING.noiseFactor * noiseFloor()));
       out.threshold = th;
       if (!cur) {
-        if (!armed && s < 0.7 * th) armed = true;
+        if (!armed && s < 0.7 * th && p.t > muteUntil) armed = true;
         if (armed && s >= th) {
           cur = { tStart: p.t, th, peak: { t: p.t, s, v: vr.clone(), x: rp.x, y: rp.y, z: rp.z, before: prev, after: null } };
         }
@@ -536,7 +712,17 @@ export function createSwingWatch({ racketTrack, posAt }) {
           ev.travel = travel;
           ev.threshold = th;
           // A real swing carries the racket a long way into its peak; jitter does not.
-          if (travel >= minTravel) events.push(ev);
+          stats.candidates++;
+          stats.recent.push({ t: ev.cPeak, speed: ev.peakSpeed, travel });
+          if (stats.recent.length > 32) stats.recent.shift();
+          if (travel >= minTravel) {
+            events.push(ev);
+            emitted++;
+          }
+          else {
+            stats.short++;
+            stats.lastShort = { t: ev.cPeak, speed: ev.peakSpeed, travel };
+          }
           // The follow-through is no new swing; a candidate too short to be one (a dip in a swing's
           // acceleration, jitter) leaves the watch armed, or the rest of that swing went unseen
           // (round 4: a no-swing miss at 8.6 m/s in a rally).
@@ -597,12 +783,18 @@ export function createSwingWatch({ racketTrack, posAt }) {
     get lastT() { return out.lastT; },
     /** Swing threshold in use (m/s): minSpeed raised over a noisy camera's jitter. */
     get threshold() { return out.threshold; },
+    stats,
+    /** The last 2 s of body-relative samples { t, s (gated forward speed), raw, x, y, z } (diagnostics). */
+    get samples() { return recent; },
     noiseFloor,
     reset() {
       cur = null;
       armed = true;
       prev = null;
       recent.length = 0;
+      hideRun = null;
+      lastSeen = null;
+      muteUntil = -Infinity;
     },
   };
 }
@@ -690,7 +882,9 @@ export function timingAnalysis(world, ball, contact, t, extra, ctx, isServe) {
   const fam = tm.family || 'fh';
   const back = fam === 'bh' || fam === 'vbh';
   const volley = !ctx.afterBounce && !isServe;
-  const overhead = !isServe && (fam === 'oh' || fam === 'sm' || (volley && C.y > 1.78 * k));
+  // An overhead needs the ball above the shoulders (round 6: a smash swing at a ball that had
+  // dropped to the waist solved into a 21-30 km/h loop): lower, it is played as a groundstroke.
+  const overhead = !isServe && C.y > TIMING.overheadMin * k && (fam === 'oh' || fam === 'sm' || (volley && C.y > 1.78 * k));
   const hint = (world.mode && world.mode.apHints) || null;
   const intent = hint && hint.shot ? hint.shot : null;
   const e = Number.isFinite(tm.e) ? tm.e : 0;
@@ -700,18 +894,21 @@ export function timingAnalysis(world, ball, contact, t, extra, ctx, isServe) {
   const rt = racketProfile().timing;
   const win = (e < 0 ? tm.early || 0.2 : tm.late || 0.22) * rt.window;
   const eN = clamp(e / Math.max(0.05, win), -1, 1);
-  // Volleys are punches: a webcam sees 3-8 m/s where a drive shows 8-14.
-  const ref = volley && !overhead ? TIMING.speedRefVolley : TIMING.speedRef;
-  const u = clamp((tm.speed - ref[0]) / (ref[1] - ref[0]), 0, 1);
+  // Effort (round 6): the swing's speed against the player's own swings of this kind (a webcam
+  // sees 2-12 m/s where another sees 6-16; game/timingProfile.js), 0..1.
+  const eKind = effortKind(volley && !overhead ? (back ? 'vbh' : 'vfh') : fam, isServe);
+  const effort = Number.isFinite(tm.effort) ? clamp(tm.effort, 0, 1) : (profileOf(world)?.effort(eKind, tm.speed) ?? 0.5);
+  const u = effort;
   const path = Number.isFinite(tm.pathDeg) ? tm.pathDeg : 0;
+  const held = tm.buffered === 'early' || tm.buffered === 'late' ? tm.buffered : null;
 
-  // Quality: on time and well spaced.
+  // Quality: on time and well spaced; a held (early) or late hit is a poorer contact.
   const qT = 1 - 0.55 * Math.abs(eN) ** 1.5;
   // Spacing counts more on Club than on Rookie (QA r5: half-metre racket errors still hit cleanly,
   // so footwork was never trained): the racket's miss distance lowers pace and accuracy.
   const kS = world.settings.assist === 'rookie' ? 0.45 : 0.75;
   const qS = Number.isFinite(tm.dist) ? 1 - kS * Math.min(1.4, tm.dist / 0.75) ** 2 : 1;
-  const q = clamp(qT * qS, 0.25, 1);
+  const q = clamp(qT * qS * (held ? TIMING.buffered.quality : 1), 0.2, 1);
 
   // What the swing plays: the drill's stroke (ap.shot) unless the swing clearly says otherwise.
   let type;
@@ -732,16 +929,17 @@ export function timingAnalysis(world, ball, contact, t, extra, ctx, isServe) {
     else type = ctx.afterWall ? 'glass' : 'ground';
   }
 
-  // Pace.
+  // Pace: the stroke's range by effort, a little less for a poor contact, less again when held.
   const pr = TIMING.pace[type];
-  const kmh = lerp(pr[0], pr[1], u ** 0.85) * (0.8 + 0.2 * q) * rt.pace;
+  const kmh = lerp(pr[0], pr[1], u ** TIMING.paceGamma) * (0.85 + 0.15 * q) * (held ? TIMING.buffered.pace : 1) * rt.pace;
 
-  // Spin (rpm) from the swing path.
+  // Spin (rpm) from the swing path, more of it from a faster swing.
   const f = clamp(path / TIMING.pathFull, -1, 1);
+  const sg = TIMING.spinBase + TIMING.spinGain * u;
   let top = 0, side = 0;
   switch (type) {
-    case 'ground': case 'glass': top = f >= 0 ? lerp(300, 2600, f) : lerp(300, -1500, -f); break;
-    case 'volley': top = clamp(-450 + 12 * path, -1100, 300); break;
+    case 'ground': case 'glass': top = (f >= 0 ? lerp(300, 2600, f) : lerp(300, -1500, -f)) * sg; break;
+    case 'volley': top = clamp(-450 + 12 * path, -1100, 300) * sg; break;
     case 'lob': top = clamp(300 + 25 * path, 200, 1600); break;
     case 'chiquita': top = 500 + 15 * Math.max(0, path); break;
     case 'bandeja': top = -700 - 600 * u; break;
@@ -797,20 +995,54 @@ export function timingAnalysis(world, ball, contact, t, extra, ctx, isServe) {
   const dir = v3(tx - C.x, 0, tz - C.z);
   const spin = spinFromComponents(dir, top * rt.spin, side * rt.spin);
   let res = null;
-  if (type === 'lob') res = solveShot({ from: C, target, spin, apex: clamp(5.2 + 1.4 * u, 5.0, 7.0) });
-  else if (type === 'chiquita') {
+  if (type === 'lob') {
+    // A full swing lifts it higher and deeper; a soft one lands shorter.
+    const deep = clamp(u / 0.7, 0, 1);
+    target.z = clamp(tz + (1 - deep) * TIMING.lobShort, -10.6, -2);
+    res = solveShot({ from: C, target, spin, apex: lerp(TIMING.lobApex[0], TIMING.lobApex[1], u) });
+  } else if (type === 'chiquita') {
     // Just over the tape, dying at their feet.
     res = solveShot({ from: C, target, spin, apex: Math.max(C.y + 0.12, netHeightAt(tx) + 0.6 + 0.3 * (1 - q)) });
   } else {
+    const good = (r) => r && r.ok && r.clearsNet && !lobLike(r);
     res = solveShot({ from: C, target, spin, speed: kmh / 3.6 });
+    // A slow drive, volley or glass return does not carry to the back of the court on a drive's
+    // flight (round 6: the pace is the swing's): it lands shorter, never struck harder than swung.
+    if (!good(res) && (type === 'ground' || type === 'glass' || type === 'volley')) {
+      const S = TIMING.shorten;
+      for (let d = S.step; d <= S.max + 1e-9; d += S.step) {
+        const z2 = Math.min(target.z + d, -1.6);
+        const r2 = solveShot({ from: C, target: v3(target.x, 0, z2), spin, speed: kmh / 3.6 });
+        if (good(r2)) {
+          res = r2;
+          target.z = z2;
+          break;
+        }
+        if (z2 >= -1.6) break;
+      }
+    } else if (!(res && res.ok && res.clearsNet) && (type === 'smash' || type === 'bandeja' || type === 'vibora')) {
+      // An overhead met low (or close to the net at pace) cannot come down that short over the
+      // net: it goes deeper at its own pace rather than looping over slowly.
+      const S = TIMING.shorten;
+      for (let d = S.step; d <= S.max + 1e-9; d += S.step) {
+        const z2 = Math.max(target.z - d, -9.6);
+        const r2 = solveShot({ from: C, target: v3(target.x, 0, z2), spin, speed: kmh / 3.6 });
+        if (r2.ok && r2.clearsNet) {
+          res = r2;
+          target.z = z2;
+          break;
+        }
+        if (z2 <= -9.6) break;
+      }
+    }
     if (!res.ok || !res.clearsNet) {
       res = solveShot({ from: C, target, spin, apex: Math.max(C.y + 0.4, netHeightAt(tx) + 0.7 + 0.06 * dist) });
     }
     // A drive, glass return or volley flies like one: a slow pace over a long way (off the back
     // glass, 15-18 m) solves into a high, steep arc that reads as a lob. Struck a little harder
-    // (up to DRIVE_FLIGHT.maxPace of the type's range) it stays a drive.
+    // (up to DRIVE_FLIGHT.maxPace of the swing's pace) it stays a drive.
     if (res && res.ok && lobLike(res)) {
-      const top = pr[1] * DRIVE_FLIGHT.maxPace * rt.pace;
+      const top = kmh * DRIVE_FLIGHT.maxPace;
       for (let f = DRIVE_FLIGHT.step; kmh * f <= top + 1e-9 || f === DRIVE_FLIGHT.step; f *= DRIVE_FLIGHT.step) {
         const r2 = solveShot({ from: C, target, spin, speed: Math.min(top, kmh * f) / 3.6 });
         if (r2.ok && r2.clearsNet && !lobLike(r2)) {
@@ -821,6 +1053,8 @@ export function timingAnalysis(world, ball, contact, t, extra, ctx, isServe) {
       }
     }
   }
+  tx = target.x;
+  tz = target.z;
   const vOut = res && Number.isFinite(res.vel.x) && res.vel.lengthSq() > 1 ? res.vel.clone() : dir.clone().normalize().scale(kmh / 3.6).add(v3(0, 2, 0));
   ball.vel.copy(vOut);
   ball.spin.copy(spin);
@@ -838,13 +1072,17 @@ export function timingAnalysis(world, ball, contact, t, extra, ctx, isServe) {
   pose.t = t;
 
   const label = strokeLabel(type, back);
-  const timing = Math.abs(e) <= TIMING.green * rt.window ? 'good' : e < 0 ? 'early' : 'late';
+  const timing = held ? held : Math.abs(e) <= TIMING.green * rt.window ? 'good' : e < 0 ? 'early' : 'late';
   let spacing = 'good';
   if (tm.offU && Number.isFinite(tm.dist) && tm.dist > 0.25 && !overhead) {
     const outward = tm.offU.x * dom * (back ? -1 : 1);
     if (Math.abs(outward) > 0.2) spacing = outward > 0 ? 'stretched' : 'cramped';
   }
-  const spacingText = spacingNote(tm, dom, back, overhead);
+  // The coaching line of the hit (shown first on the shot card): a held or late swing, a volley
+  // in a drill that wanted a bounce, else the spacing.
+  const intentContact = hint && hint.contact ? hint.contact : null;
+  const coach = timingNote(held, !!tm.volleyed && intentContact && intentContact !== 'volley' && intentContact !== 'any' && intentContact !== 'overhead')
+    || spacingNote(tm, dom, back, overhead);
   return {
     info: {
       hit: true, speedIn, speedOut: vOut.length(), racketSpeed: tm.speed, offCenter: (1 - q) * 0.1, eA: RACKET.apparentCOR,
@@ -857,11 +1095,22 @@ export function timingAnalysis(world, ball, contact, t, extra, ctx, isServe) {
     ctx, isServe, contactPos: C, contactU, speedIn, physVel: vOut.clone(), intent: { target, vel: vOut.clone() }, lift: 0,
     pose,
     timing: {
-      e, early: tm.early, late: tm.late, speed: tm.speed, pathDeg: path, dist: Number.isFinite(tm.dist) ? tm.dist : null,
+      e, eRaw: Number.isFinite(tm.eRaw) ? tm.eRaw : e, bias: Number.isFinite(tm.bias) ? tm.bias : 0,
+      early: tm.early, late: tm.late, speed: tm.speed, pathDeg: path, dist: Number.isFinite(tm.dist) ? tm.dist : null,
       quality: q, type, kmh, top, side, target: { x: tx, z: tz }, predicted: !!tm.predicted, tStar: tm.tStar, family: fam,
-      spacingText: spacingText ? spacingText.en : null, spacingTextEs: spacingText ? spacingText.es : null,
+      effort, buffered: held, volleyed: !!tm.volleyed,
+      spacingText: coach ? coach.en : null, spacingTextEs: coach ? coach.es : null,
     },
+    effort,
   };
+}
+
+/** Coaching line of a held early / late hit, or of a volley a drill wanted bounced (EN / ES), or null. */
+export function timingNote(held, volleyInDrill = false) {
+  if (held === 'early') return { en: 'A bit early — wait for the ball', es: 'Un poco pronto: espera la bola' };
+  if (held === 'late') return { en: 'A bit late — swing sooner', es: 'Un poco tarde: golpea antes' };
+  if (volleyInDrill) return { en: 'Volleyed — in this drill let it bounce', es: 'De volea: en este ejercicio déjala botar' };
+  return null;
 }
 
 /**
@@ -1019,13 +1268,20 @@ export function reportMiss(world, P, m) {
   return miss;
 }
 
-/** Swing threshold (m/s) for the planned stroke: volleys, serves and touch shots are gentler. */
-export function minSpeedFor(world, cfg, P) {
+/**
+ * Swing threshold (m/s) for the planned stroke: volleys, serves and touch shots are gentler, and a
+ * player whose camera measures slow swings gets a lower one (TIMING.personal).
+ */
+export function minSpeedFor(world, cfg, P, personal = true) {
   const base = cfg ? cfg.minSpeed : 4;
   let f = P ? TIMING.minSpeedFactor[P.family] ?? 1 : 1;
   const hint = world.mode && world.mode.apHints;
   if (hint && hint.shot === 'chiquita') f = Math.min(f, 0.6);
-  return base * f;
+  let th = base * f;
+  const prof = personal && cfg && world.timing ? profileOf(world) : null;
+  const q = prof && prof.speedQuantile ? prof.speedQuantile(effortKind(P ? P.family : 'fh', !!(P && P.serve)), 0.25) : null;
+  if (Number.isFinite(q)) th = Math.max((cfg.minSpeedFloor ?? TIMING.minSpeedFloor) * f, Math.min(th, TIMING.personal * q));
+  return th;
 }
 
 /** Timing meter after a swing: { e, early, late, hit, at, label }. */
@@ -1049,7 +1305,7 @@ function meterOf(world, cfg, e, hit) {
  */
 export function createTimingJudge({ racketTrack, posAt, prepTimeBefore = null }) {
   const watch = createSwingWatch({ racketTrack, posAt });
-  const swingGate = { family: null, dom: 1 };
+  const swingGate = { family: null, dom: 1, window: null };
   const tmpPose = createRacketPose();
   const pp0 = { x: 0, z: 0 };
 
@@ -1066,17 +1322,36 @@ export function createTimingJudge({ racketTrack, posAt, prepTimeBefore = null })
     L.path[fam] = L.path[fam] === undefined ? ev.pathDeg : L.path[fam] + a * (ev.pathDeg - L.path[fam]);
   }
 
-  /** Closest approach of the tracked racket's sweet spot (around the swing peak) to point C. */
-  function racketPathMiss(ev, C) {
+  /**
+   * Closest approach of the tracked racket's sweet spot (around the swing peak) to point C, or to
+   * any of the points `Cs` (the ball's path between the ideal contact and the contact time: round
+   * 6, a swing 0.2 s off on a 17 m/s volley met the ball's line but was 1.2 m from where the ball
+   * was then, so the timing error was punished twice, as a spacing miss).
+   */
+  function racketPathMiss(ev, C, Cs = null) {
     let best = Infinity, bx = 0, by = 0, bz = 0;
+    const pts = Cs && Cs.length ? Cs : [C];
     for (let c = ev.cPeak - 0.15; c <= ev.cPeak + 0.1 + 1e-9; c += 1 / 120) {
       const p = racketTrack.sample(c, tmpPose);
       if (!p) continue;
-      const dx = C.x - p.sweet.x, dy = C.y - p.sweet.y, dz = C.z - p.sweet.z;
-      const d = Math.hypot(dx, dy, dz);
-      if (d < best) { best = d; bx = dx; by = dy; bz = dz; }
+      for (const q of pts) {
+        const dx = q.x - p.sweet.x, dy = q.y - p.sweet.y, dz = q.z - p.sweet.z;
+        const d = Math.hypot(dx, dy, dz);
+        if (d < best) { best = d; bx = dx; by = dy; bz = dz; }
+      }
     }
     return { dist: best, offU: { x: bx, y: by, z: -bz } };
+  }
+
+  /** The live ball's path between ball times t0 and t1 (n points; ball history), or null. */
+  function ballPath(world, t0, t1, n = 7) {
+    if (!(t1 - t0 > 1e-3)) return null;
+    const out = [];
+    for (let i = 0; i <= n; i++) {
+      const at = world.ballHistory.at(t0 + ((t1 - t0) * i) / n);
+      if (at && world.ball && at.id === world.ball.id && !at.atRest) out.push(v3(at.pos.x, at.pos.y, at.pos.z));
+    }
+    return out.length ? out : null;
   }
 
   function pushSwing(T, rec) {
@@ -1121,14 +1396,109 @@ export function createTimingJudge({ racketTrack, posAt, prepTimeBefore = null })
   function contactOf(cfg, P, sw) {
     return {
       timing: {
-        e: sw.e, speed: sw.speed, pathDeg: sw.pathDeg, az: sw.az ?? null, dist: sw.dist ?? null, offU: sw.offU || null,
+        e: sw.e, eRaw: sw.eRaw ?? sw.e, bias: sw.bias ?? 0, speed: sw.speed, pathDeg: sw.pathDeg, az: sw.az ?? null,
+        dist: sw.dist ?? null, offU: sw.offU || null,
         family: P.family, kind: P.kind, tStar: P.tStar, early: cfg.early, late: cfg.late, reach: cfg.reach,
-        predicted: !!sw.predicted, key: P.key,
+        predicted: !!sw.predicted, key: P.key, effort: Number.isFinite(sw.effort) ? sw.effort : null,
+        buffered: sw.buffered || null, volleyed: !!sw.volleyed,
       },
       face: P.family === 'bh' || P.family === 'vbh' ? 'back' : 'front',
       local: { x: 0, y: RACKET.sweetSpotY },
       offCenter: 0,
     };
+  }
+
+  // Hits decided outside onFrame's swing loop (a held early swing at the window's end) wait here
+  // for the next onFrame, which hands them to the controller's analytics.
+  const pendingShots = [];
+
+  /**
+   * A pre-bounce ball within volley reach when an early swing peaked (round 6, 2e: "swinging at a
+   * ball that would only be played after the bounce" was an early miss): { tb, fam, pos } or null.
+   */
+  function volleyChance(world, P, ev, lat) {
+    if (P.kind === 'volley' || P.serve || P.receivingServe || !Number.isFinite(P.bounceT)) return null;
+    const tb = ev.cPeak - lat;
+    if (tb >= P.bounceT - 0.03 || tb <= world.flight.startT + 0.05) return null;
+    const at = world.ballHistory.at(tb);
+    if (!at || !world.ball || at.id !== world.ball.id || at.atRest || !(at.pos.z > 0) || !(at.vel.z > 0)) return null;
+    const pp = posAt(ev.cPeak, pp0) || world.player.pos;
+    const pl = world.player;
+    const k = (world.settings.height || pl.height || REF_H) / REF_H;
+    const dom = (world.settings.handed || pl.handed) === 'left' ? -1 : 1;
+    const ux = at.pos.x - pp.x, uz = pp.z - at.pos.z, y = at.pos.y;
+    const V = TIMING.volleyReach;
+    if (uz < -0.15 || uz > V.front * k || Math.abs(ux) > V.side * k || y < V.low || y > V.high * k) return null;
+    return { tb, fam: ux * dom >= -0.1 ? 'vfh' : 'vbh', pos: at.pos.clone() };
+  }
+
+  /**
+   * Plays a swing as a hit: the ball where it is at the contact time (a volley: when the swing
+   * peaked; a held early swing: when the ball arrives, at most kappa * early before t*), the racket
+   * path within reach, the rules. Decides the ball either way. Returns the ShotRecord or null.
+   * sw = { e (centred), eRaw, bias, buffered: 'early'|'late'|null, volley: volleyChance()|null, effort }
+   */
+  /** Ball time a swing strikes at (a volley: its peak; a held early swing: as the ball arrives). */
+  function strikeTime(cfg, P, sw) {
+    return sw.volley ? sw.volley.tb : contactTimeFor(P, sw.buffered === 'early' ? Math.max(sw.e, -cfg.early) : sw.e);
+  }
+
+  function strike(world, cfg, P, ev, sw, shots, rec) {
+    const tc = strikeTime(cfg, P, sw);
+    if (tc > world.time + 1e-9) {
+      // Seen before the ball got there (a player whose own moment is early, a fast camera): it
+      // strikes when the ball arrives (afterStep / closeWindow: strikeHeld).
+      if (P.buffer && P.buffer.rec && P.buffer.rec !== rec) P.buffer.rec.result = 'early';
+      P.buffer = { ...sw, ev, rec, speed: ev.peakSpeed, t: ev.cPeak - (world.settings.latency ?? 0), due: tc };
+      if (rec) rec.result = 'held';
+      return null;
+    }
+    const at = world.ballHistory.at(tc);
+    if (!at || !world.ball || at.id !== world.ball.id || at.atRest) {
+      if (rec) rec.result = 'gone';
+      decideMiss(world, cfg, P, { reason: 'late-detect', e: sw.e });
+      return null;
+    }
+    const C = v3(at.pos.x, at.pos.y, at.pos.z);
+    const sp = racketPathMiss(ev, C, sw.volley ? null : ballPath(world, Math.min(tc, P.tStar), Math.min(world.time, Math.max(tc, P.tStar))));
+    if (rec) rec.dist = +sp.dist.toFixed(3);
+    if (sp.dist > cfg.reach) {
+      if (rec) rec.result = 'far';
+      const dom = (world.settings.handed || world.player.handed) === 'left' ? -1 : 1;
+      decideMiss(world, cfg, P, { ...spacingReason(sp.offU, P.family, dom), e: sw.e, dist: sp.dist });
+      return null;
+    }
+    const Pv = sw.volley ? { ...P, family: sw.volley.fam, kind: 'volley', tStar: sw.volley.tb } : P;
+    const pp = posAt(ev.cPeak, pp0) || world.player.pos;
+    const contact = contactOf(cfg, Pv, {
+      e: sw.volley ? 0 : sw.e, eRaw: sw.eRaw, bias: sw.bias, speed: ev.peakSpeed, pathDeg: ev.pathDeg, az: ev.az, dist: sp.dist, offU: sp.offU,
+      effort: sw.effort, buffered: sw.buffered, volleyed: !!sw.volley,
+    });
+    const shot = applyPlayerHit(world, contact, null, tc, {
+      playerPos: { x: pp.x, z: pp.z },
+      swing: { peakSpeed: ev.peakSpeed, racketTime: ev.cPeak, prepTime: prepTimeBefore ? prepTimeBefore(ev.cPeak) : ev.cPeak - ev.tStart },
+    });
+    if (!shot) {
+      if (rec) rec.result = 'rejected';
+      decideMiss(world, cfg, P, { ...rulesOf(world, P, tc), e: sw.e });
+      return null;
+    }
+    if (rec) {
+      rec.result = sw.volley ? 'volley' : sw.buffered ? `hit-${sw.buffered}` : 'hit';
+      rec.shotId = shot.id;
+    }
+    decideHit(world, cfg, P, shot, sw.volley ? 0 : sw.e);
+    learn(world, Pv.family, ev);
+    shots.push(shot);
+    return shot;
+  }
+
+  /** Feeds a judged swing to the player's profile: its timing error and its speed. */
+  function teach(world, P, ev, eRaw) {
+    const prof = profileOf(world);
+    if (!prof) return;
+    prof.addTiming(eRaw);
+    prof.addSwing(effortKind(P.family, P.serve), ev.peakSpeed);
   }
 
   function judgeSwing(world, cfg, ev, shots) {
@@ -1140,61 +1510,90 @@ export function createTimingJudge({ racketTrack, posAt, prepTimeBefore = null })
       tStar: P ? +P.tStar.toFixed(3) : null, e: null, dist: null, result: 'no-ball', at: +world.time.toFixed(3),
     };
     pushSwing(T, rec);
-    if (!P || isDecided(T, P.key)) return;
-    // The follow-through / recovery after an early swing is the same stroke, not a second one.
-    if (P.early && ev.cPeak - (P.early.t + lat) < 0.6 && ev.peakSpeed < 0.75 * P.early.speed) {
+    if (!P) return; // no ball on its way to the player
+    // A swing at a ball already decided: the follow-through of a hit, or a swing after a miss.
+    if (isDecided(T, P.key)) {
+      rec.result = T.decided.kind === 'hit' ? 'after-hit' : 'after-miss';
+      return;
+    }
+    // The follow-through / recovery after an early (or held) swing is the same stroke, not a second one.
+    const prior = P.buffer || P.early;
+    if (prior && ev.cPeak - (prior.t + lat) < 0.6 && ev.peakSpeed < 0.75 * prior.speed) {
       rec.result = 'recovery';
       return;
     }
-    const e = ev.cPeak - lat - P.tStar;
-    rec.e = +e.toFixed(3);
-    if (e < -cfg.early) {
-      if (e < -cfg.early - 0.6) {
+    const bias = timingBias(world);
+    const W = windowsAround(cfg, bias);
+    const eRaw = ev.cPeak - lat - P.tStar;
+    const e = eRaw - bias; // around the player's own moment
+    rec.e = +eRaw.toFixed(3);
+    if (bias) rec.ec = +e.toFixed(3);
+    const prof = profileOf(world);
+    const effort = prof ? prof.effort(effortKind(P.family, P.serve), ev.peakSpeed) : null;
+    const sw = { e, eRaw, bias, effort, buffered: null, volley: null };
+    if (e < -W.early) {
+      // A swing at a ball still in the air but within reach is a volley.
+      const v = volleyChance(world, P, ev, lat);
+      if (v) {
+        sw.volley = v;
+        strike(world, cfg, P, ev, sw, shots, rec);
+        return;
+      }
+      if (e < -W.bufferEarly - 0.4) {
         rec.result = 'ignored';
         return;
       }
-      if (!P.early || e > P.early.e) P.early = { e, speed: ev.peakSpeed, t: ev.cPeak - lat };
-      rec.result = 'early';
-      T.lastSwing = meterOf(world, cfg, e, false);
+      teach(world, P, ev, eRaw);
+      if (e < -W.bufferEarly) {
+        if (!P.early || e > P.early.e) P.early = { e, speed: ev.peakSpeed, t: ev.cPeak - lat };
+        rec.result = 'early';
+        T.lastSwing = meterOf(world, cfg, e, false);
+        return;
+      }
+      // Held: it strikes when the ball arrives, unless a swing on time comes first.
+      if (P.buffer && P.buffer.buffered !== 'early') {
+        rec.result = 'early'; // a clean swing is already waiting for the ball
+        return;
+      }
+      if (!P.buffer || e > P.buffer.e) {
+        if (P.buffer && P.buffer.rec) P.buffer.rec.result = 'early';
+        P.buffer = { ...sw, buffered: 'early', ev, rec, speed: ev.peakSpeed, t: ev.cPeak - lat, due: null };
+        rec.result = 'held';
+      } else rec.result = 'early';
       return;
     }
-    if (e > cfg.late || P.closed) {
+    if (e > W.late || P.closed) {
+      teach(world, P, ev, eRaw);
+      if (e <= W.bufferLate && !P.closed) {
+        sw.buffered = 'late';
+        strike(world, cfg, P, ev, sw, shots, rec);
+        return;
+      }
       rec.result = 'late';
       decideMiss(world, cfg, P, { reason: 'late', e: Math.max(e, 0.01) });
       return;
     }
-    const tc = contactTimeFor(P, e);
-    const at = world.ballHistory.at(tc);
-    if (!at || !world.ball || at.id !== world.ball.id || at.atRest) {
-      rec.result = 'gone';
-      decideMiss(world, cfg, P, { reason: 'late-detect', e });
-      return;
-    }
-    const C = v3(at.pos.x, at.pos.y, at.pos.z);
-    const sp = racketPathMiss(ev, C);
-    rec.dist = +sp.dist.toFixed(3);
-    if (sp.dist > cfg.reach) {
-      rec.result = 'far';
-      const dom = (world.settings.handed || world.player.handed) === 'left' ? -1 : 1;
-      decideMiss(world, cfg, P, { ...spacingReason(sp.offU, P.family, dom), e, dist: sp.dist });
-      return;
-    }
-    const pp = posAt(ev.cPeak, pp0) || world.player.pos;
-    const contact = contactOf(cfg, P, { e, speed: ev.peakSpeed, pathDeg: ev.pathDeg, az: ev.az, dist: sp.dist, offU: sp.offU });
-    const shot = applyPlayerHit(world, contact, null, tc, {
-      playerPos: { x: pp.x, z: pp.z },
-      swing: { peakSpeed: ev.peakSpeed, racketTime: ev.cPeak, prepTime: prepTimeBefore ? prepTimeBefore(ev.cPeak) : ev.cPeak - ev.tStart },
-    });
-    if (!shot) {
-      rec.result = 'rejected';
-      decideMiss(world, cfg, P, { ...rulesOf(world, P, tc), e });
-      return;
-    }
-    rec.result = 'hit';
-    rec.shotId = shot.id;
-    decideHit(world, cfg, P, shot, e);
-    learn(world, P.family, ev);
-    shots.push(shot);
+    teach(world, P, ev, eRaw);
+    if (P.buffer && P.buffer.rec) P.buffer.rec.result = 'early';
+    P.buffer = null; // the swing on time wins over a held one
+    strike(world, cfg, P, ev, sw, shots, rec);
+  }
+
+  /** A held swing whose ball has arrived strikes now (clean holds as soon as the ball is there). */
+  function strikeDue(world, cfg, P) {
+    const B = P.buffer;
+    if (B && !B.tried && Number.isFinite(B.due) && world.time >= B.due - 1e-9) strikeHeld(world, cfg, P);
+  }
+
+  /** The held early swing strikes (the ball has arrived and no swing on time came). */
+  function strikeHeld(world, cfg, P) {
+    const B = P.buffer;
+    if (!B || B.tried) return null;
+    if (strikeTime(cfg, P, B) > world.time + 1e-9) return null; // the ball is not there yet
+    B.tried = true;
+    const shot = strike(world, cfg, P, B.ev, B, pendingShots, B.rec);
+    if (!shot && B.rec && B.rec.result === 'held') B.rec.result = 'early';
+    return shot;
   }
 
   /**
@@ -1202,24 +1601,41 @@ export function createTimingJudge({ racketTrack, posAt, prepTimeBefore = null })
    * released, a predicted strike undone); the miss reason follows from what was seen, after waiting
    * TIMING.lateWait for a swing that comes too late (so it is reported as late, not as no swing).
    * A predicted strike is undone sooner when the racket has stopped after the ideal moment.
+   * Round 6: the windows sit around the player's own moment (t* + bias); a held early swing strikes
+   * once the clean window is over, and the late window runs on to bufferLate.
    */
   function closeWindow(world, cfg) {
     const T = world.timing;
     const P = T.plan;
     if (!P || isDecided(T, P.key)) return;
     const lat = world.settings.latency ?? 0;
-    const cEnd = P.tStar + lat + cfg.late + TIMING.decideLag;
+    const W = windowsAround(cfg, timingBias(world));
+    const t0 = P.tStar + timingBias(world); // the player's own moment (ball time)
+    const cGood = t0 + lat + W.late + TIMING.decideLag;
+    const cEnd = t0 + lat + W.bufferLate + TIMING.decideLag;
     const c = watch.lastT;
     const b = world.ball;
+    if (P.buffer && !P.buffer.tried && !P.closed) {
+      if (Number.isFinite(P.buffer.due)) strikeDue(world, cfg, P);
+      else if (c >= cGood) strikeHeld(world, cfg, P);
+      if (isDecided(T, P.key)) return;
+    }
     const specHere = world.spec && b && world.spec.ballId === b.id;
-    if (!P.closed && specHere && c >= P.tStar + lat && c - watch.stillSince(TIMING.stillSpeed) >= TIMING.stillFor
-      && cEnd - TIMING.decideLag - c < TIMING.minBuild) {
+    // (The shown strike is a clean hit: a still racket near the end of the clean window undoes it;
+    // a late swing after that is a late hit, struck from the real path.)
+    if (!P.closed && !P.buffer && specHere && c >= t0 + lat && c - watch.stillSince(TIMING.stillSpeed) >= TIMING.stillFor
+      && cGood - TIMING.decideLag - c < TIMING.minBuild) {
       revertSpeculative(world, 'stopped');
       T.log.reverted++;
     }
     if (!P.closed && c >= cEnd) {
       P.closed = true;
       T.hold = null;
+      if (P.buffer && !P.buffer.tried) {
+        strikeHeld(world, cfg, P);
+        if (isDecided(T, P.key)) return;
+        if (P.buffer && !P.buffer.tried) return; // still on its way to the held swing
+      }
       if (world.spec && b && world.spec.ballId === b.id) {
         revertSpeculative(world, 'window');
         T.log.reverted++;
@@ -1236,12 +1652,19 @@ export function createTimingJudge({ racketTrack, posAt, prepTimeBefore = null })
     if (P.closed) {
       // The reason waits for a late swing; frames that stop coming do not keep it (or the
       // rulings it holds) waiting.
-      if (c >= cEnd + TIMING.lateWait || world.time > P.tStar + cfg.late + 1.1) {
-        const slow = watch.maxSpeed(P.tStar + lat - cfg.early - 0.2, P.tStar + lat + cfg.late);
+      if (c >= cEnd + TIMING.lateWait || world.time > t0 + W.bufferLate + 1.1) {
+        const slow = watch.maxSpeed(t0 + lat - W.bufferEarly - 0.2, t0 + lat + W.bufferLate);
         const volleyFam = P.family === 'vfh' || P.family === 'vbh';
-        decideMiss(world, cfg, P, { reason: 'no-swing', speed: slow >= (volleyFam ? 1.0 : 1.6) ? slow : 0 });
+        const tooSlow = slow >= (volleyFam ? 1.0 : 1.6);
+        // A swing too slow for the threshold still tells how fast this player's camera sees their
+        // swings: the personal threshold (minSpeedFor) learns from it.
+        if (tooSlow) {
+          const prof = profileOf(world);
+          if (prof) prof.addSwing(effortKind(P.family, P.serve), slow);
+        }
+        decideMiss(world, cfg, P, { reason: 'no-swing', speed: tooSlow ? slow : 0 });
       }
-    } else if (world.time > P.tStar + cfg.late + 0.9) {
+    } else if (world.time > t0 + W.bufferLate + 0.9) {
       // No camera frames came through (out of frame, tracker stalled).
       P.closed = true;
       decideMiss(world, cfg, P, { reason: 'tracking' });
@@ -1272,17 +1695,33 @@ export function createTimingJudge({ racketTrack, posAt, prepTimeBefore = null })
       gate = swingGate;
       gate.family = P.family;
       gate.dom = handed === 'left' ? -1 : 1;
+      // Capture times a swing could still play this ball (an out-of-picture swing is read only then).
+      gate.window = null;
+      if (cfg && !P.closed && !isDecided(T, P.key)) {
+        const W = windowsAround(cfg, timingBias(world));
+        const c0 = P.tStar + timingBias(world) + (world.settings.latency ?? 0);
+        gate.window = [c0 - W.bufferEarly, c0 + W.bufferLate];
+      }
     }
-    const ev = watch.process(minSpeedFor(world, cfg, P), short ? TIMING.minTravelShort : TIMING.minTravel, gate);
+    // A personal threshold below the assist's (a camera that measures slow swings) asks for a
+    // proportionally shorter run into the peak too (a 2.5 m/s swing travels ~0.27 m in 0.3 s).
+    const th = minSpeedFor(world, cfg, P);
+    const th0 = minSpeedFor(world, cfg, P, false);
+    const travel = (short ? TIMING.minTravelShort : TIMING.minTravel) * clamp((th / Math.max(1e-6, th0)) ** 2, TIMING.minTravelScale, 1);
+    const ev = watch.process(th, travel, gate);
+    if (pendingShots.length) shots.push(...pendingShots.splice(0));
     if (!cfg) return shots;
     for (const e of ev) judgeSwing(world, cfg, e, shots);
     closeWindow(world, cfg);
+    if (pendingShots.length) shots.push(...pendingShots.splice(0));
     return shots;
   }
 
   /**
    * After each tick (ball stepped, display racket predicted): the speculative strike at t*, the
    * magnetized display racket, cues, learning slow motion, and the window timeout without frames.
+   * Round 6: a held early swing is shown striking the ball as it arrives (with its own pace and
+   * direction), even when it was only seen after t*.
    */
   function afterStep(world, { predictor = null, dt = 1 / 240 } = {}) {
     const T = world.timing;
@@ -1299,28 +1738,39 @@ export function createTimingJudge({ racketTrack, posAt, prepTimeBefore = null })
     const pl = world.player;
     if (P && b && P.key === flightKeyOf(world) && !isDecided(T, P.key)) {
       const t = P.tStar;
-      if (!P.specTried && !P.closed && world.time >= t - 1e-9 && world.time - dt <= t + 1e-9 && !world.spec && world.settings.hitPrediction !== false) {
+      const B = P.buffer;
+      const tb = B ? (Number.isFinite(B.due) ? B.due : contactTimeFor(P, Math.max(B.e, -cfg.early))) : t;
+      const due = B ? world.time >= tb - 1e-9 && !P.specBuf : world.time >= t - 1e-9 && world.time - dt <= t + 1e-9;
+      if (due && !P.closed && (!P.specTried || (B && !P.specBuf)) && !world.spec && world.settings.hitPrediction !== false) {
         P.specTried = true;
         const pp = predictor && predictor.plan;
         const live = pp && !pp.dead && !pp.struck && pp.key === P.key && predictor.mix >= 0.3;
         const punch = P.family === 'vfh' || P.family === 'vbh';
         const prep = live && watch.prepared(t + lat - 0.9, punch ? TIMING.prepTravelShort : TIMING.prepTravel);
-        const wentEarly = !!(P.early && P.early.e < -cfg.early);
+        const wentEarly = !!(P.early && !B);
         const ns = T.log.noStrike;
-        if (ns) {
+        if (ns && !B) {
           if (!live) ns.tracking++;
           else if (!prep) ns.prep++;
           else if (wentEarly) ns.early++;
         }
-        if (live && prep && !wentEarly) {
+        let contact = null, at = t;
+        if (B) {
+          P.specBuf = true;
+          at = tb;
+          contact = contactOf(cfg, P, { ...B, speed: B.ev.peakSpeed, pathDeg: B.ev.pathDeg, az: B.ev.az, dist: null, offU: null, predicted: true });
+        } else if (live && prep && !wentEarly) {
+          // The swing is not seen yet: a typical one of this player (median effort, learned path).
           const L = learned(world, P.family);
-          const contact = contactOf(cfg, P, { e: 0, speed: L.speed, pathDeg: L.path, az: null, dist: null, offU: null, predicted: true });
-          const pos = posAt(t + lat, pp0) || pl.pos;
-          const shot = applySpeculativeHit(world, contact, null, t, {
-            playerPos: { x: pos.x, z: pos.z }, cStar: t + lat, plan: { fam: P.family, timing: true },
+          contact = contactOf(cfg, P, { e: 0, speed: L.speed, pathDeg: L.path, az: null, dist: null, offU: null, predicted: true, effort: TIMING.predictedEffort });
+        }
+        if (contact && at <= world.time + 1e-9) {
+          const pos = posAt(at + lat, pp0) || pl.pos;
+          const shot = applySpeculativeHit(world, contact, null, at, {
+            playerPos: { x: pos.x, z: pos.z }, cStar: at + lat, plan: { fam: P.family, timing: true, held: !!B },
           });
           if (shot) {
-            predictor.strike();
+            if (predictor && predictor.strike) predictor.strike();
             T.log.strikes++;
             if (world.spec && world.spec.pose) T.magnet = { t0: world.time, pose: world.spec.pose };
           }

@@ -1,8 +1,27 @@
 // World bus -> audio, visual effects, UI and the voice coach (SPEC §5.1 event contract).
 import { strokeName } from '../ui/charts.js';
-import { reachRing, contactGhostPose, createGhostPose } from '../game/swingAssist.js';
+import { contactGhostPose, createGhostPose, incomingToPlayer, flightKeyOf, profileOf } from '../game/swingAssist.js';
+import { setTrailPower } from '../render/racketTrailMath.js';
+import { approachCue, approachTickOn, APPROACH } from '../render/approach.js';
 import { isPerfectHit } from '../game/challenges.js';
 import { bindVenue } from '../audio/venueAudio.js';
+
+/**
+ * Round 6 (swing power): the racket whoosh ('player:swing', audio/engine.js swing) is voiced from the
+ * swing's effort against the player's own swings (game/timingProfile.js), not from raw m/s: a slow
+ * webcam measures 2-9 m/s, which the engine (tuned on 8-25 m/s) left near-silent for every swing.
+ * effort 0 -> lo m/s, 1 -> hi m/s (a swing above overheadY m: hiOverhead, the engine's smash voice),
+ * with gamma: a full groundstroke sounds like the engine's 20 m/s drive.
+ */
+export const WHOOSH = Object.freeze({ lo: 4, hi: 20, hiOverhead: 24, gamma: 0.8, overheadY: 1.75 });
+
+/** The engine speed (m/s) a measured swing is voiced at, or the measured one without a profile. */
+export function whooshSpeed(prof, speed, y = 1) {
+  if (!prof || typeof prof.effort !== 'function' || !Number.isFinite(speed)) return speed;
+  const over = y > WHOOSH.overheadY;
+  const e = prof.effort(over ? 'overhead' : 'ground', speed);
+  return WHOOSH.lo + ((over ? WHOOSH.hiOverhead : WHOOSH.hi) - WHOOSH.lo) * Math.pow(Math.max(0, Math.min(1, e)), WHOOSH.gamma);
+}
 
 /** Spoken miss reasons: at most one per MISS_VOICE_GAP s, the same reason again only after MISS_REPEAT_S. */
 export const MISS_VOICE_GAP = 2.5;
@@ -23,6 +42,9 @@ const EN_NUM = (n) => String(Math.round(n));
  */
 export function bindWorld(world, ctx) {
   const { audio, voice, stage, ui, recorder } = ctx;
+  // Round 6: ctx.play = { live(), incoming() } (also handed to ui.bindPlay and effects.bindLive).
+  const liveState = { live: () => false, incoming: () => false };
+  ctx.play = liveState;
   const bus = world.bus;
   const offs = [];
   const on = (type, fn) => offs.push(bus.on(type, fn));
@@ -32,8 +54,11 @@ export function bindWorld(world, ctx) {
   // Spatial sound: racket, bounces, glass, mesh, net, cord, machine, footsteps. A predicted hit
   // plays its pock when the shown racket meets the ball; the camera's confirmation of it
   // (shot.confirms) must not play a second one.
+  // The whoosh follows the swing's effort (WHOOSH).
   const audioBus = {
-    on: (type, fn) => bus.on(type, type === 'ball:hit' ? (p) => { if (!(p && p.shot && p.shot.confirms)) fn(p); } : fn),
+    on: (type, fn) => bus.on(type, type === 'ball:hit' ? (p) => { if (!(p && p.shot && p.shot.confirms)) fn(p); }
+      : type === 'player:swing' ? (p) => fn(p && Number.isFinite(p.speed) ? { ...p, measured: p.speed, speed: whooshSpeed(profileOf(world), p.speed, p.pos ? p.pos.y : 1) } : p)
+        : fn),
   };
   if (audio && !quiet) offs.push(audio.bindBus(audioBus, { cheer: {} }));
   // Crowd, umpire and callouts (the crowd director decides the reactions: no cheer from the engine).
@@ -66,6 +91,14 @@ export function bindWorld(world, ctx) {
       voice.say(`${n.en}, ${EN_NUM(kmh)}`, { priority: 0, es: `${n.es}, ${EN_NUM(kmh)}` });
     }
   });
+  // Swing power (round 6, 'player:hit' { effort }): a hard swing brightens and lengthens the racket
+  // trail and, from effort 0.85, kicks the view (render/fpCamera.js KICK). Once per stroke, when it
+  // is shown: a confirmation (`confirms`) of a predicted strike comes 0.2-0.8 s later and is skipped.
+  on('player:hit', (p) => {
+    if (quiet || !p || p.confirms != null) return;
+    setTrailPower(p.effort);
+    if (stage && stage.fpCam && typeof stage.fpCam.kick === 'function' && stage.view === 'fp') stage.fpCam.kick(p.effort);
+  });
   on('ball:bounce', ({ evt }) => {
     stage.effects.bounce(evt.pos, evt.surface, evt.impactSpeed, evt.vel);
   });
@@ -86,13 +119,60 @@ export function bindWorld(world, ctx) {
     if (by === 'machine') stage.machine.pulse();
   });
 
-  // Ball visibility aids (render/ballView.js): the setting and the reach ring of the timing plan.
+  // Round 6 (clarity): live-play state for the clean HUD and the zone labels. 'live': a ball is in
+  // play (until the ruling); 'incoming': it is coming to the player and their swing is not decided
+  // yet (the feedback line waits, src/ui/feedback.js), the same rule for every mode.
+  // A ruling ('dead') ends the flight that was live when it came; a ball fed before the referee
+  // resets for the next rep / point (drills reset it a moment after the feed) is live again. The
+  // ruling's flight is noted the first time it is seen (the UI and the effects ask every frame).
+  let deadOutcome = null, deadKey = null;
+  const live = () => {
+    const st = world.referee && world.referee.state;
+    const dead = !!(st && st.phase === 'dead');
+    const key = flightKeyOf(world);
+    if (dead && st.outcome !== deadOutcome) {
+      deadOutcome = st.outcome;
+      deadKey = key;
+    }
+    const b = world.ball;
+    if (!b || b.atRest || b.outside) return false;
+    return !dead || key !== deadKey;
+  };
+  const incoming = () => {
+    if (!live() || !incomingToPlayer(world)) return false;
+    const T = world.timing;
+    return !(T && T.decided && T.decided.key === flightKeyOf(world));
+  };
+  liveState.live = live;
+  liveState.incoming = incoming;
+  if (!quiet && ui && typeof ui.bindPlay === 'function') {
+    ui.bindPlay({ live, incoming });
+    offs.push(() => ui.bindPlay(null));
+  }
+  if (stage && stage.effects && typeof stage.effects.bindLive === 'function') {
+    stage.effects.bindLive(quiet ? null : live);
+    offs.push(() => stage.effects.bindLive(null));
+  }
+
+  // Ball visibility aids (render/ballView.js): the setting, the approach circle of the timing plan
+  // (round 6, render/approach.js: it closes on the ball exactly at t*) and its optional audio tick
+  // APPROACH.tickLead s before t* (settings.approachTick; balls off the glass always tick).
   if (stage && stage.ballView && stage.ballView.bind) {
+    const cue = {};
+    let tickKey = null;
     stage.ballView.bind({
       visibility: () => world.settings.ballVisibility || 'enhanced',
-      ring: () => (!quiet && stage.view === 'fp' ? reachRing(world) : null),
+      ring: () => (!quiet && stage.view === 'fp' ? approachCue(world, cue) : null),
       // Racket ghost at the planned contact (game/swingAssist.js contactGhostPose; Settings → Ball & aids).
       ghost: () => (!quiet && stage.view === 'fp' && world.settings.racketGhost !== false ? contactGhostPose(world, ghostPose) : null),
+      frame: () => {
+        if (quiet || stage.view !== 'fp' || !audio || !audio.ui) return;
+        const a = approachCue(world, cue);
+        if (!a || a.key === tickKey || a.tau > APPROACH.tickLead || a.tau < APPROACH.tickLead - 0.12) return;
+        if (!(a.glass || approachTickOn(world.settings))) return;
+        tickKey = a.key;
+        audio.ui('tick');
+      },
     });
     offs.push(() => stage.ballView.bind(null));
   }
@@ -110,10 +190,11 @@ export function bindWorld(world, ctx) {
       if (voice) voice.say(m.text, { priority: 1, es: m.es });
       if (ui && ui.missCard) ui.missCard(m);
     });
-    // Timing cues of balls off the glass: the audio tick, "Let it come off the glass… now!".
+    // Timing cues of balls off the glass: "Let it come off the glass… now!". The audio tick is the
+    // approach circle's (above: 0.2 s before t*, from the rendered frame), not swingAssist's.
     on('timing:cue', (c) => {
       if (c.kind === 'tick') {
-        if (audio && audio.ui) audio.ui('tick');
+        /* round 6: ticked by the approach circle */
       } else if (c.kind === 'glass') {
         if (voice) voice.say(c.text, { priority: 1, es: c.es });
       } else if (c.kind === 'now-voice') {

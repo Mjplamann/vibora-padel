@@ -552,6 +552,17 @@ const setParam = (param, value, ctx, smooth = 0) => {
 
 const finite = (v) => Number.isFinite(v.x) && Number.isFinite(v.y) && Number.isFinite(v.z);
 
+/**
+ * Pock of a player's stroke by swing effort (round 6, "would be cool if swing speed made an impact"):
+ * gain x (0.7 + 0.6 effort); above 0.8 the racket speed fed to the synth rises (brighter, higher
+ * crack). effort null (AI shots, unknown): unchanged. Returns { speed, gain }.
+ */
+export function effortPock(speed, effort) {
+  if (!Number.isFinite(effort)) return { speed, gain: 1 };
+  const e = clamp(effort, 0, 1);
+  return { speed: e > 0.8 ? speed * (1 + 0.75 * (e - 0.8)) + 4 * (e - 0.8) : speed, gain: 0.7 + 0.6 * e };
+}
+
 /** Crowd bus gain per unit of the crowd volume setting (0.7 -> 0.8, the level the venues were mixed at). */
 export const CROWD_TRIM = 0.8 / 0.7;
 
@@ -1029,9 +1040,12 @@ export function createAudio(opts = {}) {
     },
 
     /** Ball off the racket. speed: racket (sweet-spot) speed m/s; quality 0..1; offCenter 0..1 optional. */
-    racket(pos, { speed = 15, quality = 1, offCenter = null } = {}) {
+    racket(pos, { speed = 15, quality = 1, offCenter = null, effort = null } = {}) {
       if (!running()) return;
-      play(genPock(ctx.sampleRate, rng, { speed, quality, offCenter }), posOf(pos), { reverb: 0.2 });
+      // Round 6 (swing power): the pock follows the swing's effort (game/timingProfile.js, 0..1):
+      // gain x (0.7 + 0.6 effort), a brighter crack on a full swing (effortPock).
+      const p = effortPock(speed, effort);
+      play(genPock(ctx.sampleRate, rng, { speed: p.speed, quality, offCenter }), posOf(pos), { reverb: 0.2, gain: p.gain });
     },
 
     /** Floor bounce. surface: 'turf' | 'outsideFloor' | 'ceiling'. speed: normal impact speed m/s. */
@@ -1294,7 +1308,9 @@ export function createAudio(opts = {}) {
         bus.on('ball:hit', ({ shot } = {}) => {
           if (!shot || !shot.contact) return;
           const speed = shot.racketSpeed ?? (shot.speedOut ? shot.speedOut * 0.55 : 15);
-          api.racket(shot.contact, { speed, quality: shot.quality ?? 1, offCenter: shot.offCenter ?? null });
+          // A player's stroke carries its effort (round 6: provisional strikes the predicted one).
+          const effort = shot.by === 'player' && Number.isFinite(shot.effort) ? shot.effort : null;
+          api.racket(shot.contact, { speed, quality: shot.quality ?? 1, offCenter: shot.offCenter ?? null, effort });
         }),
         bus.on('ball:bounce', (p) => {
           const e = evtOf(p);

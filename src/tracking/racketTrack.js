@@ -300,6 +300,8 @@ export function createRacketTrack({ capacity = 240, maxGap = MAX_GAP } = {}) {
     slot.axis.copy(pose.axis).normalize();
     slot.normal.copy(pose.normal).addScaled(slot.axis, -slot.normal.dot(slot.axis)).normalize();
     slot.sweet.copy(slot.grip).addScaled(slot.axis, RACKET.sweetSpotY);
+    // Round 6: the hand was out of the camera's picture (body.js handOut): a guess, not a measurement.
+    slot.hidden = !!pose.hidden;
     frameQuat(slot.axis, slot.normal, slot.q);
     for (let i = Math.max(0, len - 3); i < len; i++) differentiate(i);
     return true;

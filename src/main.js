@@ -18,7 +18,9 @@ import { parseParams } from './app/params.js';
 import { createSettingsStore, safeStorage } from './app/settings.js';
 import { createSimClock } from './app/clock.js';
 import { createStage } from './app/stage.js';
-import { createGame, STEP } from './app/game.js';
+import { createGame, STEP, timingKey } from './app/game.js';
+import { sharedTimingProfile, resetTimingProfile } from './game/timingProfile.js';
+import { activeHitting } from './game/swingAssist.js';
 import { bindWorld } from './app/wiring.js';
 import { createAids } from './app/aids.js';
 import { createRecorder, createReplayPlayer, createReplayDirector } from './app/replay.js';
@@ -966,6 +968,16 @@ const handlers = {
   onDiagnostics() {
     return diagnosticsData();
   },
+  /** Settings → Play: the personal timing readout (round 6). */
+  onTimingInfo() {
+    return timingInfo();
+  },
+  /** Settings → Play → Reset timing: forgets the learned timing bias and swing speeds of this camera. */
+  onResetTiming() {
+    resetTimingProfile(storage, timingKey(S));
+    if (audio) audio.ui('confirm');
+    return timingInfo();
+  },
   onScreen(name, data) {
     // Glasses panel in Settings and Help (idempotent; remounts after each re-render).
     if (xrBoot) xrBoot.onScreen(name);
@@ -1112,19 +1124,21 @@ function stepGame(nowMs, dtReal) {
     if (firstHits && !firstHits.done && ui.screen === 'play' && !h.prompt) {
       const n = g.stats.playerHits;
       if (n < FIRST_HITS) {
+        // Round 6: the approach circle (render/approach.js) closes on the ball at the moment to swing.
         h.prompt = n === 0
-          ? 'Swing as the ring around the ball turns green · golpea en el verde'
-          : `${n} of ${FIRST_HITS} · same again: swing on the green ring`;
+          ? 'Swing when the circle closes on the ball (it turns green) · golpea cuando el círculo se cierra'
+          : `${n} of ${FIRST_HITS} · same again: swing as the circle closes`;
       } else {
         firstHits.done = true;
-        ui.toast("That's the timing · ¡eso es! The ring turns green when it's time to swing");
+        ui.toast("That's the timing · ¡eso es! Swing as the circle closes on the ball");
       }
     }
     ui.hud(h);
     if (xrBoot) xrBoot.hud(h);
     g.emitHud(h);
-    // Zone labels in the 3D scene keep out from under the HUD blocks.
-    stage.effects.setLabelOccluders(hudRects());
+    // Zone labels in the 3D scene keep out from under the HUD blocks (round 6: the UI's own list, with
+    // the clean bar and the feedback line, hidden blocks skipped).
+    stage.effects.setLabelOccluders(ui.hudRects ? ui.hudRects() : hudRects());
   }
   // Automatic replay of a special moment once the ball is dead (point over / rep judged, before the
   // next feed or serve), never with a live ball: the player is never pulled out of a rally. A
@@ -1140,7 +1154,7 @@ function stepGame(nowMs, dtReal) {
   if (results && performance.now() >= results.at) showResults();
 }
 
-/** Visible HUD blocks as screen rects (0..1, y down) for the 3D label layout. */
+/** Visible HUD blocks as screen rects (0..1, y down) for the 3D label layout (fallback: ui.hudRects). */
 function hudRects() {
   const W = window.innerWidth || 1, H = window.innerHeight || 1;
   const out = [];
@@ -1407,7 +1421,20 @@ function diagnosticsData() {
     robust: bt ? { stats: bt.stats, yawDeg: last ? last.yawDeg : null, sideOn: last ? last.sideOn : null } : null,
     // Close mode: the estimator in use, the learned camera tilt and the tracker counters.
     bodyTracker: bt ? { mode: bt.mode, tilt: bt.tilt, ...bt.stats } : null,
+    // Round 6: the hitting mode with no game running and the camera player's learned timing.
+    input: inputMode,
+    timingProfile: game && !game.attract ? game.world.timingProfile : inputMode === 'camera' ? sharedTimingProfile(storage, timingKey(S)) : null,
   });
+}
+
+/**
+ * Settings → Play: "Timing tuned to you: −0.14 s" (the camera player's learned timing bias,
+ * game/timingProfile.js; per device and camera preset) or null before enough swings / when off.
+ */
+function timingInfo() {
+  const prof = sharedTimingProfile(storage, timingKey(S));
+  const h = activeHitting({ settings: S, input: 'camera', profile: prof });
+  return { text: h.mode === 'timing' && S.timingAdapt !== false ? h.text : null, n: prof.n, adapt: S.timingAdapt !== false, mode: h.mode };
 }
 
 // ---------------------------------------------------------------------------------------

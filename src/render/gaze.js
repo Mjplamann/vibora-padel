@@ -65,6 +65,13 @@ export const GAZE = Object.freeze({
   SWING_SMOOTH: 10, // low-pass of the nod amount (1/s)
   SWING_RELEASE: 0.4, // s after the contact over which the nod eases out
   SWING_BELOW: 0.3, // m: the contact must be this far below the eye (no nod for overheads)
+  // Round 6 ("the player loses sight of the ball right before contact"): with the view's vertical
+  // half-FOV known (opts.vHalf), the pitch target never puts a ball that is in front of the eye
+  // beyond KEEP_MARGIN of the half-height from the centre (a high ball dropping onto a low contact
+  // stays in the picture while the contact framing tilts the view down). Only for balls at least
+  // KEEP_MIN_AHEAD m in front of the eye (a ball coming off the glass beside the head cannot be framed).
+  KEEP_MARGIN: 0.82,
+  KEEP_MIN_AHEAD: 0.6,
 });
 
 /** Glass-view modes (settings.glassView): limits, springs and anticipation (see the header). */
@@ -85,6 +92,29 @@ export const GLASS_VIEW = Object.freeze({
 });
 
 const finite3 = (v) => !!v && Number.isFinite(v.x) && Number.isFinite(v.y) && Number.isFinite(v.z);
+
+/**
+ * The contact the view frames (round 6): the timing plan's p* at t* (game/swingAssist.js: where the
+ * approach circle closes on the ball, render/approach.js) while that swing is undecided, so the ball
+ * is on screen at the moment to swing whatever t* the timing judge uses; otherwise (physical
+ * hitting, no plan) the tactical home's intercept as before. Returns out {x, y, z, t} or null. Pure.
+ */
+export function framingContact(world, out = { x: 0, y: 0, z: 0, t: 0 }) {
+  const b = world && world.ball;
+  if (!b || b.atRest) return null;
+  const T = world.timing;
+  const P = T && T.plan;
+  if (P && finite3(P.pStar) && Number.isFinite(P.tStar) && !(T.decided && T.decided.key === P.key)
+    && Number.isFinite(world.time) && world.time <= P.tStar + 0.4) {
+    out.x = P.pStar.x; out.y = P.pStar.y; out.z = P.pStar.z; out.t = P.tStar;
+    return out;
+  }
+  const ic = world.mode && world.mode.tactics && world.mode.tactics.state && world.mode.tactics.state.intercept;
+  const c = ic && ic.contact;
+  if (!c || !finite3(c)) return null;
+  out.x = c.x; out.y = c.y; out.z = c.z; out.t = ic.t;
+  return out;
+}
 const clamp = (v, lo, hi) => (v < lo ? lo : v > hi ? hi : v);
 const smoothstep = (a, b, x) => {
   const t = clamp((x - a) / (b - a), 0, 1);
@@ -107,7 +137,8 @@ export function springCapped(s, target, lambda, dt, maxRate) {
  * @returns {{ update(ball, eye, dt, opts): {yaw, pitch, phase, rear}, reset(basePitch), yaw, pitch, phase }}
  *   ball: BallState|null; eye: {x,y,z}; opts: { basePitch (rad), follow = true, contact = null,
  *   glassView = 'turn' ('mirror' | 'turn' | 'fixed'; the app passes settings.glassView, default
- *   'mirror') }
+ *   'mirror'), vHalf (rad: the view's vertical half-FOV; when given, a ball in front stays in the
+ *   picture, GAZE.KEEP_MARGIN) }
  *   contact: predicted contact {x, y, z, t?} (court; t in ball time) for the incoming ball, or null.
  *   yaw: 0 = looking toward -z, + = turned to the player's left (three.js Y rotation).
  *   rear: the ball is behind (or at) the eye plane on the player's side: the mirror inset's cue.
@@ -133,7 +164,8 @@ export function createGaze() {
     nodS = 0;
   }
 
-  function update(ball, eye, dt, { basePitch = 0, follow = true, contact = null, glassView = 'turn' } = {}) {
+  function update(ball, eye, dt, { basePitch = 0, follow = true, contact = null, glassView = 'turn', vHalf = 0 } = {}) {
+    if (!(vHalf > 0 && vHalf < Math.PI / 2)) vHalf = 0;
     // Non-finite inputs never reach the springs (a NaN target would keep the view NaN for good).
     if (!Number.isFinite(basePitch)) basePitch = 0;
     if (!(dt >= 0) || !Number.isFinite(dt)) dt = 0;
@@ -151,6 +183,7 @@ export function createGaze() {
     phase = 'front';
     rear = false;
     let nodTouched = false;
+    let lamP = 0; // round 6: a stiffer pitch spring while a glass return is framed (0 = lambda)
     if (follow && ball && !ball.atRest && !ball.outside && eye) {
       const dx = ball.pos.x - eye.x, dy = ball.pos.y - eye.y, dz = ball.pos.z - eye.z;
       const horiz = Math.hypot(dx, dz);
@@ -213,8 +246,11 @@ export function createGaze() {
       const d = ballPitch - basePitch;
       const followP = d < 0 ? 0.6 * d : 0.7 * Math.max(0, d - GAZE.UP_BAND);
       tPitch = clamp(basePitch + followP, GAZE.PITCH_MIN, GAZE.PITCH_MAX);
-      // Contact framing for the stroke itself.
-      if (contact && phase === 'front') {
+      // Contact framing for the stroke itself. Round 6: also while a glass ball comes back from
+      // behind ('return'): its contact is only ~0.25 m in front of the eye, so the view must already
+      // be tilted down when it re-enters the picture (pitch only: the yaw keeps the return's spring).
+      const ret = phase === 'return';
+      if (contact && (phase === 'front' || ret)) {
         const cx = contact.x - eye.x, cy = contact.y - eye.y, cz = contact.z - eye.z;
         // Blend in over the last CONTACT_LEAD s before the contact (by distance without a time).
         const tl = Number.isFinite(contact.t) && Number.isFinite(ball.t) ? contact.t - ball.t : null;
@@ -242,13 +278,27 @@ export function createGaze() {
           const side = cx > 0.05 ? -1 : cx < -0.05 ? 1 : 0; // yaw + = left: turn toward the contact's side
           const nYaw = clamp(cYaw + side * GAZE.SWING_YAW * nod, -cLim, cLim);
           const nPitch = clamp(cPitch - GAZE.SWING_NOD * nod, GAZE.PITCH_MIN, GAZE.OVERHEAD_PITCH_MAX);
-          tYaw = tYaw + (nYaw - tYaw) * w;
           tPitch = tPitch + (nPitch - tPitch) * w;
-          if (nod > 0.05) lambda = Math.max(lambda, GAZE.SWING_LAMBDA);
-          lambda = Math.max(lambda, calm ? 6 : GAZE.LAMBDA_NEAR);
-          lamT = GLASS_VIEW.TARGET_LAMBDA_NEAR;
-          phase = 'contact';
+          if (ret) {
+            lamP = Math.max(lambda, nod > 0.05 ? GAZE.SWING_LAMBDA : GAZE.LAMBDA_NEAR);
+          } else {
+            tYaw = tYaw + (nYaw - tYaw) * w;
+            if (nod > 0.05) lambda = Math.max(lambda, GAZE.SWING_LAMBDA);
+            lambda = Math.max(lambda, calm ? 6 : GAZE.LAMBDA_NEAR);
+            lamT = GLASS_VIEW.TARGET_LAMBDA_NEAR;
+            phase = 'contact';
+          }
         }
+      }
+      // Keep the ball itself in the picture (round 6; needs the view's vertical half-FOV).
+      if (vHalf > 0 && phase !== 'out' && !behind && -dz >= GAZE.KEEP_MIN_AHEAD) {
+        const lim = vHalf * GAZE.KEEP_MARGIN;
+        // The ball's elevation in the view's own vertical plane (the view is yawed toward the ball).
+        const bp = Math.atan2(dy, Math.max(0.3, horiz));
+        const kept = clamp(tPitch, bp - lim, bp + lim);
+        // A binding limit follows the ball with the swing's stiffer spring (no lag out of the picture).
+        if (Math.abs(kept - tPitch) > 1 * DEG) lamP = Math.max(lamP, GAZE.SWING_LAMBDA);
+        tPitch = kept;
       }
       // Overheads: never stare at the ceiling.
       if (tPitch > GAZE.OVERHEAD_PITCH_MAX && phase !== 'out') tPitch = GAZE.OVERHEAD_PITCH_MAX;
@@ -261,7 +311,7 @@ export function createGaze() {
     yawT += (tYaw - yawT) * (1 - Math.exp(-lamT * dt));
     lamS += (lambda - lamS) * (1 - Math.exp(-GLASS_VIEW.TARGET_LAMBDA * dt));
     springCapped(yaw, yawT, lamS, dt, GAZE.MAX_YAW_RATE);
-    springCapped(pitch, tPitch, lambda, dt, GAZE.MAX_PITCH_RATE);
+    springCapped(pitch, tPitch, Math.max(lambda, lamP), dt, GAZE.MAX_PITCH_RATE);
     yaw.x = clamp(yaw.x, -yawLimit, yawLimit);
     return { yaw: yaw.x, pitch: pitch.x, phase, rear };
   }

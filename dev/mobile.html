@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
+<meta name="color-scheme" content="dark">
+<meta name="theme-color" content="#05090f">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<title>Víbora Padel — swipe mode</title>
+<script type="importmap">{"imports":{"three":"../vendor/three/three.module.js","three/addons/":"../vendor/three/addons/"}}</script>
+<link rel="stylesheet" href="../styles/app.css">
+<link rel="stylesheet" href="../styles/mobile.css">
+</head>
+<body>
+<!--
+  Swipe mode (src/app/mobile.js + src/input/touch.js + src/render/chaseCam.js) on the REAL app modules:
+  stage, game, wiring, UI (HUD, pause), audio. Flags: ?drill=<id> | ?mode=rally|match, ?view=behind|fp,
+  ?assist=rookie|club|pro, ?venue=club|sunset|stadium, ?speed=N, ?seed=N, ?tutorial=1, ?stick=1,
+  ?quality=..., ?mute=1. window.__vpm: ready, plan(), simNow(), perfAt(simT), log(), stats(), errors.
+-->
+<canvas id="scene" aria-hidden="true"></canvas>
+<div id="ui"></div>
+<script type="module" src="./mobile.js"></script>
+</body>
+</html>

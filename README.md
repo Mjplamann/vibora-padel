@@ -15,11 +15,13 @@ leaves the device (MediaPipe's built-in usage logging to Google is blocked local
   serve, return, live mix), scored with real padel rules
 - **Rally with Coach** (an AI coach that plays drives, lobs, chiquitas and balls off the glass)
 - **2 v 2 Match** with an AI partner, real serves, golden point and tie-break
-- **Timing-based hitting** (Club and Rookie): swing on time and you hit it. Swing speed sets the pace,
-  early / late sets the direction, the swing path sets topspin or slice, and the ball flies with full
-  physics. Pro keeps true racket-on-ball contact.
-- **The ball is easy to see**: a minimum on-screen size, a glow, a shadow and a drop-line to the floor,
-  and a ring around the ball in reach that turns **green at the moment to swing**
+- **Timing-based hitting** (Club and Rookie): swing on time and you hit it. Swing speed sets the pace
+  (measured against your own swings, with power pips on screen), early / late sets the direction, the
+  swing path sets topspin or slice, and the ball flies with full physics. The timing learns your own
+  moment. Pro keeps true racket-on-ball contact.
+- **The ball is easy to see**: true size with a glow, a shadow and a drop-line to the floor, a view
+  that keeps the contact point in the picture, and an **approach circle** that closes on the ball at
+  the moment to swing (green = a swing now is a clean hit). A clean HUD keeps text off the court.
 - **A reason for every miss**, on screen and by voice ("Swing was 0.3 s late", "No swing detected —
   swing a bit faster", "Racket was 50 cm below the ball"), and **Copy diagnostics** to send a session's
   numbers
@@ -63,6 +65,40 @@ leaves the device (MediaPipe's built-in usage logging to Google is blocked local
 
 ### What's new
 
+- **Nothing covers the ball.** The play screen now has one slim bar at the top (mode, reps or score,
+  points, streak, clock) and **one message line** under it. Miss reasons, the last shot (*Forehand · 96 km/h ·
+  On time · ●●●●○*), coaching notes, achievements and point banners take turns on that line, for at
+  most 1.6 s each, and the line waits while a ball is coming to you. Nothing is drawn over the middle
+  of the court while a ball is live. Settings → Ball & aids → *Screen text*: **Clean** (default) ·
+  **Standard** (adds the shot card between points) · **Coach** (every card and the timing meter).
+  **H** cycles them during play. The camera picture is off by default: a tracking dot in the bar shows
+  that the camera sees you, and the picture comes back by itself if it loses you.
+- **A timing cue that doesn't lie.** A circle closes on the ball at a steady speed and touches it
+  exactly at the moment to swing. It is white while it closes and turns **green only while a swing
+  would be a clean hit** (already allowing for your personal timing, below), with a flash at the
+  perfect moment. An optional tick sounds 0.2 s before (Settings → Ball & aids → *Timing tick*: on for
+  Rookie by default).
+- **You see the ball when you hit it.** You meet the ball out in front of you, as in real padel, and
+  the view keeps that point (and a ball dropping onto it) inside the picture instead of looking at your
+  feet. *Enhanced* ball visibility now draws the ball at its true size within 14 m, so it shrinks and
+  grows with distance again (a fixed minimum size made it look closer than it was, and swings came
+  early), with a soft glow so you can still find it far away.
+- **The game learns your timing.** If you tend to swing a little early or late, the timing window
+  follows your own moment (*Timing tuned to you: −0.14 s* in Settings → Play), learned per camera and
+  kept between sessions; *Reset timing* forgets it, and *Adapt timing to me* turns it off. A swing that
+  comes early is held until the ball arrives (Rookie up to 0.6 s early, Club 0.4 s) and a late one still
+  plays the ball (Rookie up to 0.45 s, Club 0.3 s) — but slower and pulled cross-court (early) or
+  pushed down the line (late). A swing whose hand leaves the camera's picture is still read when the
+  hand comes back.
+- **Swing harder, hit harder.** Your swing speed is measured against your own recent swings, so a
+  slow webcam counts as much as a fast one. A full swing sends a drive at up to 115 km/h, a gentle one
+  at 45 km/h (smashes 70–150). The message line shows the speed and five **power pips** (gold at full
+  power), and the swing whoosh follows your effort as you swing. When the camera has already seen a
+  hard swing at the moment of contact (a swing started early), the pock is louder, the racket trail
+  brighter and the view gives a small kick.
+
+Earlier:
+
 - **Close mode for small rooms.** Stand 1.3–2.2 m from the camera with only your head, shoulders and
   arms in the picture. Overheads (bandeja, víbora, smash, serve) still register when your hand goes
   above the top of the picture: the tracker rebuilds the arm from the shoulder and elbow. If it keeps
@@ -87,8 +123,8 @@ leaves the device (MediaPipe's built-in usage logging to Google is blocked local
 - **Fewer, better replays.** In matches you get at most one automatic replay per game, only for points
   you won (a winner, a smash, a *por tres*, a rally of 20+ shots), and never within 45 s of the last
   one. In rally mode they are at least 2 minutes apart. The first replay shows where to turn them off.
-- **First hits are guided.** Until your first five hits, the HUD tells you when to swing: as the ring
-  around the ball turns green.
+- **First hits are guided.** Until your first five hits, the HUD tells you when to swing: as the circle
+  closes on the ball and turns green.
 - **Spacing feedback** on the shot card (*stretched 25 cm, step closer*; *cramped, give it room*), a
   clearer *Volley too soft — punch forward* miss reason, and a workout recap that counts one swing per
   stroke.
@@ -244,13 +280,14 @@ Allow camera access when the browser asks.
 
 | Action | How |
 |---|---|
-| Hit | Swing your real arm as the ball comes. Your hand is the racket grip; the face follows your palm (palm side = forehand face). On Club and Rookie a swing **on time** hits (the ring around the ball turns green: swing now); on Pro the racket must meet the ball. |
+| Hit | Swing your real arm as the ball comes. Your hand is the racket grip; the face follows your palm (palm side = forehand face). On Club and Rookie a swing **on time** hits (swing as the circle closes on the ball and turns green); on Pro the racket must meet the ball. Swing harder for more pace. |
 | Move on court | Step sideways (×2.6) and toward / away from the TV (×2.2). Toward the TV = toward the net. A living room only allows about ±0.6 m of steps, so the game moves your court spot for the big moves (a short ball at your feet, a lob over your head; in rally and match it follows padel tactics and keeps you at the net after a volley, lob or serve) and your own steps do the rest. If the camera loses your head or shoulders, the HUD tells you to step back (your legs may be out of the picture: close mode). |
 | Menus | Raise a hand: a cursor appears; hover 1 s to click. Or arrows + Enter, or the mouse. On the title screen the hand works as soon as the camera is on (straight away if the browser already allows the camera). |
 | Start a drill | "Start drill", or raise your racket hand above your head for a moment |
 | Pause | Both hands above your head for 2 s (not while a ball is live), or Esc / P |
 | Instant replay | R (or *Pause → Instant replay*, or *Watch replay* on the results). V changes the view. |
-| Camera picture-in-picture / skeleton | C / K during play (with glasses head tracking, C recentres the view: Shift+C toggles the picture-in-picture) |
+| Screen text | H during play cycles Clean / Standard / Coach (Settings → Ball & aids → *Screen text*) |
+| Camera picture-in-picture / skeleton | C / K during play (off by default: the dot in the top bar shows tracking, and the picture appears by itself while the camera has lost you; with glasses head tracking, C recentres the view: Shift+C toggles the picture-in-picture) |
 | Glasses: recentre view | C or Home while glasses head tracking runs (every drill also recentres) |
 | Copy diagnostics | *Pause → Copy diagnostics*, *Settings → Copy diagnostics*, or **D** on the pause screen. Paste it into a message when you report a problem. |
 | Full screen | F (or ⌃⌘F). In full screen a short Esc still pauses; hold Esc to leave full screen. Leaving full screen during play pauses the game. |
@@ -357,27 +394,60 @@ players' calls, so nothing talks over anything else. *Voice coach: off* silences
   the swing path sets topspin (brushing up) or slice (cutting down), and the ball then flies with the
   full physics. *Contact* needs the racket to meet the ball, as on Pro.
 
-  | Assist | Early | Late | Reach (racket to ball) | Swing speed to count |
-  |---|---|---|---|---|
-  | Club | −0.20 s | +0.22 s | 0.75 m | 4 m/s (volleys and chiquitas 2.4 m/s, serves 3 m/s) |
-  | Rookie | −0.32 s | +0.35 s | any | 3 m/s (volleys and chiquitas 1.8 m/s, serves 2.25 m/s) |
+  | Assist | Clean hit | Held early swing | Late hit | Reach (racket to ball) | Swing speed to count |
+  |---|---|---|---|---|---|
+  | Club | −0.20 s … +0.22 s | down to −0.40 s | up to +0.30 s | 0.75 m | 4 m/s (volleys and chiquitas 2.4 m/s, serves 3 m/s), lower for a player whose camera measures slow swings (never below 1.7 m/s) |
+  | Rookie | −0.32 s … +0.35 s | down to −0.60 s | up to +0.45 s | any | 3 m/s (volleys and chiquitas 1.8 m/s, serves 2.25 m/s), never below 1.6 m/s |
 
-  A swing is read from your tracked racket hand's speed relative to your body, so walking does not
-  count as a swing.
-- **Misses are explained.** Every ball you do not hit gets a reason at the top of the picture, under the
-  mirror, and from the voice coach: *Swing was 0.3 s late*, *No swing detected — swing a bit faster*,
-  *Racket was 50 cm below the ball*, *Ball was 30 cm out of reach — step left*, *Let it come off the
-  glass first*, *Let the serve bounce* or *Lost you on camera*. A timing meter shows how early or late each
-  swing was. The results screen lists your misses by reason.
+  The ideal contact (round 6) is **out in front of you**, about 0.55–0.7 m ahead of your hips, where
+  you see the ball, not level with your hips (Pro keeps the hip-line contact). A **held early** swing
+  strikes when the ball arrives and a **late** one still hits, both with less pace and quality (early
+  pulls the ball cross-court, late pushes it down the line). A swing is read from your tracked racket
+  hand's speed relative to your body, so walking does not count as a swing; a swing whose hand left the
+  camera's picture is reconstructed when the hand comes back.
+- **Personal timing** (Settings → Play): the game learns where *your* swings land relative to the ideal
+  moment (the main cluster of your last 24 swings, clamped to ±0.35 s) and centres the clean window on
+  it. Settings shows *Timing tuned to you: −0.14 s*; **Reset timing** forgets it (and your learned swing
+  speeds), **Adapt timing to me** turns it off. It is stored in this browser per camera preset
+  (`vibora.timing.v1`). Tuning never narrows the window: the held-early and late limits only widen, and
+  the approach circle still closes at the true moment (its green part is where your swing is a clean
+  hit with or without the tuning).
+- **Swing power**: each swing's speed is scored 0–1 against your own recent swings of that kind
+  (groundstroke, volley, overhead, serve), so a webcam that measures 2–9 m/s spans the same range as
+  one that measures 6–16 m/s. That *effort* sets the pace from a wide range per shot (drive 45→115 km/h,
+  glass return 40→100, volley 30→85, bandeja 45→85, víbora 55→100, smash 70→150, lob 40→70, chiquita
+  25→45, serve 45→85) and the amount of topspin or slice. The message line shows it as five pips after
+  the km/h (gold at full power).
+- **Misses are explained.** Every ball you do not hit gets a reason on the message line at the top
+  (once the ball has gone by) and from the voice coach: *Swing was 0.3 s early — wait until the circle
+  closes on the ball*, *No swing detected — swing a bit faster*, *Racket was 50 cm below the ball*,
+  *Ball was 30 cm out of reach — step left*, *Let it come off the glass first*, *Let the serve bounce* or
+  *Lost you on camera*. The *Coach* screen-text layout adds a timing meter that shows how early or late
+  each swing was. The results screen lists your misses by reason.
 - **Ball & aids** (Settings → Ball & aids):
-  - **Ball visibility**: *Real*, *Enhanced* (default: the ball is never drawn smaller than 0.45° across,
-    with a glow, a contact shadow and a drop-line to the floor) or *Max* (0.8°).
-  - **Reach ring**: a ring around the ball when it is coming into your reach; it is yellow, then turns
-    **green at the moment to swing**. For a ball off the glass a marker shows the contact point.
+  - **Screen text** (**H** during play): *Clean* (default) — a slim top bar (tracking dot, mode, reps or
+    score on the left; points, streak, clock on the right) and one message line under it: miss reasons,
+    the last shot (stroke · km/h · power pips · *On time* / *Early 80 ms* / *Perfect*), coaching notes,
+    achievements, toasts and point banners, one at a time (≤ 1.6 s each) and never while a ball is
+    coming to you. *Standard* adds the last-shot card between points. *Coach* shows every card (shot
+    card with coaching notes, timing meter, partner calls, the camera picture). In every layout nothing
+    is drawn over the central play area (x 15–85 %, y 20–100 % of the screen) while a ball is live, and
+    the floor zone labels hide and the zones dim.
+  - **Camera picture**: off by default (C toggles it). A dot in the top bar shows that tracking sees
+    you; the picture comes back by itself after 1 s of lost tracking and goes again 1.5 s after
+    tracking returns.
+  - **Ball visibility**: *Real*, *Enhanced* (default: the ball is drawn at its **true size within
+    14 m**, so it shrinks with distance like a real ball, plus a soft glow of at least 0.85° so it is
+    easy to find far away, a contact shadow and a drop-line to the floor) or *Max* (0.8° minimum).
+  - **Approach circle**: in the last 0.8 s before the moment to swing, a circle around the ball closes
+    on it at a constant speed and touches the ball's outline exactly at that moment. White while it
+    closes, **green while a swing would be a clean hit** (the assist's window, already allowing for your
+    personal timing), a brighter flash within ±60 ms. For a ball off the glass a marker shows the
+    contact point.
   - **Learning slow motion** off the glass (*Rookie* = on for Rookie only, *On*, *Off*): the game slows
     to 0.7× around the glass rebound so you can read it.
-  - **Timing tick**: a short tick 0.15 s before the moment to swing on every ball (glass balls always
-    get the *now!* cue).
+  - **Timing tick** (*Rookie* = on for Rookie only, *On*, *Off*): a short tick 0.2 s before the circle
+    closes (balls off the glass always tick, and get the *now!* cue).
   - **Racket ghost** (on by default): a faint cyan racket at the planned contact in the last 0.4 s
     before you hit, so you can see where the racket will meet the ball even while your real racket is
     still out of the picture.
@@ -394,7 +464,9 @@ players' calls, so nothing talks over anything else. *Voice coach: off* silences
   ball gently (up to ±25°). When a ball goes past you to the back or side glass, a rear-view mirror at
   the top of the picture shows the rebound (Settings → Movement & view → *Balls behind you*: **Mirror**
   · **Turn the view**, a smooth head turn of up to 75° · **Fixed**). In the last 0.8 s before a contact
-  the view frames the contact point in the lower middle of the picture (overheads: it never looks more than 25° up). Forearms fade out where
+  the view frames the contact point (out in front of you) in the lower middle of the picture, and keeps a
+  ball that is in front of you inside the picture on its way there (overheads: it never looks more than
+  25° up). Forearms fade out where
   they would fill the picture (close to your eyes), the upper arm is only a short stub above the
   elbow, and the racket fades when it comes within ~35 cm of your eyes without the ball nearby. The
   racket is never drawn through the glass, and the game keeps you about 0.6 m off the back glass: a
@@ -458,8 +530,9 @@ the same impact physics, then confirmed (or undone) by the lag-compensated detec
 | "Camera permission was denied" | Click the camera icon in the address bar → Allow, reload. |
 | iPhone not in the camera list | Same Apple ID on both, Wi‑Fi + Bluetooth on, iPhone locked, landscape and still, near the Mac. Press "Try again". |
 | "Camera is busy" | Quit FaceTime, Zoom, Teams, Photo Booth or other tabs using the camera. |
-| Hits feel late or early | Turn on the TV's Game Mode, then redo the latency test (Settings → Recalibrate). The timing meter and the miss reason tell you how early or late each swing was. |
-| You swing but never hit | Check the miss reason at the top of the picture. *No swing detected*: swing a little faster and fuller. *Too far / below*: take a step (or use Rookie, which reaches any ball). Use *Copy diagnostics* and send it if it keeps happening. |
+| Hits feel late or early | Turn on the TV's Game Mode, then redo the latency test (Settings → Recalibrate). Swing as the circle closes on the ball, not when it first turns up; the message line tells you how early or late each swing was (*Early 120 ms*). After a few swings the timing tunes itself to you (Settings → Play → *Your timing*); *Reset timing* after you change the TV, the latency or your setup. |
+| Text covers the ball | Settings → Ball & aids → *Screen text: Clean* (or press **H** during play): one line at the top, nothing over the court while the ball is live. |
+| You swing but never hit | Check the miss reason on the message line at the top. *No swing detected*: swing a little faster and fuller. *Too far / below*: take a step (or use Rookie, which reaches any ball). Use *Copy diagnostics* and send it if it keeps happening. |
 | The 3D view goes black when you turn sideways (HUD still visible) | Fixed in this version: bad tracking data can no longer reach the 3D view. If it ever happens, open `?debug=1` and copy the *safety* line (or *Copy diagnostics*) into a bug report. |
 | You move when standing still | Turn off Center Stage; keep your head and shoulders (close) or your whole body (full) in frame; recalibrate your spot. |
 | The room is too small to stand 2.5 m back | Stand 1.3–2.2 m from the camera with it at chest height (close mode): only your head, shoulders and arms need to be in the picture, and your steps are amplified a little more. The calibration's *Tracking* line says *Close · upper body*. |
@@ -478,7 +551,7 @@ the same impact physics, then confirmed (or undone) by the lag-compensated detec
 
 ```
 npm start          # static server on http://localhost:5173
-npm test           # 547 unit / end-to-end tests (node --test), deterministic
+npm test           # 624 unit / end-to-end tests (node --test), deterministic
 npm run smoke      # headless Chromium (SwiftShader) smoke test + screenshots in tools/out/smoke-*.png
 node tools/precache.mjs [--write]   # check / regenerate the service worker's precache list in sw.js
 node tools/icons.mjs                # regenerate icons/*.svg and every PNG size (headless Chromium)
@@ -503,7 +576,10 @@ sweep driving the camera, the real app in 3D side-by-side; `--only=xr`). Round 4
 (`--only=close`: the human-like autopilot 1.7 m from a chest-height camera with its legs out of the
 picture plays the drill on the upper-body tracker), a stadium match (`--only=match`: four skinned
 players, the crowd venue), a close-mode calibration with a synthetic person at 1.7 m in the camera
-stage, and a first-person-body check in the autopilot stage.
+stage, and a first-person-body check in the autopilot stage. Round 6 adds `--only=user1`: the autopilot
+fitted to a real MacBook Air session (`?approfile=user1&apclose=1&aplatency=0.142`, Rookie) plays the
+forehand drill with no HUD block in the central play region while the ball is live, power on every shot
+and timing hitting in the diagnostics.
 Software WebGL renders the full scene at only ~1–2 fps, so the smoke test freezes the simulation at
 chosen moments (`__vibora.freezeOn('contact' | 'hit')`) to take its screenshots.
 
@@ -515,6 +591,9 @@ camera; also the title-screen demo), `?drill=<id>`, `?mode=rally|match&level=roo
 `?eyedown=` (view tuning), `?aplatency=` / `?apdelivery=` (the autopilot's display latency and
 capture-to-result delay, to test a realistic Mac pipeline), `?approfile=human` (the autopilot plays like
 a person: timing spread σ 90 ms, racket position error, partial steps, 5 % of balls with no swing),
+`?approfile=user1` (round 6, with `?apclose=1`: fitted to a real MacBook Air session at 1.23 m — two
+timing clusters on time and ~0.6 s early, a second swing after an early one, slow swings that the
+webcam measures at 2–9 m/s, wrists leaving the picture on wide swings),
 `?apjitter=` (extra random delivery delay of a 30 fps webcam-like feed) and `?apnoise=` (landmark noise,
 1 = a MacBook camera at 2.5 m), `?apclose=1` (the autopilot stands 1.7 m from a camera at chest height
 with its legs out of the picture: close mode), `?glasses=1` / `?stereo=1` / `?xrsim=1` (glasses mode),
@@ -522,6 +601,15 @@ with its legs out of the picture: close mode), `?glasses=1` / `?stereo=1` / `?xr
 Round 4: `?venue=club|sunset|stadium`, `?challenge=<id>|daily`, `?career=<eventId>` (`&quick=1`: sets
 to one game — 2-0 or a tie-break at 1-1), `?autoreplay=1|0`, `?firsthits=1` (the first-time timing prompt), `?screen=career|arcade|trophies|training|freeplay|event-intro|settings`
 (with `&event=`, `&tab=`, `&fpmode=`).
+
+Round 6 harnesses: `node dev/hud-audit.mjs tools/out/hud-audit '^drill-fh$' [--profile=user1
+--aplatency=0.142 --reps=3 --after=1]` freezes the real app before contacts at 1710×876 @2x and
+1920×1080 with a real player's saved settings and measures every visible HUD block against the ball,
+its path to the contact, the racket and the central play region (anything above 0 in the central
+region is a regression); `dev/hud-clean.html` shows the clean HUD's states (`&effort=` for the power
+pips). Tests: `tests/clarity.test.mjs` (feedback line, play region, approach circle, ball visibility,
+gaze), `tests/timing6.test.mjs` (contact in front, personal timing, held / late hits, effort and
+pace), `tests/release6.test.mjs` (diagnostics, settings, swing-power presentation).
 
 Round 4 developer pages and harnesses: `dev/calibrate.html` (the close-mode body check),
 `dev/humans.html` (skinned players, strokes, kits), `dev/venues.html` + `node dev/venues-shot.mjs` /

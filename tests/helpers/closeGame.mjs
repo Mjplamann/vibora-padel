@@ -14,9 +14,12 @@ const STEP = 1 / SIM.tickRate;
 
 export function createTestGame({
   spec, settings, seed = 1, apLatency = 0.11, apDelivery = 0.15, apJitter = 0.02, apNoise = 1, profile = 'human', close = false, closeOpts = {}, startTime = 10,
+  timingProfile = null,
 }) {
   const world = createWorld({ settings: { ...settings, latency: apLatency }, rng: createRng(seed) });
   world.input = 'autopilot';
+  // A returning player's timing / swing-speed profile (game/timingProfile.js), shared across games.
+  if (timingProfile) world.timingProfile = timingProfile;
   const h = createHumanController({ settings: world.settings });
   world.human = h;
   world.player.handed = world.settings.handed;

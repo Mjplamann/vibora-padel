@@ -28,7 +28,7 @@ import { rotateAbout } from './body.js';
 import { predict, interceptCandidates, solveShot } from '../physics/predict.js';
 import { racketImpact, spinFromComponents } from '../physics/racket.js';
 import { createBall, cloneBall, stepBall } from '../physics/ball.js';
-import { CONTACT_OFFSETS, idealStance, contactFamily } from '../game/human.js';
+import { CONTACT_OFFSETS, TIMING_CONTACT_OFFSETS, idealStance, contactFamily } from '../game/human.js';
 import { predictFlight, currentStroke } from '../game/world.js';
 import { timingConfig } from '../game/swingAssist.js';
 
@@ -108,6 +108,46 @@ export const HUMAN_PROFILE = Object.freeze({
   noSwing: 0.05,
   reaction: [0.18, 0.32],
 });
+
+/**
+ * 'user1' (round 6): fitted to a real session's diagnostics (MacBook Air camera, close mode at
+ * 1.23 m, Rookie; 40 swing records): the moment of the swing's peak relative to the ideal contact
+ * is a mixture of an on-time cluster N(-0.09, 0.15) s (67 %), an anticipation cluster N(-0.62,
+ * 0.2) s (29 %: swinging while the ball is still 4-6 m away) and a rare late swing N(+0.5, 0.1) s;
+ * after an early swing (< -0.3 s) 40 % of players swing again N(-0.05, 0.25) s; the swings are
+ * compact and slow (commanded sweet-spot speeds log-normal, median 6.5 m/s fh; the webcam measured
+ * 2-12 m/s, median 4.3) and the player hardly moves 1.2 m from the camera, so wrists leave the
+ * 1280x720 frame on wide swings (USER1_SETUP). Racket path error as the human profile, a little wider.
+ */
+export const USER1_PROFILE = Object.freeze({
+  ...HUMAN_PROFILE,
+  timingMix: Object.freeze([
+    Object.freeze({ w: 0.67, mean: -0.09, sd: 0.15 }),
+    Object.freeze({ w: 0.29, mean: -0.62, sd: 0.2 }),
+    Object.freeze({ w: 0.04, mean: 0.5, sd: 0.1 }),
+  ]),
+  timingClamp: 1.1,
+  reswing: Object.freeze({ p: 0.4, after: -0.3, mean: -0.05, sd: 0.25, gap: 0.25 }),
+  // Log-normal commanded speeds: [median m/s, sigma (log), min, max].
+  speedLog: Object.freeze({
+    fh: [5.8, 0.6, 2.2, 18], bh: [5.4, 0.6, 2.2, 17], vfh: [4.2, 0.4, 1.8, 10], vbh: [4, 0.4, 1.8, 10],
+    oh: [6, 0.4, 2.4, 15], sm: [9, 0.4, 3, 22], serve: [5.5, 0.4, 2.4, 12], soft: [4, 0.35, 2, 8],
+  }),
+  spatialSigma: Object.freeze({ x: 0.2, y: 0.16, z: 0.18 }),
+  noStep: 0.6,
+  noSwing: 0.04,
+});
+
+/** Where 'user1' played: close mode 1.23 m from a MacBook Air camera, little movement. */
+export const USER1_SETUP = Object.freeze({
+  distance: 1.23, cameraHeight: 1.3, pitchDeg: 0,
+  envelope: Object.freeze({ front: 0.12, back: 0.2, side: 0.3 }),
+  armOut: Object.freeze({ mode: 'drift', lag: 0.15, noise: 0.03 }),
+  blur: Object.freeze({ speed: 6, p: 0.5, lag: [0.2, 0.6], vis: 0.4 }),
+});
+
+/** Named profiles of setProfile(). */
+export const AP_PROFILES = Object.freeze({ human: HUMAN_PROFILE, user1: USER1_PROFILE });
 
 function softDeadzoneInverse(out, deadzone, knee = deadzone) {
   const a = Math.abs(out);
@@ -210,16 +250,29 @@ export function createAutopilot({
     if (it) return it;
     const H = human;
     const r = hrng;
-    const dt = clamp(r.normal(H.timingMean, H.timingSigma), -H.timingClamp, H.timingClamp);
+    let dt;
+    if (H.timingMix) {
+      // Mixture of timing clusters (USER1_PROFILE).
+      let u = r(), comp = H.timingMix[H.timingMix.length - 1];
+      for (const c of H.timingMix) {
+        if (u < c.w) { comp = c; break; }
+        u -= c.w;
+      }
+      dt = clamp(r.normal(comp.mean, comp.sd), -H.timingClamp, H.timingClamp);
+    } else dt = clamp(r.normal(H.timingMean, H.timingSigma), -H.timingClamp, H.timingClamp);
     const err = v3(r.normal(0, H.spatialSigma.x), r.normal(0, H.spatialSigma.y), r.normal(0, H.spatialSigma.z));
     const speedU = r();
+    const speedZ = r.normal(0, 1);
     const partial = r() < H.noStep;
     const step = partial ? r.range(H.stepPart[0], H.stepPart[1]) : 1;
     const swing = r() >= H.noSwing;
     const react = r.range(H.reaction[0], H.reaction[1]);
     const noise = { x: r.normal(0, H.stepNoise), z: r.normal(0, H.stepNoise) };
+    // A second swing after an early one (USER1_PROFILE.reswing), drawn now so the stream is fixed.
+    const rs = H.reswing;
+    const again = rs && dt < rs.after && r() < rs.p ? r.normal(rs.mean, rs.sd) : null;
     const pp = world.player.pos;
-    it = { dt, err, speedU, step, swing, react, noise, anchor: { x: pp.x, z: pp.z } };
+    it = { dt, err, speedU, speedZ, step, swing, react, noise, anchor: { x: pp.x, z: pp.z }, again, swings: 0 };
     intents.set(key, it);
     st.intents.balls++;
     if (!swing) st.intents.noSwing++;
@@ -233,15 +286,16 @@ export function createAutopilot({
    * opts.seed seeds the human error stream.
    */
   function setProfile(name = 'precise', { seed = 0x5eed, overrides = null } = {}) {
-    if (name === 'human') {
-      human = overrides ? { ...HUMAN_PROFILE, ...overrides } : HUMAN_PROFILE;
+    const base = AP_PROFILES[name] || null;
+    if (base) {
+      human = overrides ? { ...base, ...overrides } : base;
       hrng = createRng(seed >>> 0 || 1);
     } else {
       human = null;
       hrng = null;
     }
     intents.clear();
-    st.profile = human ? 'human' : 'precise';
+    st.profile = human ? name : 'precise';
   }
 
   // Scratch
@@ -380,9 +434,10 @@ export function createAutopilot({
       : chooseCandidate(world, cands, hint, serving);
     if (!c) return { key, none: true, made: T };
     const fam = serving ? 'fh' : tp ? tp.family : familyFor(c, hint, pl.pos);
-    const off = CONTACT_OFFSETS[fam];
+    // Timing hits are met out in front (human.js TIMING_CONTACT_OFFSETS) from the plan's stance.
+    const off = (tp ? TIMING_CONTACT_OFFSETS : CONTACT_OFFSETS)[fam];
     const b = stanceBounds();
-    const s = idealStance(c.pos, fam, handed, height);
+    const s = tp && tp.stance ? tp.stance : idealStance(c.pos, fam, handed, height);
     // Where the play area can actually put the player (the swing is planned from there).
     let goal = { x: clamp(s.x, b.xMin, b.xMax), z: clamp(s.z, b.zMin, b.zMax) };
     if (intent) {
@@ -390,7 +445,15 @@ export function createAutopilot({
       const a = intent.anchor;
       goal = { x: a.x + (goal.x - a.x) * intent.step + intent.noise.x, z: a.z + (goal.z - a.z) * intent.step + intent.noise.z };
     }
-    const stance = reachableStance(world, goal);
+    let stance = reachableStance(world, goal);
+    const moveGoal = stance; // where the player's own steps take them
+    const tcfg = tp ? timingConfig(world) : null;
+    if (tcfg && tp.stance) {
+      // The game glides the player toward the plan's stance (swingAssist.autoTarget, weight
+      // `position`): a person sees where that puts them and swings from there.
+      const w = clamp(tcfg.position ?? 1, 0, 1);
+      stance = { x: stance.x + (tp.stance.x - stance.x) * w, z: stance.z + (tp.stance.z - stance.z) * w };
+    }
     const turn = dom * off.turn;
 
     // Contact in U relative to the stance; crouch so the shoulder can reach a low ball.
@@ -404,7 +467,15 @@ export function createAutopilot({
     sh = shoulderU(turn, crouch);
     const shoulder = v3(stance.x + sh.x, sh.y, stance.z - sh.z);
 
-    const tr = c.t + lat + (intent ? intent.dt : rng.normal(0, (1 - skill) * 0.025));
+    let tr = c.t + lat + (intent ? intent.dt : rng.normal(0, (1 - skill) * 0.025));
+    if (intent) {
+      // Nobody swings before they have seen the ball and started the stroke: the forward arc starts
+      // no earlier than the first plan of this ball (an anticipation swing 0.8 s early on a ball
+      // struck 0.6 s ago is "as early as possible", not a teleport into the middle of the arc).
+      if (intent.firstT === undefined) intent.firstT = T;
+      tr = Math.max(tr, intent.firstT + ARC_IN);
+      if (intent.minTr) tr = Math.max(tr, intent.minTr); // a second swing needs its own take-back
+    }
     const aim = aimFor(world, hint, fam, serving);
     const fromC = c.pos.clone();
     // Human: the racket path is aimed at where the player thinks the ball will be.
@@ -457,8 +528,15 @@ export function createAutopilot({
       // Human pace: the swing's own speed, whatever the aimed shot needed.
       // A touch shot (chiquita: aimed under 45 km/h) is a soft swing.
       const soft = !serving && aim.speed < 45 / 3.6 && (fam === 'fh' || fam === 'bh');
-      const range = human.speed[serving ? 'serve' : soft ? 'soft' : fam] || human.speed.fh;
-      const want = range[0] + (range[1] - range[0]) * intent.speedU;
+      const sk = serving ? 'serve' : soft ? 'soft' : fam;
+      let want;
+      if (human.speedLog) {
+        const L = human.speedLog[sk] || human.speedLog.fh;
+        want = clamp(L[0] * Math.exp(L[1] * intent.speedZ), L[2], L[3]);
+      } else {
+        const range = human.speed[sk] || human.speed.fh;
+        want = range[0] + (range[1] - range[0]) * intent.speedU;
+      }
       const have = sw.V.length();
       if (have > 1e-3) {
         const f = want / have;
@@ -471,7 +549,7 @@ export function createAutopilot({
     st.minClear = Math.min(st.minClear ?? Infinity, best.clear);
     st.plans++;
     const p = {
-      key, none: false, made: T, committed, t: c.t, tr, kind: c.kind, fam, adaptKey, stance, crouch, turn,
+      key, none: false, made: T, committed, t: c.t, tr, kind: c.kind, fam, adaptKey, stance, moveGoal, crouch, turn,
       homeT: world.player.homeTarget ? { x: world.player.homeTarget.x, z: world.player.homeTarget.z } : null,
       C: fromC, Cball: c.pos.clone(), vin: c.vel.clone(), shoulder, sw, tau0, omega, faceSign, aim, des, vWanted: des.vel.clone(),
       prepFrom: null, prepStart: T,
@@ -663,6 +741,16 @@ export function createAutopilot({
       // Swing finished: recover from where the follow-through ended.
       st.swings++;
       st.recoverFrom = { t: plan.tr + ARC_OUT, pose: arcPose(plan, plan.tr + ARC_OUT, { grip: v3(), axis: v3(), normal: v3() }) };
+      // A person who swung early may swing again at the same ball (USER1_PROFILE.reswing).
+      const it = human ? intents.get(plan.key) : null;
+      if (it) {
+        it.swings++;
+        if (it.swings === 1 && it.again !== null && plan.key === key) {
+          it.dt = it.again;
+          it.minTr = T + human.reswing.gap + ARC_IN;
+          st.intents.reswings = (st.intents.reswings || 0) + 1;
+        }
+      }
       plan = null;
     }
     if (!mine) {
@@ -778,7 +866,7 @@ export function createAutopilot({
 
     // Movement.
     const p = plan && !plan.none ? plan : null;
-    const goal = p ? p.stance : world.player.home;
+    const goal = p ? p.moveGoal || p.stance : world.player.home;
     moveRoom(roomTargetFor(world, goal), dt);
 
     // Posture: crouch and trunk turn ramp in during the preparation.
@@ -840,6 +928,10 @@ export function createAutopilot({
     },
     get state() {
       return { ...st, room: { ...room } };
+    },
+    /** The human profile's intent for a plan key (timing dt, second swing, swing or not): measurement tools. */
+    intentOf(key) {
+      return intents.get(key) || null;
     },
   };
 }

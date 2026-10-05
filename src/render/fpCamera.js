@@ -11,8 +11,9 @@
 //   xr.stereo = { enabled, ipd, render(renderer, scene, camera, composer?) }   see stage.render.
 import * as THREE from 'three';
 import { PLAYER, COURT } from '../config.js';
-import { createGaze, GAZE, GLASS_VIEW } from './gaze.js';
+import { createGaze, GAZE, GLASS_VIEW, framingContact } from './gaze.js';
 import { isFiniteVec, isFiniteQuat } from './safeView.js';
+import { createViewKick } from './viewKick.js';
 
 const DEG = Math.PI / 180;
 const BASE_PITCH = -6 * DEG;
@@ -116,13 +117,12 @@ export function createFirstPersonCamera(camera, settings = {}, { getXR = () => n
     return out;
   }
 
-  /** The incoming ball's planned contact (tactical home's intercept) for contact framing, or null. */
+  /**
+   * The incoming ball's planned contact for contact framing, or null: the timing plan's p* at t*
+   * (round 6, gaze.js framingContact), else the tactical home's intercept.
+   */
   function predictedContact(world) {
-    const ic = world?.mode?.tactics?.state?.intercept;
-    const c = ic && ic.contact;
-    if (!c || !world.ball || world.ball.atRest) return null;
-    contactOut.x = c.x; contactOut.y = c.y; contactOut.z = c.z; contactOut.t = ic.t;
-    return contactOut;
+    return world ? framingContact(world, contactOut) : null;
   }
   const contactOut = { x: 0, y: 0, z: 0, t: 0 };
 
@@ -145,12 +145,16 @@ export function createFirstPersonCamera(camera, settings = {}, { getXR = () => n
     }
     const g = gaze.update(world.ball, eye, dt, {
       basePitch: basePitch(), follow: settings.gazeFollow !== false, contact: predictedContact(world), glassView: glassView(),
+      // Round 6: the vertical half-FOV, so the gaze keeps the ball itself in the picture.
+      vHalf: (camera.fov * DEG) / 2,
     });
     lastGaze.rear = g.rear;
-    euler.set(g.pitch, g.yaw, 0, 'YXZ'); // no roll
+    // Swing-power kick (round 6, render/viewKick.js): an upward nudge that decays in ~0.1-0.2 s.
+    euler.set(g.pitch + kick.rad, g.yaw, 0, 'YXZ'); // no roll
     toQuat.setFromEuler(euler);
   }
   const lastGaze = { rear: false };
+  const kick = createViewKick();
 
   function updateOrbit(dt) {
     orbitT += dt;
@@ -193,6 +197,7 @@ export function createFirstPersonCamera(camera, settings = {}, { getXR = () => n
     if (!(dtReal >= 0)) dtReal = dt;
     headActive = false;
     lastGaze.rear = false;
+    kick.step(dtReal);
     if (mode === 'orbit' || !world) updateOrbit(dt);
     else if (mode === 'replay') updateReplay(world, dt);
     else updateFp(world, dt);
@@ -241,6 +246,11 @@ export function createFirstPersonCamera(camera, settings = {}, { getXR = () => n
     get replayView() { return replayView; },
     /** Cancels any running transition (e.g. right after a teleport). */
     snap() { blend = 1; },
+    /** Round 6: a stroke's swing effort (0..1) kicks the first-person view (KICK); returns the kick in deg. */
+    kick(effort) {
+      return mode === 'fp' ? kick.add(effort) : 0;
+    },
+    get kickDeg() { return kick.deg; },
     get gaze() { return { yaw: gaze.yaw, pitch: gaze.pitch, phase: gaze.phase, limit: GAZE.BACK_LIMIT, rear: lastGaze.rear, glassView: glassView() }; },
     /** The ball is behind the eye on the player's side (first-person view with the gaze assist): the mirror's cue. */
     get rear() { return mode === 'fp' && lastGaze.rear; },

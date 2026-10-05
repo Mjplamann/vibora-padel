@@ -25,8 +25,18 @@ export const VIEW_DEFAULTS = Object.freeze({ fov: 74, viewPitch: -14, eyeOffset:
  * glassView: how a ball behind the player is shown (render/gaze.js GLASS_VIEW): 'mirror' (the view
  * stays on the net, a rear-view mirror inset shows the glass), 'turn' (a smooth head turn up to
  * 75°) or 'fixed'. racketGhost: a faint racket at the planned contact (timing hitting). Glasses mode keeps its own settings (src/xr/glasses.js, 'vibora.xr.v1').
+ * timingAdapt (round 6): centre the timing windows on the player's own learned timing
+ * (game/timingProfile.js, stored per camera under 'vibora.timing.v1'; Settings → Play).
  */
-export const APP_DEFAULTS = Object.freeze({ offAxisYaw: false, glassView: 'mirror', racketGhost: true, cameraTilt: 'auto' });
+export const APP_DEFAULTS = Object.freeze({ offAxisYaw: false, glassView: 'mirror', racketGhost: true, cameraTilt: 'auto', hud: 'clean', approachTick: 'auto', timingAdapt: true });
+/**
+ * Round 6 (clarity): the play HUD layout. 'clean' (default): a slim top bar and one feedback line,
+ * nothing over the court while a ball is live; 'standard': the same plus the last-shot card between
+ * points; 'coach': every card (shot card with coaching notes, timing meter, camera picture).
+ */
+export const HUD_MODES = Object.freeze(['clean', 'standard', 'coach']);
+/** Round 6: the approach circle's audio tick 0.2 s before the moment to swing ('auto' = Rookie). */
+export const APPROACH_TICKS = Object.freeze(['auto', 'on', 'off']);
 /** Settings → Camera tilt choices (deg up; 'auto' = measured in calibration). */
 export const CAMERA_TILTS = Object.freeze(['auto', '0', '5', '10', '15', '20']);
 
@@ -70,7 +80,11 @@ function clampSettings(s) {
   // Round 5: the racket ghost at the planned contact (game/swingAssist.js contactGhostPose).
   s.racketGhost = s.racketGhost !== false;
   if (!CAMERA_TILTS.includes(String(s.cameraTilt))) s.cameraTilt = 'auto';
+  // Round 6: HUD layout and the approach circle's tick (a legacy timingTick true asks for every ball).
+  if (!HUD_MODES.includes(s.hud)) s.hud = 'clean';
+  if (!APPROACH_TICKS.includes(s.approachTick)) s.approachTick = s.timingTick === true ? 'on' : 'auto';
   s.cameraTilt = String(s.cameraTilt);
+  s.timingAdapt = s.timingAdapt !== false;
   if (!['ultra', 'high', 'balanced'].includes(s.quality)) s.quality = 'high';
   // Round 4: venue, umpire, callouts, replays, equipped racket / outfit (stored values are checked).
   if (!VENUE_IDS.includes(s.venue)) s.venue = DEFAULT_VENUE;
@@ -94,6 +108,12 @@ export function loadSettings(storage) {
     stored = {};
   }
   const base = resolveSettings({ ...UI_DEFAULT_SETTINGS, ...VIEW_DEFAULTS, ...APP_DEFAULTS, ...stored });
+  // Round 6 migration: saves from before the clean HUD (no 'hud' key) stored every setting, so the old
+  // camera picture-in-picture default (on) is indistinguishable from a choice: start them on the new
+  // default (off; a tracking dot instead, the picture comes back by itself when tracking is lost).
+  if (Object.keys(stored).length && stored.hud === undefined) base.pip = false;
+  // A legacy "timing tick on every ball" keeps ticking with the approach circle's tick.
+  if (stored.approachTick === undefined && stored.timingTick === true) base.approachTick = 'on';
   base.volumes = { ...UI_DEFAULT_SETTINGS.volumes, ...(stored.volumes || {}) };
   // Crowd volume (round 4; older saves have none): 0..1, default 0.7.
   base.volumes.crowd = Number.isFinite(base.volumes.crowd) ? Math.min(1, Math.max(0, base.volumes.crowd)) : 0.7;

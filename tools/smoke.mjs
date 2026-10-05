@@ -28,7 +28,10 @@
 //   6. Glasses mode (dev/xr-shot.mjs --only=full, dev/xr-app-shot.mjs --only=stereo): stereo eye
 //      order and a simulated head sweep driving the camera, then the real app at 3840×1200 in
 //      3D side-by-side with simulated glasses (?xrsim=1&stereo=1) and the Mac-latency autopilot.
-// Usage: node tools/smoke.mjs [--only=autopilot|latency|close|match|fallback|camera|nocamera|subpath|pwa|blackscreen|xr] [--width=1280 --height=720]
+//   1e. Round 6: the 'user1' autopilot (?approfile=user1, a real MacBook Air session in close mode at
+//      0.142 s latency) on Rookie: the drill is played, no HUD block in the central play region while
+//      the ball is live, shots carry the swing effort, diagnostics report timing hitting.
+// Usage: node tools/smoke.mjs [--only=autopilot|latency|close|user1|match|fallback|camera|nocamera|subpath|pwa|blackscreen|xr] [--width=1280 --height=720]
 import { spawn } from 'node:child_process';
 import { mkdir, mkdtemp, rm } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
@@ -198,6 +201,47 @@ async function runClose(browser, port) {
   check('close: tracker in upper-body mode (legs out of the picture)', (tr.upperFrames || 0) > 0.8 * (tr.frames || 1), `${tr.upperFrames}/${tr.frames} upper frames`);
   check('close: the drill is played (>= 6 player hits)', s.playerHits >= 6, `${s.playerHits}/${s.feeds} hits/feeds`);
   check('close: froze before a contact for a screenshot', pre);
+  await page.close();
+}
+
+/**
+ * Round 6: the 'user1' autopilot (fitted to a real MacBook Air session: close mode at 1.23 m, Mac
+ * latency 0.142 s, early anticipation swings, slow webcam swing speeds) on Rookie. The drill is
+ * played, the clean HUD keeps every block out of the central play region while the ball is live,
+ * shots carry the swing's effort, and Copy diagnostics reports timing hitting.
+ */
+async function runUser1(browser, port) {
+  const url = 'index.html?autopilot=1&apclose=1&approfile=user1&aplatency=0.142&apdelivery=0.15&drill=fh-drive&assist=rookie&speed=3';
+  console.log(`\n— user1 (round 6): ${url}`);
+  const { page, errors } = await openPage(browser, url, port);
+  const t0 = await page.evaluate(() => window.__vibora.world.time);
+  let liveSamples = 0, intrusions = 0;
+  const efforts = [];
+  for (;;) {
+    const r = await page.evaluate(() => {
+      const V = window.__vibora;
+      const ui = document.getElementById('ui').viboraUi;
+      const live = !!(V.game && V.game.inPlay());
+      // Central play region (src/ui/playRegion.js PLAY_REGION): x 0.15-0.85, y 0.2-1.
+      const bad = live && ui ? ui.hudRects().filter(([x0, y0, x1, y1]) => x1 > 0.15 && x0 < 0.85 && y1 > 0.2 && y0 < 1).length : 0;
+      const s = V.game && V.game.stats.lastShot;
+      return { live, bad, effort: s ? s.effort : null, id: s ? s.id : null };
+    });
+    if (r.live) liveSamples++;
+    intrusions += r.bad;
+    if (r.id != null && !efforts.some((e) => e.id === r.id)) efforts.push({ id: r.id, effort: r.effort });
+    const s = await stats(page);
+    if (s.simTime - t0 >= SIM_SECONDS || s.finished || s.errors) break;
+    await page.waitForTimeout(700);
+  }
+  const s = await stats(page);
+  const diag = await page.evaluate(() => window.__vibora.diagnostics().hitting);
+  console.log('stats', JSON.stringify({ playerHits: s.playerHits, feeds: s.feeds, liveSamples, intrusions, efforts: efforts.map((e) => e.effort), hitting: { mode: diag.mode, windows: diag.windows } }));
+  check('user1: no console errors', errors.length === 0 && s.errors === 0, errors.slice(0, 3).join(' | '));
+  check('user1: the drill is played (>= 6 player hits)', s.playerHits >= 6, `${s.playerHits}/${s.feeds} hits/feeds`);
+  check('user1: no HUD block in the central play region while the ball is live', liveSamples > 5 && intrusions === 0, `${intrusions} intrusions in ${liveSamples} live samples`);
+  check('user1: shots carry the swing effort (power pips)', efforts.length > 0 && efforts.every((e) => Number.isFinite(e.effort) && e.effort >= 0 && e.effort <= 1), efforts.map((e) => e.effort).join(', '));
+  check('user1: diagnostics report timing hitting (Rookie windows)', diag.mode === 'timing' && diag.windows && diag.windows.early === 0.32, `${diag.mode}`);
   await page.close();
 }
 
@@ -577,6 +621,7 @@ async function main() {
     if (!only || only === 'autopilot') base = await runAutopilot(browser, port);
     if (!only || only === 'latency') await runLatency(browser, port, base);
     if (!only || only === 'close') await runClose(browser, port);
+    if (!only || only === 'user1') await runUser1(browser, port);
     if (!only || only === 'match') await runMatch(browser, port);
     if (!only || only === 'fallback') await runFallback(browser, port);
     if (!only || only === 'camera') await runCamera(browser, port);

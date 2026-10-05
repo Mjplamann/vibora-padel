@@ -174,14 +174,17 @@ describe('miss reasons', () => {
     for (const k of Object.keys(MISS_TIPS)) assert.ok(MISS_TIPS[k].length > 10);
   });
 
+  // Round 6: Club holds a swing up to 0.4 s early and plays one up to 0.3 s late (with
+  // consequences), and the windows follow the player's learned timing bias: the forced misses are
+  // beyond those windows, with the personal tuning off (settings.timingAdapt: false).
   const forced = {
-    late: { timingMean: 0.33, timingSigma: 0.02, noSwing: 0, spatialSigma: { x: 0.02, y: 0.02, z: 0.02 } },
-    early: { timingMean: -0.37, timingSigma: 0.02, noSwing: 0, spatialSigma: { x: 0.02, y: 0.02, z: 0.02 } },
+    late: { timingMean: 0.42, timingSigma: 0.02, timingClamp: 0.9, noSwing: 0, spatialSigma: { x: 0.02, y: 0.02, z: 0.02 } },
+    early: { timingMean: -0.62, timingSigma: 0.02, timingClamp: 0.9, noSwing: 0, spatialSigma: { x: 0.02, y: 0.02, z: 0.02 } },
     'no-swing': { noSwing: 1 },
   };
   for (const [reason, overrides] of Object.entries(forced)) {
     test(`every ball missed by a ${reason} swing is explained as "${reason}" (HUD, voice, rep note, summary)`, () => {
-      const r = play('fh-drive', { seconds: 50, overrides });
+      const r = play('fh-drive', { seconds: 50, overrides, settings: { timingAdapt: false } });
       assert.ok(r.reps >= 8, `${r.reps} reps`);
       assert.ok(r.hits <= 1, `${r.hits} hits`);
       const missed = r.unhitReps;

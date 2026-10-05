@@ -132,15 +132,21 @@ export const TRACKING = {
 // falls in [t* - early, t* + late] (s, t* = the ideal contact moment) and whose racket path passes
 // within `reach` m of the ball strikes it where it is; the player is glided toward the ideal
 // stance with weight `position` (1 = fully placed, own steps ignored during the ball).
+// Round 6 (second real session: swings 0.3-0.8 s early were misses): the windows are centred on
+// the player's learned timing bias (game/timingProfile.js), and a swing up to `bufferEarly` s
+// early is held and strikes when the ball arrives (pulled cross-court, weaker), one up to
+// `bufferLate` s late is a late hit (down the line, weaker). A player whose camera measures slow
+// swings gets a lower threshold than minSpeed (their own p25 x 0.6), never below minSpeedFloor m/s.
+// Pro stays physical.
 export const ASSIST = {
   pro: { label: 'Pro', mode: 'physical', contactMargin: 0.02, shotBlend: 0.0, magnet: 0.0, netSafety: 0.0 },
   club: {
     label: 'Club', mode: 'timing', contactMargin: 0.1, shotBlend: 0.35, magnet: 0.35, netSafety: 0.5,
-    timing: { early: 0.2, late: 0.22, reach: 0.75, minSpeed: 4.0, position: 0.75 },
+    timing: { early: 0.2, late: 0.22, bufferEarly: 0.4, bufferLate: 0.3, reach: 0.75, minSpeed: 4.0, minSpeedFloor: 1.7, position: 0.75 },
   },
   rookie: {
     label: 'Rookie', mode: 'timing', contactMargin: 0.2, shotBlend: 0.65, magnet: 0.7, netSafety: 0.9,
-    timing: { early: 0.32, late: 0.35, reach: Infinity, minSpeed: 3.0, position: 1.0 },
+    timing: { early: 0.32, late: 0.35, bufferEarly: 0.6, bufferLate: 0.45, reach: Infinity, minSpeed: 3.0, minSpeedFloor: 1.6, position: 1.0 },
   },
 };
 export const DEFAULT_ASSIST = 'club';

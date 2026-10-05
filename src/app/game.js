@@ -17,9 +17,14 @@ import { createSession } from '../game/session.js';
 import { createAutopilotFeed } from './autofeed.js';
 import { installCloseFeed } from './closeFeed.js';
 import { createSyntheticCamera } from '../tracking/synthetic.js';
+import { createTimingProfile, sharedTimingProfile } from '../game/timingProfile.js';
 
-/** Workout recap: a counted swing (m/s at the sweet spot) and the window that groups its peaks (s). */
-export const SWING_COUNT = Object.freeze({ min: 3, group: 0.8 });
+/**
+ * Workout recap: a counted swing (m/s at the sweet spot) and the window that groups its peaks (s).
+ * Round 6: contacts met out in front end in a longer follow-through whose return to ready peaks
+ * ~0.9-1.1 s after the stroke (27 swings for 19 shots at 0.8 s); 1.1 s keeps it with its stroke.
+ */
+export const SWING_COUNT = Object.freeze({ min: 3, group: 1.1 });
 export const STEP = 1 / SIM.tickRate;
 /** Latency (s) used for mouse / trackpad input: one display frame. */
 export const FALLBACK_LATENCY = 0;
@@ -46,15 +51,22 @@ export const FALLBACK_LATENCY = 0;
  * @param {number} [o.apNoise] landmark noise of the synthetic camera (1 = a typical webcam at 2.5 m)
  * @param {boolean} [o.apClose] close-mode autopilot (app/closeFeed.js): 1.7 m from a camera at chest
  *   height, legs out of the picture, a 30 fps webcam-like delivery (?apclose=1)
+ * @param {object} [o.timingProfile] the player's timing / swing-speed profile (game/timingProfile.js);
+ *   default: the camera player's own, persisted in `storage` per camera preset (round 6), and a
+ *   fresh one for the autopilot and mouse play
  */
 export function createGame({
   spec, settings, input = 'camera', human = null, fallback = null, startTime = 0, storage = null,
   seed = 1, apLatency = 0, apDelivery = 0.045, onFrame = null, attract = false,
-  apProfile = null, apJitter = null, apNoise = null, apClose = false,
+  apProfile = null, apJitter = null, apNoise = null, apClose = false, timingProfile = null,
 }) {
   const overrides = input === 'autopilot' ? { latency: apLatency } : input === 'fallback' ? { latency: FALLBACK_LATENCY, gazeFollow: false } : {};
   const world = createWorld({ settings: { ...settings, ...overrides }, rng: createRng(seed) });
   world.input = input; // mouse play keeps physical hits (game/swingAssist.js timingConfig)
+  // Personal timing bias and swing-speed scale (game/timingProfile.js): learned from the camera
+  // player's swings and kept per device (storage) and camera; never from the autopilot's.
+  world.timingProfile = timingProfile
+    || (input === 'camera' && storage && !attract ? sharedTimingProfile(storage, timingKey(world.settings)) : createTimingProfile());
   // The equipped racket (game/progression.js RACKETS) sets the impact physics of this session.
   setRacketProfile(makeRacketProfile(racketById(world.settings.racketModel)));
   const session = attract ? null : createSession({ storage });
@@ -266,6 +278,11 @@ export function createGame({
 }
 
 export const DRILL_IDS = Object.keys(DRILL_BY_ID);
+
+/** Storage key of the camera player's timing profile: one per camera preset (latency differs). */
+export function timingKey(settings = {}) {
+  return settings.cameraPreset || 'default';
+}
 
 /** Landmark noise (σ) of a webcam at ~2.5 m for apNoise = 1: image (normalised) and world (m) coordinates. */
 export const WEBCAM_NOISE = Object.freeze({ image: 0.0016, world: 0.012, worldZ: 0.03 });

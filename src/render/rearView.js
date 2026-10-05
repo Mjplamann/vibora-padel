@@ -10,9 +10,13 @@ import * as THREE from 'three';
 import { isFiniteVec } from './safeView.js';
 
 export const REAR_VIEW = Object.freeze({
-  WIDTH: 0.3, // of the canvas width
-  ASPECT: 2.4, // inset width / height
-  TOP: 0.02, // gap above the inset (fraction of the canvas height)
+  // Round 6 (clarity): a little smaller and wider so the inset stays inside the top 20 % band
+  // (src/ui/playRegion.js TOP_BAND) at the user's 1710 x 876 and any wider screen; it was 30 % x 2.4,
+  // reaching 26 % of the height into the central play region. Keep styles/app.css
+  // --rear-view-bottom (TOP vh + WIDTH / ASPECT vw) in step.
+  WIDTH: 0.25, // of the canvas width
+  ASPECT: 2.7, // inset width / height
+  TOP: 0.012, // gap above the inset (fraction of the canvas height)
   HFOV: 92, // horizontal field of view of the mirror camera (deg): the back glass corner to corner
   PITCH: -10, // deg (looking down a little: the floor in front of the glass shows the bounce)
   GAIN: 1.35, // brightness of the mirror image (the hall behind the glass is dark)

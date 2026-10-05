@@ -1349,7 +1349,7 @@ b, strong { font-weight: 700; }
    of the score blocks in the corners, and under the rear-view mirror inset (render/rearView.js
    REAR_VIEW: TOP 2% of the height, WIDTH 30% of the width at ASPECT 2.4, i.e. 12.5vw tall; keep
    --rear-view-bottom in step with it). A prompt shown at the same time steps down below it. */
-:root { --rear-view-bottom: calc(2vh + 12.5vw); }
+:root { --rear-view-bottom: calc(1.2vh + 9.26vw); } /* round 6: REAR_VIEW TOP 0.012, WIDTH 0.25 / ASPECT 2.7 */
 .hud-timing {
   left: 50%;
   top: calc(var(--rear-view-bottom) + 0.6rem);
@@ -1906,3 +1906,133 @@ b, strong { font-weight: 700; }
 
 /* Round 5: what a racket's stats do to timing hits (trophies → rackets). */
 .rk-effect { margin: 0.25rem 0 0; font-size: 0.56rem; color: var(--glass); opacity: 0.9; }
+
+/* =====================================================================================
+   Round 6 — clean HUD (settings.hud: 'clean' default | 'standard' | 'coach').
+   "The words are kind of in the way of seeing the ball": while a ball is live nothing may sit in
+   the central play region (src/ui/playRegion.js: x 15–85 %, y 20–100 % of the picture), where the
+   ball flies in and meets the racket. Clean = a slim top bar (left: tracking dot, mode, reps or
+   score; right: points, streak, clock) and ONE feedback line under it (src/ui/feedback.js); every
+   transient message (miss reason, km/h, coaching note, "Perfect", achievements, toasts, banners)
+   queues there, ≤ 1.6 s each, held while the ball is coming. ui.js guardRegion() hides any HUD
+   block that would intrude while the ball is live, in every layout (.in-play-region).
+   ===================================================================================== */
+.in-play-region { visibility: hidden !important; }
+
+/* Top bar: two slim corner groups (the middle stays clear for the far court and the mirror). */
+.hud-bar { top: var(--safe-y); left: var(--safe-x); right: var(--safe-x); display: flex; justify-content: space-between; align-items: flex-start; gap: 1rem; pointer-events: none; }
+.hb-left, .hb-right {
+  display: flex; align-items: center; gap: 0.55rem;
+  height: 1.62rem; padding: 0 0.7rem; box-sizing: border-box;
+  max-width: 26vw; white-space: nowrap; overflow: hidden;
+  background: linear-gradient(90deg, rgba(3, 6, 11, 0.62), rgba(3, 6, 11, 0.4));
+  -webkit-backdrop-filter: blur(6px); backdrop-filter: blur(6px);
+}
+.hb-left { border-left: 2px solid var(--glass-2); }
+.hb-right { background: linear-gradient(270deg, rgba(3, 6, 11, 0.62), rgba(3, 6, 11, 0.4)); border-right: 2px solid var(--ball); }
+.hb-right:empty { display: none; }
+.hb-dot { width: 0.42rem; height: 0.42rem; }
+.hb-title { font: 800 0.66rem/1 var(--f-display); text-transform: uppercase; letter-spacing: 0.07em; color: var(--text-2); overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+.hb-info { display: flex; align-items: baseline; gap: 0.2rem; }
+.hb-info:empty { display: none; }
+.hb-info > b { font: 900 1rem/1 var(--f-display); color: var(--text); font-variant-numeric: tabular-nums; }
+.hb-info > span { font: 700 0.62rem/1 var(--f-display); color: var(--text-3); }
+.hud-bar.is-match .hb-title { display: none; }
+.hb-team { display: inline-flex; align-items: baseline; gap: 0.28rem; padding-left: 0.5rem; position: relative; }
+.hb-team + .hb-team { margin-left: 0.35rem; border-left: 1px solid var(--glass-line); padding-left: 0.6rem; }
+.hb-team em { font: 700 0.56rem var(--f-ui); font-style: normal; letter-spacing: 0.1em; text-transform: uppercase; color: var(--text-2); }
+.hb-team b { font: 900 0.95rem/1 var(--f-display); font-variant-numeric: tabular-nums; }
+.hb-team i { font: 900 0.8rem/1 var(--f-display); font-style: normal; color: var(--ball); font-variant-numeric: tabular-nums; min-width: 1.1rem; }
+.hb-team.serving::before { content: ''; position: absolute; left: 0; top: 50%; width: 0.3rem; height: 0.3rem; margin-top: -0.15rem; border-radius: 50%; background: var(--ball); box-shadow: 0 0 0.3rem var(--ball-glow); }
+.hb-pts { display: inline-flex; align-items: baseline; gap: 0.22rem; }
+.hb-pts b { font: 900 1.12rem/1 var(--f-display); color: var(--ball); font-variant-numeric: tabular-nums; }
+.hb-pts small { font: 700 0.5rem var(--f-ui); letter-spacing: 0.14em; text-transform: uppercase; color: var(--text-3); }
+.hb-streak { font: 800 0.72rem/1 var(--f-display); color: var(--text-2); letter-spacing: 0.04em; }
+.hb-mult { font: 900 0.9rem/1 var(--f-display); color: var(--glass); }
+.hb-mult[data-mult="3"], .hb-mult[data-mult="4"], .hb-mult[data-mult="5"] { color: var(--ball); }
+.hb-clock { font: 900 0.95rem/1 var(--f-display); font-variant-numeric: tabular-nums; color: var(--text); }
+.hb-clock.low { color: var(--bad); }
+.hb-lives { display: inline-flex; gap: 2px; }
+.hb-lives i { width: 0.42rem; height: 0.42rem; border-radius: 50%; border: 1.5px solid var(--text-3); }
+.hb-lives i.on { background: var(--ball); border-color: var(--ball); }
+
+/* The one feedback line, under the bar, centred (top band only). */
+.hud-feed {
+  top: calc(var(--safe-y) + 2.05rem);
+  left: 50%;
+  transform: translateX(-50%);
+  max-width: 56vw;
+  box-sizing: border-box;
+  display: flex; align-items: baseline; gap: 0.5rem;
+  padding: 0.28rem 0.9rem 0.32rem;
+  white-space: nowrap; overflow: hidden;
+  background: rgba(3, 6, 11, 0.72);
+  -webkit-backdrop-filter: blur(6px); backdrop-filter: blur(6px);
+  border-bottom: 2px solid var(--glass-2);
+  pointer-events: none;
+}
+.hf-text { font: 800 0.92rem/1.05 var(--f-display); text-transform: uppercase; letter-spacing: 0.03em; color: var(--text); overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+.hud-feed.long .hf-text { font-size: 0.72rem; letter-spacing: 0.02em; }
+.hf-tags { display: inline-flex; gap: 0.3rem; flex: none; }
+/* Swing power (ShotRecord.effort) as five pips after the km/h; full power glows. */
+.hf-pow { display: inline-flex; align-items: flex-end; gap: 2px; flex: none; align-self: center; }
+.hf-pow[hidden] { display: none; }
+.hf-pow i { width: 0.26rem; background: rgba(255, 255, 255, 0.18); }
+.hf-pow i:nth-child(1) { height: 0.32rem; } .hf-pow i:nth-child(2) { height: 0.42rem; } .hf-pow i:nth-child(3) { height: 0.52rem; }
+.hf-pow i:nth-child(4) { height: 0.62rem; } .hf-pow i:nth-child(5) { height: 0.72rem; }
+.hf-pow i.on { background: var(--glass); }
+.hf-pow.full i.on { background: var(--ball); box-shadow: 0 0 0.35rem var(--ball-glow); }
+.hf-tags:empty, .hf-sub:empty { display: none; }
+.hf-tag { font: 700 0.5rem/1 var(--f-ui); font-style: normal; letter-spacing: 0.1em; text-transform: uppercase; padding: 0.22em 0.5em; border: 1px solid var(--glass-line); color: var(--text-2); align-self: center; }
+.hf-tag.good { color: #3dff7a; border-color: rgba(61, 255, 122, 0.55); }
+.hf-tag.warn { color: var(--warn); border-color: rgba(255, 179, 92, 0.6); }
+.hf-tag.gold { color: var(--ball); border-color: rgba(220, 245, 60, 0.6); }
+.hf-sub { font: 600 0.56rem/1.1 var(--f-ui); color: var(--text-3); overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+.hud-feed[data-tone="warn"] { border-bottom-color: var(--warn); }
+.hud-feed[data-tone="bad"] { border-bottom-color: var(--bad); }
+.hud-feed[data-tone="good"] { border-bottom-color: #3dff7a; }
+.hud-feed[data-tone="gold"] { border-bottom-color: var(--ball); }
+.hud-feed[data-kind="banner"] { padding: 0.2rem 1.1rem 0.24rem; }
+.hud-feed[data-kind="banner"] .hf-text { font-size: 1.45rem; line-height: 0.95; }
+.hud-feed[data-kind="banner"][data-tone="gold"] .hf-text { color: var(--ball); text-shadow: 0 0 0.5em rgba(220, 245, 60, 0.35); }
+.hud-feed[data-kind="banner"][data-tone="bad"] .hf-text { color: var(--bad); }
+.hud-feed[data-kind="prompt"] { background: rgba(3, 6, 11, 0.5); border-bottom-color: transparent; }
+.hud-feed[data-kind="prompt"] .hf-text { font-size: 0.74rem; color: var(--text-2); }
+.hud-feed[data-kind="prompt"][data-tone="warn"] { border-bottom-color: var(--warn); }
+.hud-feed[data-kind="prompt"][data-tone="warn"] .hf-text { color: var(--text); }
+.hud-feed.fresh { animation: feedIn 200ms var(--ease); }
+@keyframes feedIn { from { opacity: 0; transform: translate(-50%, -0.3rem); } to { opacity: 1; transform: translate(-50%, 0); } }
+
+/* Layouts: clean / standard keep only the bar and the line (cards, meter, callouts, partner chips,
+   prompts and the "Now!" flash all go to the line, the voice or the results); coach is round 5. */
+.vp-hud:not([data-hud="coach"]) .hud-tl > :not(.pip),
+.vp-hud:not([data-hud="coach"]) .hud-tr,
+.vp-hud:not([data-hud="coach"]) .hud-timing,
+.vp-hud:not([data-hud="coach"]) .hud-callout,
+.vp-hud:not([data-hud="coach"]) .hud-partner,
+.vp-hud:not([data-hud="coach"]) .hud-prompt,
+.vp-hud:not([data-hud="coach"]) .hud-now,
+.vp-hud:not([data-hud="coach"]) .hud-clock { display: none !important; }
+.vp-hud[data-hud="clean"] .shotcard { display: none !important; }
+.vp-hud[data-hud="standard"].ball-live .shotcard { display: none !important; }
+.vp-hud[data-hud="standard"] .shotcard { top: calc(var(--safe-y) + 2.05rem); }
+.vp-hud[data-hud="coach"] .hud-bar, .vp-hud[data-hud="coach"] .hud-feed { display: none !important; }
+.vp[data-hud="clean"] .vp-banner .banner, .vp[data-hud="standard"] .vp-banner .banner { top: 9%; }
+/* The camera picture (setting, or by itself while tracking is lost): small, in the left column. */
+.vp-hud:not([data-hud="coach"]) .hud-tl { top: calc(var(--safe-y) + 2.05rem); }
+.vp-hud:not([data-hud="coach"]) .hud-tl .pip { width: 5.4rem; margin-top: 0; }
+.vp-hud:not([data-hud="coach"]).has-challenge .hud-tl .pip { margin-top: 0; }
+.vp-hud.pip-auto .hud-tl .pip { border-color: var(--warn); opacity: 1; }
+/* Off-screen ball arrow: at the side edge (ui.js ballIndicator), compact. */
+.ball-ind .bi-arrow { width: 1.9rem; height: 1.9rem; }
+.ball-ind .bi-text { font-size: 0.56rem; max-width: 6rem; }
+.vp.is-replay .hud-bar, .vp.is-replay .hud-feed { display: none; }
+@media (prefers-reduced-motion: reduce) { .hud-feed.fresh { animation: none; } }
+/* Round 6: point banners (coach layout; clean / standard show them in the feedback line) brief and in
+   the top third; the ?debug=1 overlay in the top band, off the racket in the bottom corner. */
+.banner { top: 10%; }
+.bn-text { font-size: 3.8rem; }
+.banner-bad .bn-text { font-size: 2.8rem; }
+.vp-debug { right: auto; bottom: auto; left: 50%; top: 0.3rem; transform: translateX(-50%); font-size: 11px; opacity: 0.9; }
+/* Coach layout: prompts (camera warnings, "Your serve…") in the top band, where the guard lets them stay. */
+.vp-hud[data-hud="coach"] .hud-prompt { top: 12.5%; }

@@ -3,7 +3,7 @@
 // guesses (synthetic.js crop). Like app/game.js installRealisticFeed: 30 fps capture, each pose
 // result `delivery` + U(0, jitter) s later (in order), optional webcam landmark noise. Pure module.
 import { createRng } from '../util/math.js';
-import { createAutopilot, CLOSE_ENVELOPE } from '../tracking/autopilot.js';
+import { createAutopilot, CLOSE_ENVELOPE, USER1_SETUP } from '../tracking/autopilot.js';
 import { createSyntheticCamera } from '../tracking/synthetic.js';
 
 /** Where the close-mode autopilot stands and how the camera sees it. */
@@ -17,16 +17,27 @@ const NOISE = Object.freeze({ image: 0.0016, world: 0.012, worldZ: 0.03 });
  * calibration stand-still, as createGame does with installRealisticFeed).
  * @param feed createAutopilotFeed() result (its beforeTick and autopilot are replaced)
  * @param o { handed, height, hfovDeg, seed, delivery, jitter, noise, fps, distance, cameraHeight,
- *   pitchDeg, profile ('precise' | 'human'), blur (synthetic.js blur options or null), armOut
- *   (synthetic.js out-of-frame arm landmarks: { mode: 'drift' | 'clamp', ... } or null = the truth) }
+ *   pitchDeg, profile ('precise' | 'human' | 'user1'), blur (synthetic.js blur options or null), armOut
+ *   (synthetic.js out-of-frame arm landmarks: { mode: 'drift' | 'clamp', ... } or null = the truth),
+ *   envelope (the room the player keeps to, autopilot.js CLOSE_ENVELOPE), overrides (profile fields) }
+ *   Profile 'user1' (round 6) defaults distance, camera, envelope, armOut and blur to the real
+ *   session it was fitted to (autopilot.js USER1_SETUP: 1.23 m from a MacBook Air camera).
  */
-export function installCloseFeed(feed, {
-  handed = 'right', height = 1.75, hfovDeg = 68, seed = 1, delivery = 0.15, jitter = 0.02, noise = 0, fps = 30,
-  distance = CLOSE_FEED.distance, cameraHeight = CLOSE_FEED.cameraHeight, pitchDeg = CLOSE_FEED.pitchDeg,
-  profile = 'precise', blur = null, armOut = null,
-} = {}) {
-  const ap = createAutopilot({ rng: createRng(seed), handed, height, skill: 0.9, room0: { x: 0, d: distance }, envelope: CLOSE_ENVELOPE });
-  if (profile !== 'precise') ap.setProfile(profile, { seed: seed * 7919 + 13 });
+export function installCloseFeed(feed, o = {}) {
+  const profile = o.profile || 'precise';
+  const setup = profile === 'user1' ? USER1_SETUP : {};
+  const pick = (k, d) => (o[k] !== undefined ? o[k] : setup[k] !== undefined ? setup[k] : d);
+  const {
+    handed = 'right', height = 1.75, hfovDeg = 68, seed = 1, delivery = 0.15, jitter = 0.02, noise = 0, fps = 30,
+  } = o;
+  const distance = pick('distance', CLOSE_FEED.distance);
+  const cameraHeight = pick('cameraHeight', CLOSE_FEED.cameraHeight);
+  const pitchDeg = pick('pitchDeg', CLOSE_FEED.pitchDeg);
+  const blur = pick('blur', null);
+  const armOut = pick('armOut', null);
+  const envelope = pick('envelope', CLOSE_ENVELOPE);
+  const ap = createAutopilot({ rng: createRng(seed), handed, height, skill: 0.9, room0: { x: 0, d: distance }, envelope });
+  if (profile !== 'precise') ap.setProfile(profile, { seed: seed * 7919 + 13, overrides: o.overrides || null });
   const cam = createSyntheticCamera({ hfovDeg, cameraHeight, pitchDeg, crop: { seed: seed + 5 }, blur, armOut });
   const rng = createRng(seed + 991);
   const pending = [];

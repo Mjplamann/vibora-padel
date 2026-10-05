@@ -620,6 +620,9 @@ function makeZone(zone) {
   };
 }
 
+/** Round 6: share of the zone floor / curtain brightness removed while a ball is live (faint zones). */
+export const ZONE_LIVE_DIM = 0.55;
+
 /** Clearance (screen fraction) kept between a zone label and a HUD block. */
 const LABEL_MARGIN = Object.freeze({ x: 0.012, y: 0.018 });
 
@@ -634,6 +637,9 @@ function createTargets(root) {
   let alpha = 0;
   let occluders = []; // HUD blocks in normalized screen coords [x0, y0, x1, y1] (y down)
   let laidFrame = -1;
+  // Round 6: while a ball is live the floating labels go and the zones turn faint (clarity: no words
+  // over the court); they come back in the intro and between reps / points.
+  let liveK = 0;
   const camPos = new THREE.Vector3();
   const v = new THREE.Vector3();
 
@@ -737,19 +743,25 @@ function createTargets(root) {
     setOccluders(rects) {
       occluders = Array.isArray(rects) ? rects : [];
     },
-    update(dt, time) {
+    update(dt, time, live = false) {
       alpha += (visibleTarget - alpha) * (1 - Math.exp(-dt * 6));
+      // Labels leave fast when the ball goes live (0.1 s), come back gently.
+      liveK += ((live ? 1 : 0) - liveK) * (1 - Math.exp(-dt * (live ? 24 : 5)));
+      if (live && liveK > 0.97) liveK = 1;
       group.visible = alpha > 0.01 && zones.length > 0;
       for (const z of zones) {
         const u = z.uniforms;
         const want = highlight != null && z.id === highlight ? 1 : 0;
         u.uHi.value += (want - u.uHi.value) * (1 - Math.exp(-dt * 8));
         u.uTime.value = time;
-        u.uA.value = alpha;
+        u.uA.value = alpha * (1 - ZONE_LIVE_DIM * liveK);
         z.fade += (z.hudFade - z.fade) * (1 - Math.exp(-dt * 10));
-        z.sprite.material.opacity = alpha * z.fade;
+        const op = alpha * z.fade * (1 - liveK);
+        z.sprite.material.opacity = op;
+        z.sprite.visible = op > 0.01;
       }
     },
+    get live() { return liveK; },
   };
 }
 
@@ -894,6 +906,7 @@ export function createEffects(scene, opts = {}) {
   const rings = createRings(root);
   let net = opts.net || null;
   let time = 0;
+  let liveSrc = null; // round 6: () => a ball is live (app/wiring.js), for the zone labels
 
   const rnd = Math.random;
   const tmpColor = new THREE.Color();
@@ -1008,7 +1021,14 @@ export function createEffects(scene, opts = {}) {
       targets.setOccluders(rects);
     },
     get labelDebug() {
-      return targets.debug;
+      return { ...targets.debug, live: targets.live };
+    },
+    /**
+     * Round 6: live-ball source for the target zones (app/wiring.js): a function (or boolean) read
+     * every frame; while true the zone labels are hidden and the zones dimmed. null unbinds.
+     */
+    bindLive(src) {
+      liveSrc = src ?? null;
     },
     contactGhost(pos) {
       ghost.set(pos);
@@ -1023,7 +1043,9 @@ export function createEffects(scene, opts = {}) {
       ripples.update(dt);
       flashes.update(dt);
       landing.update(dt, time);
-      targets.update(dt, time);
+      let live = false;
+      try { live = typeof liveSrc === 'function' ? !!liveSrc() : !!liveSrc; } catch { live = false; }
+      targets.update(dt, time, live);
       ghost.update(dt, time);
       skids.update(dt);
       rings.update(dt);

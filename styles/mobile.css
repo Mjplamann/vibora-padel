@@ -1,0 +1,297 @@
+/* Víbora Padel — phones and tablets (swipe mode, src/app/mobile.js). Loaded after app.css; every
+   rule is scoped to html.vp-mobile (set by mobile.js on touch-primary devices) and uses the app.css
+   design tokens: night blues, glass cyan for structure, optic yellow only for "go" and the live ball.
+   Touch targets are at least 44 px; the notch / Dynamic Island and the home indicator are kept clear
+   with the safe-area insets (index.html: viewport-fit=cover). */
+
+html.vp-mobile {
+  /* A 10-foot UI scaled down to a hand-held screen: sized by the short side. */
+  font-size: clamp(11px, 2.9vh, 17px);
+  --safe-l: max(12px, env(safe-area-inset-left));
+  --safe-r: max(12px, env(safe-area-inset-right));
+  --safe-t: max(8px, env(safe-area-inset-top));
+  --safe-b: max(8px, env(safe-area-inset-bottom));
+  --safe-x: max(14px, env(safe-area-inset-left), env(safe-area-inset-right));
+  --safe-y: max(10px, env(safe-area-inset-top), env(safe-area-inset-bottom));
+  --tap: 44px;
+  -webkit-text-size-adjust: 100%;
+  text-size-adjust: 100%;
+}
+@media (orientation: portrait) {
+  html.vp-mobile { font-size: clamp(12px, 3.5vw, 17px); }
+}
+
+html.vp-mobile, html.vp-mobile body {
+  overscroll-behavior: none;
+  -webkit-tap-highlight-color: transparent;
+  height: 100%;
+  min-height: 100dvh;
+}
+html.vp-mobile body { position: fixed; inset: 0; overflow: hidden; touch-action: manipulation; }
+html.vp-mobile #scene { height: 100dvh; width: 100vw; touch-action: none; -webkit-touch-callout: none; -webkit-user-select: none; user-select: none; }
+
+/* ---------- App screens on a small screen ---------- */
+html.vp-mobile .vp-screen > .screen {
+  padding: var(--safe-t) var(--safe-r) var(--safe-b) var(--safe-l);
+  -webkit-overflow-scrolling: touch;
+  overscroll-behavior: contain;
+  touch-action: pan-y;
+}
+html.vp-mobile .btn { min-height: var(--tap); }
+html.vp-mobile .btn-sm { min-height: 36px; }
+html.vp-mobile .wordmark-xl { font-size: 5.2rem; }
+html.vp-mobile .wordmark-md { font-size: 3rem; }
+
+/* The camera picture-in-picture and camera calibration mean nothing in swipe mode. */
+html.vp-swipe .vp-hud .pip, html.vp-swipe .vp-camera-feed { display: none !important; }
+html.vp-swipe .hub-nav [data-action="recalibrate"], html.vp-swipe [data-action="pause-recal"] { display: none; }
+/* The pause screen's camera / keyboard hint (both hands up, Esc, D): swipe mode pauses with two fingers or ❚❚. */
+html.vp-swipe .pause-hint { display: none; }
+/* The hub footer starts right of the swipe settings button (.vpm-gear, bottom left). */
+html.vp-swipe .hub-foot { padding-left: calc(var(--tap) + 14px); }
+
+/* Play HUD: the edges, clear of the notch, the pause button and the swipe area (bottom middle). */
+html.vp-mobile .vp-hud { padding: var(--safe-t) var(--safe-r) var(--safe-b) var(--safe-l); }
+html.vp-swipe .vp-hud .hud-tr { margin-right: calc(var(--tap) * 2 + 18px); }
+html.vp-mobile .vp-hud .shotcard { max-width: min(46vw, 22rem); }
+html.vp-mobile .vp-toasts { top: var(--safe-t); }
+@media (orientation: portrait) {
+  html.vp-swipe .vp-hud .hud-tr { margin-right: 0; margin-top: calc(var(--tap) + 10px); }
+  html.vp-mobile .vp-hud .shotcard { max-width: 88vw; }
+}
+
+/* ---------- Swipe overlay (mobile.js) ---------- */
+.vpm { position: fixed; inset: 0; z-index: 5; pointer-events: none; font-family: var(--f-ui); color: var(--text); }
+.vpm [hidden] { display: none !important; }
+.vpm-trail { position: absolute; left: 0; top: 0; pointer-events: none; }
+
+.vpm-btn {
+  appearance: none;
+  -webkit-appearance: none;
+  pointer-events: auto;
+  min-width: var(--tap);
+  min-height: var(--tap);
+  display: inline-flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 0.1em;
+  padding: 0.35em 0.8em;
+  border: var(--hair) solid var(--glass-line);
+  border-radius: 999px;
+  background: rgba(6, 12, 21, 0.62);
+  -webkit-backdrop-filter: blur(6px);
+  backdrop-filter: blur(6px);
+  color: var(--text);
+  font: 700 0.72rem/1.05 var(--f-ui);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  cursor: pointer;
+  touch-action: manipulation;
+}
+.vpm-btn small { display: block; font-size: 0.72em; font-weight: 600; letter-spacing: 0.04em; opacity: 0.62; text-transform: none; }
+.vpm-btn svg { width: 20px; height: 20px; fill: currentColor; }
+.vpm-btn:active { background: rgba(22, 42, 66, 0.86); border-color: var(--glass-2); }
+
+.vpm-bar {
+  position: absolute;
+  top: var(--safe-t, 8px);
+  right: var(--safe-r, 12px);
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+.vpm-pause { width: var(--tap); padding: 0; }
+.vpm-view { padding: 0 0.9em; }
+.vpm-gear { position: absolute; left: var(--safe-l, 12px); bottom: var(--safe-b, 8px); width: var(--tap); padding: 0; }
+
+/* Swing feedback: kind + effort, above the finger, warmer with effort. */
+.vpm-chip {
+  position: absolute;
+  transform: translate(-50%, -100%);
+  display: flex;
+  align-items: baseline;
+  gap: 0.4em;
+  padding: 0.3em 0.75em 0.32em;
+  border-radius: 999px;
+  border: var(--hair) solid rgba(139, 228, 238, calc(0.3 + 0.5 * var(--e, 0.5)));
+  background: rgba(6, 12, 21, 0.72);
+  font: 800 0.8rem/1 var(--f-display);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+.vpm-chip b { color: var(--text); }
+.vpm-chip span { color: color-mix(in srgb, var(--glass) calc(100% - 100% * var(--e, 0.5)), var(--ball)); font-size: 1.05em; }
+.vpm-chip small { font: 600 0.6rem/1 var(--f-ui); letter-spacing: 0.04em; text-transform: none; color: var(--text-3); }
+.vpm-chip.is-on { animation: vpm-chip 0.9s var(--ease) both; }
+@keyframes vpm-chip {
+  0% { opacity: 0; transform: translate(-50%, -80%) scale(0.92); }
+  14% { opacity: 1; transform: translate(-50%, -100%) scale(1); }
+  70% { opacity: 1; }
+  100% { opacity: 0; transform: translate(-50%, -130%); }
+}
+
+/* Movement stick (left thumb, optional). */
+.vpm-stick {
+  position: absolute;
+  width: 112px;
+  height: 112px;
+  margin: -56px 0 0 -56px;
+  border-radius: 50%;
+  border: 2px solid var(--glass-line);
+  background: radial-gradient(circle, rgba(139, 228, 238, 0.08), rgba(6, 12, 21, 0.25) 70%);
+}
+.vpm-stick i {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 46px;
+  height: 46px;
+  margin: -23px 0 0 -23px;
+  border-radius: 50%;
+  background: rgba(139, 228, 238, 0.35);
+  border: 2px solid var(--glass-2);
+}
+
+/* Rotate hint (phones in portrait). */
+.vpm-rotate {
+  position: absolute;
+  left: 50%;
+  bottom: calc(var(--safe-b, 8px) + 8px);
+  transform: translateX(-50%);
+  width: min(92vw, 26rem);
+  display: flex;
+  align-items: center;
+  gap: 0.7em;
+  padding: 0.55em 0.6em 0.55em 0.9em;
+  border: var(--hair) solid var(--glass-line);
+  border-radius: 14px;
+  background: var(--panel-2);
+  font: 600 0.78rem/1.25 var(--f-ui);
+  pointer-events: auto;
+}
+.vpm-rotate small { display: block; color: var(--text-3); font-size: 0.86em; }
+.vpm-rotate-icon {
+  flex: none;
+  width: 22px;
+  height: 34px;
+  border: 2px solid var(--glass);
+  border-radius: 5px;
+  animation: vpm-rotate 2.4s var(--ease) infinite;
+}
+@keyframes vpm-rotate { 0%, 30% { transform: rotate(0deg); } 55%, 85% { transform: rotate(-90deg); } 100% { transform: rotate(0deg); } }
+.vpm-x { appearance: none; -webkit-appearance: none; margin-left: auto; min-width: var(--tap); min-height: var(--tap); border: 0; background: none; color: var(--text-2); font-size: 1rem; }
+
+/* Swipe settings sheet. */
+.vpm-sheet { position: absolute; inset: 0; display: grid; place-items: center; background: var(--scrim); pointer-events: auto; }
+.vpm-sheet-card, .vpm-tut-card {
+  width: min(92vw, 30rem);
+  max-height: calc(100dvh - 2 * var(--safe-t, 8px));
+  overflow: auto;
+  padding: 1rem 1.1rem 1.1rem;
+  border: var(--hair) solid var(--glass-line);
+  border-radius: 16px;
+  background: var(--panel-2);
+  box-shadow: 0 1.2rem 3rem rgba(0, 0, 0, 0.55);
+}
+.vpm h2 { margin: 0 0 0.7rem; font: 900 1.45rem/1 var(--f-display); letter-spacing: 0.02em; text-transform: uppercase; }
+.vpm h2 small { display: block; margin-top: 0.3em; font: 600 0.62em/1.2 var(--f-ui); letter-spacing: 0.02em; text-transform: none; color: var(--text-3); }
+.vpm-row { display: flex; align-items: center; justify-content: space-between; gap: 0.8rem; padding: 0.5rem 0; border-top: var(--hair) solid var(--glass-faint); font: 600 0.82rem/1.2 var(--f-ui); }
+.vpm-row > span small { display: block; color: var(--text-3); font-size: 0.82em; font-weight: 400; }
+.vpm-row-btns { flex-wrap: wrap; justify-content: flex-start; }
+.vpm-seg { display: inline-flex; border: var(--hair) solid var(--glass-line); border-radius: 999px; overflow: hidden; pointer-events: auto; }
+.vpm-seg button {
+  appearance: none;
+  -webkit-appearance: none;
+  min-height: 40px;
+  padding: 0 0.95em;
+  border: 0;
+  background: transparent;
+  color: var(--text-2);
+  font: 700 0.7rem/1 var(--f-ui);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+.vpm-seg button[aria-checked="true"] { background: var(--court-deep); color: var(--text); box-shadow: inset 0 0 0 1px var(--glass-2); }
+.vpm-wide { border-radius: 10px; align-items: flex-start; }
+.vpm-close { margin-top: 0.7rem; width: 100%; border-radius: 10px; }
+.vpm-go { background: var(--ball); border-color: var(--ball); color: var(--ball-ink); }
+.vpm-go:active { background: #e8ff5a; }
+
+/* ---------- First-run swipe tutorial ---------- */
+.vpm-tutorial { position: absolute; inset: 0; display: grid; place-items: center; background: rgba(3, 6, 11, 0.86); pointer-events: auto; touch-action: none; }
+.vpm-tut-card { position: relative; text-align: left; }
+.vpm-tut-step { margin: 0 0 0.4rem; font: 700 0.62rem/1 var(--f-ui); letter-spacing: 0.24em; color: var(--glass); }
+.vpm-tut-body { margin: 0 0 0.55rem; font: 400 0.82rem/1.35 var(--f-ui); color: var(--text-2); }
+.vpm-tut-try { margin: 0 0 0.8rem; font: 700 0.78rem/1.2 var(--f-ui); letter-spacing: 0.04em; color: var(--ball); min-height: 1.2em; }
+.vpm-tut-btns { display: flex; justify-content: space-between; gap: 0.6rem; }
+.vpm-tut-btns .vpm-btn { border-radius: 10px; min-width: 8rem; }
+
+.vpm-demo { position: relative; height: 7.2rem; margin: 0 0 0.6rem; border-radius: 12px; background: radial-gradient(ellipse at 50% 120%, rgba(42, 90, 166, 0.55), rgba(7, 16, 27, 0.9) 70%); overflow: hidden; }
+.vpm-ball {
+  position: absolute; left: 50%; top: 38%; width: 18px; height: 18px; margin: -9px 0 0 -9px; border-radius: 50%;
+  background: var(--ball); box-shadow: 0 0 14px var(--ball-glow);
+}
+.vpm-ring {
+  position: absolute; left: 50%; top: 38%; width: 18px; height: 18px; margin: -9px 0 0 -9px; border-radius: 50%;
+  border: 2px solid var(--glass); animation: vpm-ring 2s linear infinite;
+}
+@keyframes vpm-ring {
+  0% { transform: scale(5); opacity: 0.2; border-color: var(--glass); }
+  60% { transform: scale(1.15); opacity: 1; border-color: var(--glass); }
+  66%, 80% { transform: scale(1); opacity: 1; border-color: var(--ball); }
+  100% { transform: scale(1); opacity: 0; border-color: var(--ball); }
+}
+/* The animated finger: a fingertip with a fading trail. */
+.vpm-finger {
+  position: absolute; width: 30px; height: 30px; margin: -15px 0 0 -15px; border-radius: 50%;
+  background: rgba(244, 239, 228, 0.92); box-shadow: 0 0 0 6px rgba(244, 239, 228, 0.18), 0 6px 14px rgba(0, 0, 0, 0.45);
+}
+.vpm-finger::after {
+  content: ''; position: absolute; left: 50%; top: 100%; width: 10px; margin-left: -5px; height: 0; border-radius: 5px;
+  background: linear-gradient(rgba(220, 245, 60, 0.85), rgba(220, 245, 60, 0));
+}
+.vpm-f-up { left: 50%; top: 92%; animation: vpm-up 2s var(--ease) infinite; }
+.vpm-f-up::after { animation: vpm-tail 2s var(--ease) infinite; }
+@keyframes vpm-up { 0%, 50% { top: 96%; opacity: 0; } 54% { opacity: 1; top: 92%; } 66% { top: 46%; opacity: 1; } 80%, 100% { top: 40%; opacity: 0; } }
+@keyframes vpm-tail { 0%, 54% { height: 0; } 66% { height: 52px; } 80%, 100% { height: 0; } }
+.vpm-demo-power { display: grid; grid-template-columns: 1fr 1fr; }
+.vpm-lane { position: relative; border-right: var(--hair) solid var(--glass-faint); }
+.vpm-lane b { position: absolute; left: 0; right: 0; bottom: 0.4rem; text-align: center; font: 700 0.66rem/1 var(--f-ui); letter-spacing: 0.08em; text-transform: uppercase; color: var(--text-2); }
+.vpm-f-slow { left: 50%; animation: vpm-slow 2.6s ease-in-out infinite; }
+.vpm-f-fast { left: 50%; animation: vpm-fast 2.6s cubic-bezier(0.5, 0, 0.2, 1) infinite; }
+.vpm-f-slow::after { animation: vpm-tail-s 2.6s ease-in-out infinite; }
+.vpm-f-fast::after { animation: vpm-tail-f 2.6s cubic-bezier(0.5, 0, 0.2, 1) infinite; background: linear-gradient(rgba(255, 179, 92, 0.95), rgba(255, 179, 92, 0)); }
+@keyframes vpm-slow { 0% { top: 74%; opacity: 0; } 8% { opacity: 1; top: 74%; } 70% { top: 50%; opacity: 1; } 85%, 100% { top: 50%; opacity: 0; } }
+@keyframes vpm-fast { 0%, 40% { top: 78%; opacity: 0; } 44% { opacity: 1; top: 78%; } 56% { top: 18%; opacity: 1; } 70%, 100% { top: 14%; opacity: 0; } }
+@keyframes vpm-tail-s { 0%, 8% { height: 0; } 70% { height: 22px; } 100% { height: 0; } }
+@keyframes vpm-tail-f { 0%, 44% { height: 0; } 56% { height: 64px; } 70%, 100% { height: 0; } }
+.vpm-demo-shape { display: grid; grid-template-columns: repeat(3, 1fr); align-items: center; }
+.vpm-mini { display: flex; flex-direction: column; align-items: center; gap: 0.25rem; }
+.vpm-mini svg { width: 3.4rem; height: 4.6rem; fill: none; stroke-linecap: round; stroke-linejoin: round; }
+.vpm-mini .vpm-path { stroke: var(--glass); stroke-width: 5; stroke-dasharray: 100; animation: vpm-draw 2.2s var(--ease) infinite; }
+.vpm-mini .vpm-head { stroke: var(--ball); stroke-width: 5; }
+.vpm-mini b { font: 700 0.62rem/1 var(--f-ui); letter-spacing: 0.08em; text-transform: uppercase; color: var(--text-2); }
+@keyframes vpm-draw { 0% { stroke-dashoffset: 100; } 50%, 100% { stroke-dashoffset: 0; } }
+
+@media (orientation: landscape) and (max-height: 500px) {
+  .vpm-tut-card { display: grid; grid-template-columns: 13rem 1fr; column-gap: 1rem; width: min(94vw, 40rem); }
+  .vpm-tut-card .vpm-tut-step { grid-column: 1 / -1; }
+  .vpm-tut-card .vpm-demo { grid-row: 2 / span 4; height: auto; min-height: 9rem; margin: 0; }
+  .vpm-tut-card h2, .vpm-tut-card .vpm-tut-body, .vpm-tut-card .vpm-tut-try, .vpm-tut-card .vpm-tut-btns { grid-column: 2; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .vpm-ring, .vpm-finger, .vpm-finger::after, .vpm-mini .vpm-path, .vpm-rotate-icon, .vpm-chip.is-on { animation: none !important; }
+  .vpm-ring { transform: scale(1.4); }
+  .vpm-finger { opacity: 1; top: 50%; }
+}
+
+/* Swipe mode: the HUD's top bar (app.css .hud-bar, score on the right) ends left of the pause /
+   view buttons (mobile.js keeps --vpm-bar-w at the buttons' width), and the TV / camera set-up
+   line of the loading screen does not apply to a phone. */
+html.vp-swipe .vp-hud .hud-bar { right: calc(var(--safe-r, 12px) + var(--vpm-bar-w, 13em) + 10px); }
+html.vp-swipe .load-foot { visibility: hidden; }
+/* The rotate hint (portrait, bottom centre) spans the gear's corner: the gear sits above it. */
+.vpm:has(.vpm-rotate:not([hidden])) .vpm-gear { bottom: calc(var(--safe-b, 8px) + 8px + var(--tap) + 1.6rem); }

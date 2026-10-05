@@ -13,6 +13,8 @@ import { courtDiagram, landingMap, strokeBars, strokeName, drawSkeleton, escapeH
 import { buildDiagnostics, browserEnv, copyText } from '../app/diagnostics.js';
 import { createGameScreens } from './gameScreens.js';
 import { CAL_STEPS_CLOSE, bodyPanelHtml, updateBodyPanel, bodyCheck, spotCheck, areaReadout, areaStep } from './calibrate.js';
+import { createFeedbackQueue } from './feedback.js';
+import { intrudesPlayRegion } from './playRegion.js';
 
 export const SCREENS = Object.freeze([
   'loading', 'title', 'camera', 'calibrate', 'hub', 'drill-intro', 'play', 'pause', 'results', 'settings', 'help',
@@ -35,7 +37,9 @@ export const UI_DEFAULT_SETTINGS = Object.freeze({
   gainLateral: TRACKING.gainLateral, gainDepth: TRACKING.gainDepth, fov: 70,
   gazeFollow: true, landingMarker: true, contactGhost: false, racketGhost: true, halo: false, cameraTilt: 'auto',
   quality: 'high', voice: 'en', volumes: Object.freeze({ master: 0.9, sfx: 1, ambience: 0.5, crowd: 0.7 }),
-  skinTone: '#c58c6a', racketColor: '#e8572a', pip: true, skeleton: true,
+  // Round 6: the camera picture is off by default (a tracking dot in the top bar; the picture comes
+  // back by itself while tracking is lost), and the clean HUD is the default layout.
+  skinTone: '#c58c6a', racketColor: '#e8572a', pip: false, skeleton: true, hud: 'clean', approachTick: 'auto', timingAdapt: true,
   cameraPreset: TRACKING.defaultCamera,
   // Round 3: ball visibility 'realistic' | 'enhanced' | 'max' (render/ballView.js BALL_VISIBILITY).
   ballVisibility: 'enhanced',
@@ -142,14 +146,21 @@ const SETTINGS_GROUPS = [
       // Round 3: Club / Rookie hit on timing (game/swingAssist.js), Pro physically.
       { key: 'hitMode', type: 'seg', en: 'Hitting', es: 'Golpeo', options: [['auto', 'Auto', 'by assist'], ['timing', 'Timing'], ['physical', 'Contact', 'racket on ball']] },
       { key: 'hitPrediction', type: 'switch', en: 'Predictive hitting', es: 'Golpe predictivo' },
+      // Round 6 (game/timingProfile.js): the timing windows follow the player's own learned moment.
+      { key: 'timingAdapt', type: 'switch', en: 'Adapt timing to me', es: 'Ajustar el tiempo a mí' },
+      { key: 'timingInfo', type: 'timing', en: 'Your timing', es: 'Tu tiempo' },
       { key: 'gazeFollow', type: 'switch', en: 'Gaze follows the ball', es: 'Mirada a la bola' },
     ],
   },
   {
     en: 'Ball & aids', es: 'Bola y ayudas', items: [
+      // Round 6: how much text the play HUD shows (src/ui/feedback.js, src/ui/playRegion.js).
+      { key: 'hud', type: 'seg', en: 'Screen text', es: 'Textos en pantalla', options: [['clean', 'Clean', 'one line'], ['standard', 'Standard', '+ shot card'], ['coach', 'Coach', 'all cards']],
+        hint: 'Clean: one message line, nothing over the court in play. H switches.' },
       { key: 'ballVisibility', type: 'seg', en: 'Ball visibility', es: 'Visibilidad de la bola', options: [['realistic', 'Real'], ['enhanced', 'Enhanced'], ['max', 'Max']] },
       { key: 'learningSlowmo', type: 'seg', en: 'Slow motion off the glass', es: 'Cámara lenta en el cristal', options: [['auto', 'Rookie'], ['on', 'On'], ['off', 'Off']] },
-      { key: 'timingTick', type: 'switch', en: 'Timing tick on every ball', es: 'Tic en cada bola' },
+      // Round 6: a soft tick 0.2 s before the approach circle closes (render/approach.js; balls off the glass always tick).
+      { key: 'approachTick', type: 'seg', en: 'Timing tick', es: 'Tic de tiempo', options: [['auto', 'Rookie'], ['on', 'On'], ['off', 'Off']] },
       { key: 'landingMarker', type: 'switch', en: 'Landing marker', es: 'Marca de bote' },
       { key: 'racketGhost', type: 'switch', en: 'Racket ghost at the contact', es: 'Pala fantasma en el impacto' },
       { key: 'contactGhost', type: 'switch', en: 'Ideal contact ghost', es: 'Punto de impacto ideal' },
@@ -254,6 +265,16 @@ export function createUI(root, handlers = {}) {
     free: { mode: 'rally', level: 'club', venue: null, games: 4 },
     calibFactory: null,
     hudKeyChallenge: null,
+    // Round 6: clean HUD (feedback line, top bar, tracking dot, play-region guard).
+    feedKey: '',
+    feedShown: null,
+    barKey: '',
+    feedMeterKey: '',
+    trackOkAt: 0,
+    trackLostAt: 0,
+    trackBackAt: 0,
+    pipAuto: false,
+    guardAt: 0,
   };
   const gs = createGameScreens({ esc, ICON, starsHtml, segHtml, fmtInt, courtDiagram });
 
@@ -375,6 +396,12 @@ export function createUI(root, handlers = {}) {
       } else if (k === 'k' || k === 'K') {
         changeSetting('skeleton', !state.settings.skeleton);
         toast(`Skeleton overlay ${state.settings.skeleton ? 'on' : 'off'}`);
+      } else if (k === 'h' || k === 'H') {
+        // Round 6: cycle the play HUD layout (Settings → Ball & aids → Screen text).
+        const order = ['clean', 'standard', 'coach'];
+        const next = order[(order.indexOf(hudMode()) + 1) % order.length];
+        changeSetting('hud', next);
+        toast(`Screen text: ${next[0].toUpperCase()}${next.slice(1)}`);
       }
       return;
     }
@@ -464,7 +491,12 @@ export function createUI(root, handlers = {}) {
       if (data.mode) layerHud.dataset.mode = data.mode;
       if (data.hud) hud(data.hud);
     }
-    if (screen !== 'play' && screen !== 'pause') hideBallIndicator();
+    if (screen !== 'play' && screen !== 'pause') {
+      hideBallIndicator();
+      // The feedback line belongs to one session's play (results / menus start clean).
+      feed.clear();
+      renderFeed();
+    }
 
     const view = RENDER[screen](state.data[screen] || {});
     layerScreen.innerHTML = '';
@@ -594,6 +626,11 @@ export function createUI(root, handlers = {}) {
       case 'pause-recal': state.returnTo.calibrate = 'pause'; goto('calibrate', { step: 'body' }); break;
       case 'diagnostics': copyDiagnostics(); break;
       case 'diag-close': closeDiagnostics(); break;
+      case 'timing-reset': {
+        refreshTimingText(call('onResetTiming'));
+        toast('Timing reset · it learns again from your next swings');
+        break;
+      }
       default: break;
     }
   }
@@ -738,6 +775,8 @@ export function createUI(root, handlers = {}) {
     state.settings = applyPatch(state.settings, patch);
     call('onSettings', patch);
     if (key === 'pip' || key === 'skeleton') syncPip();
+    if (key === 'hud') syncHudMode();
+    if ((key === 'timingAdapt' || key === 'assist' || key === 'hitMode') && state.screen === 'settings') refreshTimingText();
   }
 
   // ---- Loading ----------------------------------------------------------------
@@ -1689,6 +1728,7 @@ export function createUI(root, handlers = {}) {
           <h3 class="skill-head">${esc(g.en)}<span class="es">${esc(g.es)}</span></h3>
           ${g.items.map((it) => {
             const v = get(s, it.key);
+            if (it.type === 'timing') return timingFieldHtml(it);
             if (it.type === 'switch') return `<div class="field field-inline"><span class="field-label">${esc(it.en)}<span class="es">${esc(it.es)}</span></span>${controlFor(it, s)}</div>`;
             return fieldHtml(it.en, it.es, controlFor(it, s), it.type === 'range' ? { valueId: it.key, value: it.fmt(v) } : { hint: it.hint || '' });
           }).join('')}
@@ -1697,6 +1737,26 @@ export function createUI(root, handlers = {}) {
     const first = el.querySelector('[data-seg="assist"] [aria-checked="true"]');
     if (first) first.setAttribute('data-autofocus', '');
     return { el };
+  }
+
+  /**
+   * Round 6: the personal timing readout ("Timing tuned to you: −0.14 s", handlers.onTimingInfo) and
+   * its Reset button (handlers.onResetTiming): forgets this camera's learned timing and swing speeds.
+   */
+  function timingText(info) {
+    if (!info) return '—';
+    if (info.mode && info.mode !== 'timing') return 'Not used with contact hitting';
+    if (info.adapt === false) return 'Off: the standard timing';
+    if (info.text) return info.text;
+    return info.n > 0 ? `Learning from your swings (${info.n})` : 'Learns from your first swings';
+  }
+  function timingFieldHtml(it) {
+    const info = call('onTimingInfo');
+    return `<div class="field field-inline field-timing"><span class="field-label">${esc(it.en)}<span class="es">${esc(it.es)}</span><output class="field-hint" data-timing-text>${esc(timingText(info))}</output></span><button type="button" class="btn btn-sm" data-action="timing-reset" data-focus-key="timing-reset">Reset timing<span class="es">Reiniciar</span></button></div>`;
+  }
+  function refreshTimingText(info = call('onTimingInfo')) {
+    const out = layerScreen.querySelector('[data-timing-text]');
+    if (out) out.textContent = timingText(info);
   }
 
   /** Re-syncs visible settings controls to state.settings without rebuilding (keeps focus). */
@@ -1721,6 +1781,8 @@ export function createUI(root, handlers = {}) {
     state.settings = applyPatch(state.settings, current || {});
     if (state.screen === 'settings' || state.screen === 'calibrate') syncSettingsControls();
     syncPip();
+    syncHudMode();
+    ensureLoop();
   }
 
   // ---- Help ----------------------------------------------------------------------
@@ -1784,9 +1846,21 @@ export function createUI(root, handlers = {}) {
   }
 
   // ---- HUD -----------------------------------------------------------------------
+  // Round 6 (clarity): three layouts, settings.hud. 'clean' (default) is a slim top bar (left: mode,
+  // reps / score; right: points, streak, clock) and ONE feedback line under it (src/ui/feedback.js):
+  // miss reasons, km/h, coaching notes, "Perfect", achievements, toasts and point banners queue there,
+  // at most 1.6 s each and never while the ball is coming to the player. 'standard' adds the last-shot
+  // card between points; 'coach' is the full round-5 HUD (cards, meter, callouts, camera picture).
+  // In every layout no HUD block may sit in the central play region (src/ui/playRegion.js) while a ball
+  // is live: guardRegion() hides any that would, every frame.
   function buildHud() {
     layerHud.dataset.mode = 'drill';
     layerHud.innerHTML = `
+      <div class="hud-bar">
+        <div class="hb-left"><span class="track-dot hb-dot" data-state="off" title="Tracking"></span><span class="hb-title"></span><span class="hb-info"></span></div>
+        <div class="hb-right"></div>
+      </div>
+      <div class="hud-feed" hidden aria-live="polite"><span class="hf-text"></span><span class="hf-pow" hidden title="Swing power"></span><span class="hf-tags"></span><small class="hf-sub"></small></div>
       <div class="hud-tl">
         <div class="hud-title"><span class="ht-name"></span><span class="ht-sub es"></span></div>
         <div class="hud-reps"><span class="hr-lbl">Rep</span><b class="hr-i">0</b><span class="hr-of">/ 0</span><span class="hr-timer"></span></div>
@@ -1815,11 +1889,27 @@ export function createUI(root, handlers = {}) {
       <div class="shotcard" hidden aria-live="polite"></div>
       <div class="ball-ind" hidden><span class="bi-arrow">${ICON.arrow}</span><span class="bi-text">Ball behind you<small>detrás</small></span></div>`;
     syncPip();
+    syncHudMode();
+  }
+
+  /** settings.hud: 'clean' | 'standard' | 'coach'. */
+  function hudMode() {
+    const m = state.settings && state.settings.hud;
+    return m === 'standard' || m === 'coach' ? m : 'clean';
+  }
+  /** Clean / standard layouts route transient messages to the one feedback line. */
+  const feedMode = () => hudMode() !== 'coach';
+
+  function syncHudMode() {
+    const m = hudMode();
+    if (layerHud.dataset.hud !== m) layerHud.dataset.hud = m;
+    if (root.dataset.hud !== m) root.dataset.hud = m;
   }
 
   function syncPip() {
     const pip = layerHud.querySelector('.pip');
-    if (pip) pip.hidden = !state.settings.pip;
+    if (pip) pip.hidden = !(state.settings.pip || state.pipAuto);
+    layerHud.classList.toggle('pip-auto', !!state.pipAuto && !state.settings.pip);
   }
 
   function setRepTicks(i, total) {
@@ -1832,6 +1922,198 @@ export function createUI(root, handlers = {}) {
     Array.from(box.children).forEach((t, k) => {
       t.className = k < i - 1 ? 'done' : k === i - 1 ? 'cur' : '';
     });
+  }
+
+  // ---- Live play state (app/wiring.js bindPlay): incoming ball, live ball ------------------
+  let playBinding = null;
+  function isIncoming() {
+    if (!playBinding || typeof playBinding.incoming !== 'function') return false;
+    try { return !!playBinding.incoming(); } catch { return false; }
+  }
+  function isLive() {
+    if (playBinding && typeof playBinding.live === 'function') {
+      try { return !!playBinding.live(); } catch { /* fall back to the HUD tick */ }
+    }
+    return !!(state.hud && state.hud.live);
+  }
+
+  // ---- Feedback line ------------------------------------------------------------------
+  const feed = createFeedbackQueue();
+  const feedNow = () => performance.now();
+  const URGENT_PROMPT = /out of frame|out of view|in front of the camera|top of the picture|lost you/i;
+  const BANNER_TONE = { gold: 'gold', plain: 'info', info: 'info', bad: 'bad' };
+
+  function pushFeed(msg) {
+    if (!msg || !msg.text) return null;
+    const m = feed.push(msg, feedNow());
+    renderFeed();
+    return m;
+  }
+
+  /** Draws the line (each UI frame while playing). */
+  function renderFeed() {
+    const now = feedNow(); // one timebase with push() (rAF stamps can run ahead of performance.now)
+    const el = layerHud.querySelector('.hud-feed');
+    if (!el) return;
+    const on = state.screen === 'play' && feedMode() && !layerHud.hidden;
+    const m = on ? feed.update(now, { hold: isIncoming() }) : null;
+    const tags = m && m.tags ? m.tags : [];
+    const pow = m && Number.isFinite(m.power) ? Math.max(0, Math.min(1, m.power)) : null;
+    const key = m ? `${m.id || 'prompt'}|${m.text}|${tags.join(',')}|${m.sub || ''}|${m.tone || ''}|${pow ?? ''}` : '';
+    if (key === state.feedKey) return;
+    state.feedKey = key;
+    if (!m) {
+      el.hidden = true;
+      state.feedShown = null;
+      return;
+    }
+    el.hidden = false;
+    el.dataset.kind = m.kind || 'info';
+    el.dataset.tone = m.tone || 'info';
+    el.classList.toggle('long', m.text.length + (m.sub ? m.sub.length * 0.6 : 0) > 58);
+    setText(el.querySelector('.hf-text'), m.text);
+    const tg = el.querySelector('.hf-tags');
+    const th = tags.map((t) => `<i class="hf-tag${/^(on time|perfect)/i.test(t) ? ' good' : /^(early|late|miss)/i.test(t) ? ' warn' : /^\+/.test(t) ? ' gold' : ''}">${esc(t)}</i>`).join('');
+    if (tg.innerHTML !== th) tg.innerHTML = th;
+    setText(el.querySelector('.hf-sub'), m.sub || '');
+    // Round 6 ("would be cool if swing speed made an impact"): the swing's power (ShotRecord.effort,
+    // the swing against the player's own recent swings) as five pips after the km/h.
+    const pw = el.querySelector('.hf-pow');
+    pw.hidden = pow === null;
+    if (pow !== null) {
+      const n = Math.max(1, Math.min(5, Math.round(pow * 5 + 0.5)));
+      const ph = Array.from({ length: 5 }, (_, i) => `<i class="${i < n ? 'on' : ''}"></i>`).join('');
+      if (pw.innerHTML !== ph) pw.innerHTML = ph;
+      pw.classList.toggle('full', pow >= 0.85);
+      pw.title = `Swing power ${Math.round(pow * 100)} %`;
+    }
+    const fresh = state.feedShown !== (m.id || m.text);
+    state.feedShown = m.id || m.text;
+    if (fresh && !reducedMotion()) {
+      el.classList.remove('fresh');
+      void el.offsetWidth;
+      el.classList.add('fresh');
+    }
+  }
+
+  /** The last shot as a feedback line: "Forehand · 64 km/h" + chips (timing, points). */
+  function shotFeed(rec) {
+    const s = normalizeShot(rec);
+    if (!s) return;
+    const id = rec.id ?? rec.shotId ?? `${s.stroke}|${Math.round(s.speedKmh || 0)}`;
+    const n = strokeName(s.stroke);
+    const tags = [];
+    // Round 6 merge: how early / late, in ms (the timing hit's error around the player's own moment).
+    const ms = s.timingMs != null && Math.abs(s.timingMs) >= 30 ? ` ${Math.abs(s.timingMs)} ms` : '';
+    if (s.timing === 'good') tags.push('On time');
+    else if (s.timing === 'early') tags.push(`Early${ms}`);
+    else if (s.timing === 'late') tags.push(`Late${ms}`);
+    if (s.points != null && s.points > 0) tags.push(`+${fmtInt(s.points)}`);
+    else if (s.success === false) tags.push('Miss');
+    const tone = s.success === false ? 'warn' : s.points > 0 ? 'good' : 'info';
+    // A new hit makes a queued miss of the ball before stale (it waited while this ball came).
+    pushFeed({ kind: 'shot', key: `shot:${id}`, text: `${n.en}${s.speedKmh == null ? '' : ` · ${Math.round(s.speedKmh)} km/h`}`, tags, tone, power: s.effort, supersedes: ['miss'] });
+    const note = (s.notes || [])[0];
+    if (note) pushFeed({ kind: 'note', key: `note:${id}`, text: note, tone: 'info' });
+  }
+
+  /** A miss reason as a feedback line (the bus event and the HUD tick are the same miss: one key). */
+  function missFeed(m) {
+    if (!m || !m.text) return;
+    const sub = m.reason === 'early' ? 'wait until the circle closes on the ball' : m.reason === 'late' ? 'start the swing a little sooner' : '';
+    pushFeed({ kind: 'miss', key: `miss:${m.at ?? m.text}`, text: m.text, sub, tone: 'warn' });
+  }
+
+  // ---- Top bar ------------------------------------------------------------------------
+  function barHud(h) {
+    const match = !!h.score;
+    const hasReps = Number.isFinite(h.repTotal) && h.repTotal > 0;
+    const c = h.challenge || null;
+    let info = '';
+    if (match) {
+      const sc = h.score;
+      const names = sc.names || [['You'], ['Rivals']];
+      const g = sc.games || [0, 0], pt = sc.points || ['0', '0'];
+      const srv = sc.server ? sc.server.team : null;
+      const side = (t) => `<span class="hb-team${srv === t ? ' serving' : ''}"><em>${esc(String(names[t][0] || '').slice(0, 10))}</em><b>${esc(g[t])}</b><i>${esc(pt[t] || '0')}</i></span>`;
+      info = `${side(0)}${side(1)}`;
+    } else if (hasReps) {
+      info = `<b>${esc(Math.max(0, h.repIndex || 0))}</b><span>/ ${esc(h.repTotal)}</span>`;
+    }
+    const right = [];
+    if (c) {
+      const left = Math.max(0, c.timeLeft || 0);
+      right.push(`<span class="hb-clock${left <= 10 && left > 0 ? ' low' : ''}">${esc(fmtTime(Math.ceil(left)))}</span>`);
+      if (c.maxLives) right.push(`<span class="hb-lives">${Array.from({ length: c.maxLives }, (_, i) => `<i class="${i < (c.lives ?? 0) ? 'on' : ''}"></i>`).join('')}</span>`);
+      if ((c.mult || 1) > 1) right.push(`<span class="hb-mult" data-mult="${esc(c.mult)}">×${esc(c.mult)}</span>`);
+      right.push(`<span class="hb-pts"><b>${esc(fmtInt(h.points || 0))}</b><small>pts</small></span>`);
+    } else if (match) {
+      if (h.rally) right.push(`<span class="hb-pts"><b>${esc(h.rally)}</b><small>rally</small></span>`);
+    } else if (h.rally != null && !Number.isFinite(h.points)) {
+      right.push(`<span class="hb-pts"><b>${esc(h.rally || 0)}</b><small>rally</small></span>`);
+      if (h.bestRally) right.push(`<span class="hb-streak">best ${esc(h.bestRally)}</span>`);
+    } else {
+      if ((h.streak || 0) >= 2) right.push(`<span class="hb-streak">×${esc(h.streak)}</span>`);
+      right.push(`<span class="hb-pts"><b>${esc(fmtInt(Number.isFinite(h.points) ? h.points : 0))}</b><small>pts</small></span>`);
+    }
+    const title = String(h.title || '');
+    const key = `${title}|${info}|${right.join('')}`;
+    if (key === state.barKey) return;
+    state.barKey = key;
+    setText(layerHud.querySelector('.hb-title'), title);
+    const inf = layerHud.querySelector('.hb-info');
+    if (inf.innerHTML !== info) inf.innerHTML = info;
+    const r = layerHud.querySelector('.hb-right');
+    const rh = right.join('');
+    if (r.innerHTML !== rh) r.innerHTML = rh;
+    layerHud.querySelector('.hud-bar').classList.toggle('is-match', match);
+  }
+
+  // ---- Tracking status: a dot in the bar; the camera picture comes back while tracking is lost ----
+  function trackingState(now) {
+    const fresh = state.skeleton && now - state.skeletonAt < 700;
+    if (fresh && state.skeleton.people && state.skeleton.people.length) {
+      state.trackOkAt = now;
+      return 'ok';
+    }
+    if (!fresh && !state.preview) return 'off';
+    return now - state.trackOkAt > 900 ? 'lost' : 'ok';
+  }
+
+  function syncTracking(now) {
+    const st = trackingState(now);
+    const dot = layerHud.querySelector('.hb-dot');
+    const want = st === 'ok' ? 'ok' : st === 'lost' ? 'warn' : 'off';
+    if (dot && dot.dataset.state !== want) {
+      dot.dataset.state = want;
+      dot.title = st === 'ok' ? 'Tracking' : st === 'lost' ? 'Tracking lost · no body found' : 'Camera off';
+    }
+    // Auto picture-in-picture: lost for 1 s (play only), back to the dot 1.5 s after tracking returns.
+    if (st === 'lost') { if (!state.trackLostAt) state.trackLostAt = now; } else state.trackLostAt = 0;
+    if (st === 'ok') { if (!state.trackBackAt) state.trackBackAt = now; } else state.trackBackAt = 0;
+    let next = state.pipAuto;
+    if (state.screen !== 'play' || st === 'off') next = false;
+    else if (st === 'lost') next = next || now - state.trackLostAt > 1000;
+    else if (next && now - state.trackBackAt > 1500) next = false;
+    if (next !== state.pipAuto) {
+      state.pipAuto = next;
+      syncPip();
+    }
+  }
+
+  // ---- Central play region guard (every layout) -----------------------------------------
+  const GUARD_SEL = '.vp-hud > :not(.hud-tl):not(.hud-tr), .vp-hud .hud-tl > *, .vp-hud .hud-tr > *, .vp-banner .banner, .vp-toasts .toast, .vp-achievements .ach-toast';
+  function guardRegion() {
+    const live = (state.screen === 'play') && !layerHud.hidden && isLive();
+    const W = window.innerWidth || 1, H = window.innerHeight || 1;
+    for (const el of root.querySelectorAll(GUARD_SEL)) {
+      let block = false;
+      if (live && !el.hidden) {
+        const r = el.getBoundingClientRect();
+        block = r.width > 0 && r.height > 0 && intrudesPlayRegion(r, W, H, { margin: 1 });
+      }
+      if (el.classList.contains('in-play-region') !== block) el.classList.toggle('in-play-region', block);
+    }
   }
 
   function hud(h) {
@@ -1889,10 +2171,14 @@ export function createUI(root, handlers = {}) {
 
     if (match) renderScoreboard(h.score);
     else q('.scoreboard').hidden = true;
+    barHud(h);
 
+    // Prompts: the old centre strip ('coach'), else the feedback line while it is idle (camera
+    // warnings are urgent: they show even while the ball is coming).
     const pr = q('.hud-prompt');
-    pr.hidden = !h.prompt;
+    pr.hidden = !h.prompt || feedMode();
     if (h.prompt) setText(pr.querySelector('.hp-text'), h.prompt);
+    feed.setPrompt(h.prompt ? { text: h.prompt, urgent: URGENT_PROMPT.test(h.prompt) } : null);
 
     if (h.lastShot) {
       const key = JSON.stringify([h.lastShot.stroke, h.lastShot.speedKmh, h.lastShot.spinRpm, h.lastShot.netClearance, h.lastShot.quality]);
@@ -1911,6 +2197,17 @@ export function createUI(root, handlers = {}) {
     if (h.ballIndicator !== undefined) ballIndicator(h.ballIndicator);
     timingHud(h.miss || null, h.meter || null);
     challengeHud(h.challenge || null);
+    if (feedMode()) {
+      if (h.miss) missFeed(h.miss);
+      // The timing meter's reading ("Early 120 ms") replaces the shot line's timing chip.
+      const mk = h.meter ? `${h.meter.e}|${h.meter.at}` : '';
+      if (mk && mk !== state.feedMeterKey && h.meter.hit && h.meter.label) {
+        feed.push({ kind: 'shot', tag: true, text: h.meter.label, replace: /^(on time|early|late)/i, tone: /^on time/i.test(h.meter.label) ? 'good' : undefined }, feedNow());
+      }
+      state.feedMeterKey = mk;
+    }
+    renderFeed();
+    guardRegion();
   }
 
   // ---- Arcade challenge HUD: clock, combo multiplier, lives, score pop (round 4) ------------------
@@ -1957,6 +2254,11 @@ export function createUI(root, handlers = {}) {
 
   /** Big centre-top callout ("Perfect timing!", "Combo ×3"), never over the racket at the bottom. */
   function callout(text, sub = '', kind = 'perfect') {
+    // Clean / standard: a chip on the shot line (or a line of its own), never a big centre callout.
+    if (feedMode() && state.screen === 'play') {
+      pushFeed({ kind: kind === 'combo' ? 'combo' : 'perfect', tag: true, text, tone: kind === 'combo' ? 'gold' : 'good' });
+      return;
+    }
     const el = layerHud.querySelector('.hud-callout');
     if (!el) return;
     setText(el.querySelector('b'), text);
@@ -1971,12 +2273,19 @@ export function createUI(root, handlers = {}) {
   }
 
   function perfect(streak = 1) {
+    if (feedMode() && state.screen === 'play') {
+      pushFeed({ kind: 'perfect', tag: true, text: streak > 1 ? `Perfect ×${streak}` : 'Perfect timing', tone: 'good' });
+      return;
+    }
     callout(streak > 1 ? `Perfect ×${streak}` : 'Perfect timing!', streak > 1 ? 'golpes perfectos seguidos' : '¡Golpe perfecto!', 'perfect');
   }
 
   /** The partner's call ("¡Mía!") as a chip at the left, under the score blocks. */
   function partnerCall(c) {
     if (!c || (state.settings && state.settings.callouts === false)) return;
+    // Clean / standard: the partner's call is voiced (audio/umpire.js); it comes while the ball is
+    // coming, when nothing may cover the court.
+    if (feedMode()) return;
     const el = layerHud.querySelector('.hud-partner');
     if (!el) return;
     // Left column, just under the scoreboard and the camera inset (whatever their height).
@@ -2014,6 +2323,11 @@ export function createUI(root, handlers = {}) {
   /** Achievement toast (top right; any screen). a: { name, es, desc, xp, tier, icon }. */
   function achievement(a) {
     if (!a) return;
+    // During play (clean / standard) a line, not a card; the results screen lists it in full.
+    if (feedMode() && (state.screen === 'play' || state.screen === 'pause')) {
+      pushFeed({ kind: 'achievement', text: `Achievement · ${a.name}`, sub: `+${fmtInt(a.xp || 0)} XP`, tone: 'gold' });
+      return;
+    }
     const t = document.createElement('div');
     t.className = `ach-toast ach-${a.tier || 'bronze'}`;
     t.innerHTML = `<i class="ach-ico">${gs.glyph(a.icon)}</i><span><small>Achievement · Logro</small><b>${esc(a.name)}</b><em>${esc(a.desc || '')}</em></span><strong>+${fmtInt(a.xp || 0)} XP</strong>`;
@@ -2074,6 +2388,10 @@ export function createUI(root, handlers = {}) {
   /** Immediate miss card (the bus event; the HUD tick keeps it while recent). */
   function missCard(m) {
     if (!m) return;
+    if (feedMode()) {
+      missFeed(m);
+      return;
+    }
     const h = state.hud || {};
     timingHud({ text: m.text, es: m.es, reason: m.reason, at: m.at }, h.meter || null);
   }
@@ -2081,6 +2399,8 @@ export function createUI(root, handlers = {}) {
   /** 'now': the moment to swing at a ball off the glass (a short flash under the miss card). */
   function timingCue(kind) {
     if (kind !== 'now') return;
+    // Clean / standard: the approach circle and the voice carry "now" (no flash over the court).
+    if (feedMode()) return;
     const el = layerHud.querySelector('.hud-now');
     if (!el) return;
     el.hidden = false;
@@ -2134,6 +2454,10 @@ export function createUI(root, handlers = {}) {
       points: Number.isFinite(s.points) ? s.points : s.result && Number.isFinite(s.result.points) ? s.result.points : null,
       success: s.success ?? s.inTarget ?? (s.result ? s.result.success ?? s.result.inTarget ?? null : null),
       afterWall: !!s.afterWall,
+      // Round 6: swing power 0..1 (game/timingProfile.js effort), or null.
+      effort: Number.isFinite(s.effort) ? s.effort : null,
+      // Round 6 merge: a timing hit's error (ms, around the player's own moment), or null.
+      timingMs: s.timingHit && Number.isFinite(s.timingHit.e) ? Math.round(s.timingHit.e * 1000) : null,
     };
   }
 
@@ -2181,6 +2505,7 @@ export function createUI(root, handlers = {}) {
     const s = normalizeShot(rec);
     state.hudKeyShot = JSON.stringify([s && s.stroke, s && s.speedKmh, s && s.spinRpm, s && s.netClearance, s && s.quality]);
     renderShotCard(s);
+    if (rec && feedMode() && state.screen === 'play') shotFeed(rec);
   }
 
   // ---- Banner & toast ------------------------------------------------------------
@@ -2191,13 +2516,19 @@ export function createUI(root, handlers = {}) {
     'serve-fault': 'bad', 'own-side': 'bad', 'volleyed-serve': 'bad', ceiling: 'bad',
   };
 
-  function banner(text, kind = 'point', { sub = '', duration = 2300 } = {}) {
+  function banner(text, kind = 'point', { sub = '', duration = 1400 } = {}) {
     clearTimeout(bannerEl._t);
     if (!text) {
       bannerEl.innerHTML = '';
       return;
     }
     const tone = BANNER_KIND[kind] || 'plain';
+    // Clean / standard: brief, in the feedback line at the top (no 5 rem word over the court).
+    if (feedMode() && state.screen === 'play') {
+      bannerEl.innerHTML = '';
+      pushFeed({ kind: 'banner', text, sub, tone: BANNER_TONE[tone] || 'info' });
+      return;
+    }
     bannerEl.innerHTML = `<div class="banner banner-${tone}" data-kind="${esc(kind)}"><span class="bn-line" aria-hidden="true"></span><span class="bn-text">${esc(text)}</span>${sub ? `<span class="bn-sub">${esc(sub)}</span>` : ''}</div>`;
     bannerEl._t = setTimeout(() => {
       const b = bannerEl.firstElementChild;
@@ -2207,6 +2538,12 @@ export function createUI(root, handlers = {}) {
   }
 
   function toast(text, { duration = 3200 } = {}) {
+    // During play (clean / standard) toasts are lines of the feedback queue.
+    // (Not during an instant replay: the HUD is hidden then, the toast stack is not.)
+    if (feedMode() && state.screen === 'play' && text && !root.classList.contains('is-replay')) {
+      pushFeed({ kind: 'info', text: String(text), tone: 'info' });
+      return;
+    }
     const t = document.createElement('div');
     t.className = 'toast';
     t.textContent = text;
@@ -2230,10 +2567,11 @@ export function createUI(root, handlers = {}) {
     el.hidden = false;
     const a = v.angle;
     const sx = Math.sin(a), sy = -Math.cos(a);
-    // Place on an inset ellipse; the bottom edge for balls behind.
-    // Kept above the shot card and inside the side gutters so it never covers HUD blocks.
-    const x = 50 + clamp(sx * 1.4, -1, 1) * 40;
-    const y = Math.min(66, 50 + clamp(sy * 1.4, -1, 1) * 36);
+    // Round 6: on the left / right edge (the side glass), never in the central play region: a ball
+    // behind or beside the player is shown at the side it is on, a third of the way down.
+    const x = 50 + (a >= 0 ? 1 : -1) * 42;
+    const y = clamp(34 + sy * 10, 26, 46);
+    void sx;
     el.style.left = `${x}%`;
     el.style.top = `${y}%`;
     el.querySelector('.bi-arrow').style.transform = `rotate(${a - Math.PI}rad)`;
@@ -2353,7 +2691,7 @@ export function createUI(root, handlers = {}) {
   let lastFrame = 0;
   let lastDraw = 0;
   function needLoop() {
-    return state.screen === 'calibrate' || state.screen === 'camera' || ((state.screen === 'play' || state.screen === 'pause') && state.settings.pip);
+    return state.screen === 'calibrate' || state.screen === 'camera' || state.screen === 'play' || (state.screen === 'pause' && (state.settings.pip || state.pipAuto));
   }
   function ensureLoop() {
     if (!rafId && needLoop()) {
@@ -2373,12 +2711,18 @@ export function createUI(root, handlers = {}) {
       root.querySelectorAll('canvas[data-preview]').forEach((cv) => {
         if (isVisible(cv)) drawPreview(cv);
       });
+      if (state.screen === 'play') syncTracking(now);
       const tag = layerHud.querySelector('.pip .track-dot');
       if (tag) {
         const live = state.skeleton && now - state.skeletonAt < 600;
         tag.dataset.state = live ? 'ok' : state.preview ? 'warn' : 'off';
         setText(layerHud.querySelector('.pip-text'), live ? 'Tracking' : state.preview ? 'No body found' : 'Camera off');
       }
+    }
+    // Clean HUD: the feedback line (hold while the ball comes) and the play-region guard follow every frame.
+    if (state.screen === 'play') {
+      renderFeed();
+      guardRegion();
     }
     if (needLoop()) rafId = requestAnimationFrame(loop);
   }
@@ -2418,6 +2762,39 @@ export function createUI(root, handlers = {}) {
     timingCue,
     // Round 4: arcade / career presentation.
     partnerCall,
+    /**
+     * Round 6: live-play state for the clean HUD (app/wiring.js): { incoming(): the ball is coming to
+     * the player (the feedback line waits), live(): a ball is live (the play-region guard is on) } or null.
+     */
+    bindPlay(b) {
+      playBinding = b && typeof b === 'object' ? b : null;
+      renderFeed();
+      guardRegion();
+    },
+    /** Round 6: the feedback line's current message (tests / screenshots), or null. */
+    get feedLine() {
+      const el = layerHud.querySelector('.hud-feed');
+      if (!el || el.hidden) return null;
+      const pw = el.querySelector('.hf-pow');
+      return { text: el.querySelector('.hf-text').textContent, tags: Array.from(el.querySelectorAll('.hf-tag')).map((t) => t.textContent), sub: el.querySelector('.hf-sub').textContent, kind: el.dataset.kind, power: pw && !pw.hidden ? pw.querySelectorAll('i.on').length : null };
+    },
+    get hudMode() { return hudMode(); },
+    /**
+     * Round 6: screen rects (0..1, y down) of the visible play-HUD blocks — the clean bar's corner
+     * groups and feedback line included — for the 3D zone-label layout (effects.setLabelOccluders).
+     */
+    hudRects() {
+      const W = window.innerWidth || 1, H = window.innerHeight || 1;
+      const out = [];
+      if (layerHud.hidden) return out;
+      for (const el of layerHud.querySelectorAll('.hb-left, .hb-right, .hud-feed, .hud-tl > *, .hud-tr > *, .shotcard, .hud-prompt, .hud-timing, .hud-clock, .hud-partner')) {
+        if (el.hidden || el.closest('[hidden]') || el.classList.contains('in-play-region')) continue;
+        const r = el.getBoundingClientRect();
+        if (r.width < 2 || r.height < 2) continue;
+        out.push([r.left / W, r.top / H, r.right / W, r.bottom / H]);
+      }
+      return out;
+    },
     achievement,
     perfect,
     callout,
@@ -2448,5 +2825,7 @@ export function createUI(root, handlers = {}) {
       root.innerHTML = '';
     },
   };
+  // Test / audit hook (dev pages, tools): the UI API on its root element.
+  root.viboraUi = api;
   return api;
 }

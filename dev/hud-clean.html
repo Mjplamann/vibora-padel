@@ -1,0 +1,82 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark">
+<title>Víbora HUD layouts</title>
+<link rel="stylesheet" href="../styles/app.css">
+<style>
+  /* A play frame stands in for the live 3D court (#scene). */
+  #backdrop { position: fixed; inset: 0; width: 100vw; height: 100vh; display: block; object-fit: cover; }
+  #region { position: fixed; left: 15%; right: 15%; top: 20%; bottom: 0; outline: 2px dashed rgba(255, 80, 80, 0.85); pointer-events: none; z-index: 20; }
+  #region[hidden] { display: none; }
+  #region span { position: absolute; left: 0.4rem; top: 0.3rem; font: 700 12px system-ui; color: rgba(255, 120, 120, 0.95); }
+</style>
+</head>
+<body>
+<img id="backdrop" alt="" src="./ui-assets/bg-play.png">
+<div id="ui"></div>
+<div id="region" hidden><span>central play region (src/ui/playRegion.js)</span></div>
+<script type="module">
+// Round 6 (clarity) harness: the play HUD in each layout with EVERY transient element forced on, over a
+// play frame, so the clean layout can be checked against the central play region without a GPU.
+// dev/hud-clean.html?hud=clean|standard|coach&mode=drill|rally|match|challenge&live=1&incoming=0&union=1&region=1
+//   [&bg=<image path>]   (dev/hud-shots.mjs screenshots it at 1710x876 @2x and 1920x1080)
+import { createUI } from '../src/ui/ui.js';
+import { SHOT, HUD, HUD_RALLY, HUD_MATCH } from './ui-sample.js';
+
+const qs = new URLSearchParams(location.search);
+const hudMode = qs.get('hud') || 'clean';
+const mode = qs.get('mode') || 'drill';
+const live = qs.get('live') !== '0';
+const incoming = qs.get('incoming') === '1';
+if (qs.get('bg')) document.getElementById('backdrop').src = qs.get('bg');
+document.getElementById('region').hidden = qs.get('region') !== '1';
+
+const ui = createUI(document.getElementById('ui'), { onSettings: () => {} });
+ui.settings({ hud: hudMode, pip: qs.get('pip') === '1', skeleton: true, callouts: true });
+const CHALLENGE = { ...HUD, title: 'Por Tres Party', subtitle: 'Arcade · Por tres', repIndex: null, repTotal: null, points: 12450, streak: 6,
+  challenge: { id: 'por-tres-party', timeLeft: 42, duration: 90, combo: 6, mult: 3, lives: 2, maxLives: 3, lastAward: null } };
+const base = mode === 'match' ? { ...HUD_MATCH, rally: 5, score: { ...HUD_MATCH.score, names: [['Víbora', 'Nosotros'], ['Cobra', 'Rivales']] } }
+  : mode === 'rally' ? { ...HUD_RALLY, points: null, rally: 7, bestRally: 12 } : mode === 'challenge' ? CHALLENGE : HUD;
+const h = { ...base, live, prompt: qs.get('prompt') || null };
+ui.show('play', { mode, hud: h });
+if (ui.bindPlay) ui.bindPlay({ live: () => live, incoming: () => incoming });
+ui.hud(h);
+const only = qs.get('only'); // one source: shot | miss | perfect | achievement | toast | banner
+// Swing power of the sample shot (ShotRecord.effort 0..1; &effort=none for a record without one).
+const effort = qs.get('effort') === 'none' ? undefined : Number(qs.get('effort') ?? 0.9);
+if (only) {
+  const now = 41.2;
+  if (only === 'shot') { ui.shotCard({ ...SHOT, effort, result: { points: 120, notes: [] }, notes: [] }); ui.perfect(3); }
+  if (only === 'card') ui.shotCard({ ...SHOT, result: { points: 120, notes: [] }, notes: [] });
+  if (only === 'miss') ui.missCard({ reason: 'early', text: 'Swing was 0.42 s early', es: 'Golpeaste 0,42 s pronto', at: now });
+  if (only === 'achievement') ui.achievement({ name: 'Hot streak', desc: 'Five perfect hits in a row', xp: 50, tier: 'silver', icon: 'flame' });
+  if (only === 'toast') ui.toast('Forehand drive: turn early, meet the ball in front of your hip, aim deep cross-court');
+  if (only === 'prompt') ui.hud({ ...h, prompt: 'Head out of view · step back or raise the camera' });
+} else if (qs.get('union') !== '0') {
+  const now = 41.2;
+  ui.shotCard({ ...SHOT, effort, result: { points: 120, notes: SHOT.notes } });
+  ui.perfect(3);
+  ui.missCard({ reason: 'early', text: 'Swing was 0.42 s early', es: 'Golpeaste 0,42 s pronto', at: now });
+  ui.partnerCall({ who: 'Lucía', text: '¡Mía!', en: 'Mine!', kind: 'mine' });
+  ui.achievement({ name: 'Hot streak', desc: 'Five perfect hits in a row', xp: 50, tier: 'silver', icon: 'flame' });
+  ui.toast('Forehand drive: turn early, meet the ball in front of your hip');
+  ui.banner('¡Por tres!', 'por-tres');
+  ui.timingCue('now');
+  ui.callout('Combo ×3', '6 seguidas', 'combo');
+  ui.hud({ ...h, miss: { reason: 'early', text: 'Swing was 0.42 s early', es: 'Golpeaste 0,42 s pronto', at: now }, meter: { e: -0.42, early: 0.32, late: 0.35, hit: false, label: 'Early 420 ms', at: now }, banner: { text: '¡Por tres!', kind: 'por-tres' } });
+}
+// Freeze the UI's time for the capture (no expiry, no animations).
+const st = document.createElement('style');
+st.textContent = '.vp *, .vp *::before, .vp *::after { animation: none !important; transition: none !important; }';
+document.head.appendChild(st);
+const tFreeze = performance.now();
+performance.now = () => tFreeze;
+window.__hudReady = true;
+window.__ui = ui;
+window.__feedLine = () => (ui.feedLine === undefined ? null : ui.feedLine);
+</script>
+</body>
+</html>

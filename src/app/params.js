@@ -13,8 +13,9 @@
 //   ?seed=N             RNG seed for the session
 //   ?aplatency=<s>      display latency the autopilot plays with (default 0: it sees the true ball)
 //   ?apdelivery=<s>     capture -> pose result delay of the autopilot's synthetic camera (default 0.045)
-//   ?approfile=human|precise  how the autopilot plays (tracking/autopilot.js HUMAN_PROFILE: timing
-//                       σ 90 ms, racket position error, partial steps, 5% no-swing); default precise
+//   ?approfile=human|precise|user1  how the autopilot plays (tracking/autopilot.js HUMAN_PROFILE: timing
+//                       σ 90 ms, racket position error, partial steps, 5% no-swing; USER1_PROFILE: fitted
+//                       to a real MacBook Air session, use with ?apclose=1); default precise
 //   ?apjitter=<s>       extra random capture -> result delay (uniform 0..apjitter) of a 30 fps
 //                       webcam-like feed (app/game.js installRealisticFeed)
 //   ?apnoise=<k>        landmark noise of that feed (1 = a MacBook camera at ~2.5 m)
@@ -32,7 +33,7 @@
 
 const QUALITIES = ['ultra', 'high', 'balanced'];
 const LEVELS = ['rookie', 'club', 'pro'];
-const AP_PROFILES = ['precise', 'human'];
+const AP_PROFILES = ['precise', 'human', 'user1'];
 const VENUES = ['club', 'sunset', 'stadium'];
 
 function num(v, lo, hi, fallback = null) {

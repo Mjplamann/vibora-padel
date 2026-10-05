@@ -1118,6 +1118,8 @@ export function createBodyTracker({
   const tilt = createTiltEstimator();
   const _geo = {}, _geo2 = {};
   const armRef = { L: createArmRef(), R: createArmRef() };
+  // Round 6: whether each hand was beyond the picture this frame (rebuilt or a guess at the edge).
+  const handOut = { L: false, R: false };
 
   const rawJ = {};
   let modelH = null; // smoothed model nose->ankle height
@@ -1376,6 +1378,7 @@ export function createBodyTracker({
       lm[c.wr].visibility = Math.max(lm[c.wr].visibility, ARM_OUT.vis);
       for (const i of c.hand) lm[i].visibility = Math.max(lm[i].visibility, ARM_OUT.vis);
       stats.armRebuilt++;
+      handOut[side] = true;
     }
   }
 
@@ -1586,7 +1589,14 @@ export function createBodyTracker({
     // followed with OCCLUDED_TRUST of the usual smoothing factor. A hand that is merely out of the
     // picture (overheads) is extrapolated plausibly and keeps full trust.
     // Arm landmarks beyond the frame are the detector's guesses: rebuilt from the arm last seen.
+    handOut.L = handOut.R = false;
     rebuildArms(lm, wl, t);
+    // A hand beyond the picture (or a low-confidence guess at its edge) is not seen: its motion is
+    // not to be read as a swing (swingAssist.js re-entry rule).
+    for (const side of SIDES2) {
+      const wr = lm[ARM_CHAIN[side].wr];
+      if (!inPicture(wr, ARM_OUT.margin) || (!inPicture(wr, 0.02) && vis(wr) < ARM_OUT.maxVis)) handOut[side] = true;
+    }
     toUserFrame(wl, scale, hipH, rawJ);
     // Close mode: MediaPipe's guessed legs give way to a plausible standing / crouching pose.
     if (wF < 1) synthLegs(rawJ, opts.userHeight / PLAYER.defaultHeight, 1 - wF, lm);
@@ -1663,6 +1673,8 @@ export function createBodyTracker({
       camHeight: close.camH,
       tiltDeg: tilt.value / DEG,
       // Visibility of each hand (wrist, index, pinky; 0..1): a blurred or hidden hand is a guess.
+      // Round 6: the hand was out of the picture this frame (arm rebuilt / edge guess).
+      handOut: { L: handOut.L, R: handOut.R },
       handVis: {
         L: Math.min(vis(lm[15]), vis(lm[17]), vis(lm[19])),
         R: Math.min(vis(lm[16]), vis(lm[18]), vis(lm[20])),

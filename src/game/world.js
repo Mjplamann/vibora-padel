@@ -22,7 +22,8 @@ import { createBallHistory } from '../physics/history.js';
 import { predict, solveShot, netClearance, firstBounce } from '../physics/predict.js';
 import { racketImpact, blendTowardIntent, spinComponents } from '../physics/racket.js';
 import { classifyStroke, contactQuality, relabelByTrajectory } from '../tracking/swing.js';
-import { createTimingState, timingAnalysis, judgeHoldOf } from './swingAssist.js';
+import { createTimingState, timingAnalysis, judgeHoldOf, profileOf } from './swingAssist.js';
+import { effortKind } from './timingProfile.js';
 
 const R = BALL.radius;
 const UP = new Vec3(0, 1, 0);
@@ -716,7 +717,29 @@ function strikeAnalysis(world, ball, contact, poseAtContact, contactTime, extra,
   const launchDeg = (Math.atan2(v.y, Math.hypot(v.x, v.z)) * 180) / Math.PI;
   const stroke = relabelByTrajectory(pathStroke, { apex: ff.apex, launchDeg, speed: v.length() }, groundStroke);
   const q = contactQuality({ contactU, handed, stroke, height: s.height });
-  return { info, stroke, pathStroke, q, ctx, isServe, contactPos, contactU, speedIn, physVel, intent, lift };
+  // Effort (round 6): the racket speed against the player's own swings (game/timingProfile.js).
+  const prof = profileOf(world);
+  const fam = STROKE_EFFORT_FAMILY[stroke] || 'fh';
+  const effort = prof && Number.isFinite(info.racketSpeed) ? prof.effort(effortKind(fam, isServe), info.racketSpeed) : null;
+  return { info, stroke, pathStroke, q, ctx, isServe, contactPos, contactU, speedIn, physVel, intent, lift, effort };
+}
+
+/** Stroke label -> swing family for the effort of a physical hit. */
+const STROKE_EFFORT_FAMILY = Object.freeze({
+  'volley-fh': 'vfh', 'volley-bh': 'vbh', bandeja: 'oh', vibora: 'oh', smash: 'sm', serve: 'serve',
+});
+
+/**
+ * Presentation event of a player stroke (round 6): 'player:hit' { shot, effort 0..1, kmh, stroke,
+ * provisional, confirms } next to 'ball:hit', so audio and effects can scale with the swing
+ * (louder pock, brighter trail, a camera kick on top-effort shots). A confirming shot carries
+ * `confirms` (its strike already played).
+ */
+function emitPlayerHit(world, shot) {
+  emitView(world, 'player:hit', {
+    shot, effort: Number.isFinite(shot.effort) ? shot.effort : null, kmh: Math.round(shot.speedOut * 3.6), stroke: shot.stroke,
+    provisional: !!shot.provisional, confirms: shot.confirms ?? null,
+  });
 }
 
 function makePlayerShot(world, a, ball, fl, contactTime, extra, id) {
@@ -759,6 +782,8 @@ function makePlayerShot(world, a, ball, fl, contactTime, extra, id) {
     swing: extra.swing || null,
     // Timing hit (swingAssist.js): timing error, swing speed / path, quality, shot type, aim.
     timingHit: a.timing || null,
+    // Round 6: how hard the player swung for them (0..1, game/timingProfile.js), or null.
+    effort: Number.isFinite(a.effort) ? Math.round(a.effort * 1000) / 1000 : null,
   };
 }
 
@@ -853,6 +878,7 @@ export function applyPlayerHit(world, contact, poseAtContact, contactTime, extra
   world.shots.push(shot);
   queueJudge(world, { kind: 'hit', t: contactTime, team: 0, by: 'player', isServe: a.isServe, volley: shot.volley, shot });
   emit(world, 'ball:hit', { shot });
+  emitPlayerHit(world, shot);
 
   // Re-simulate to the present; the new events keep their real times. After a confirmed
   // prediction the shown (speculative) ball has already played this stretch.
@@ -931,6 +957,7 @@ export function applySpeculativeHit(world, contact, poseAtContact, t, extra = {}
   world.viewCorrection = { seq: ++correctionSeq, kind: 'strike', ballId: ball.id, contactT: t, at: world.time, contact: a.contactPos, pose };
   world.specStats.strikes++;
   emitView(world, 'ball:hit', { shot });
+  emitPlayerHit(world, shot);
   for (const e of evs) announceSpecEvent(world, e);
   return shot;
 }

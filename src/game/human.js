@@ -39,6 +39,26 @@ export const CONTACT_OFFSETS = Object.freeze({
   sm: Object.freeze({ x: 0.24, z: 0.45, turn: 0 }), // smash: further in front, hit down through the ball
 });
 
+/**
+ * Ideal contact of a TIMING hit (round 6), relative to the hip centre in U as CONTACT_OFFSETS.
+ * The second real session swung 0.3-0.8 s early: at the hip-line contact (0.34 m in front) a
+ * waist-high ball sat at or below the bottom of a 74° first-person view, so the player lost it
+ * right before contact and swung at the last place they saw it. Players meet the ball out in
+ * front, where they can see it: ~0.55-0.7 m in front of the hips (0.7-0.85 m in front of the
+ * drawn eye), still within the reach of the arm and racket (shoulder -> sweet spot <= 0.8 m with
+ * a slight knee bend; tracking/autopilot.js RHO_MAX). The timing plan (swingAssist.js) places the
+ * player so the ball reaches this point at t*; the ball is struck wherever it really is at the
+ * contact time. Physical hitting (Pro) keeps CONTACT_OFFSETS.
+ */
+export const TIMING_CONTACT_OFFSETS = Object.freeze({
+  fh: Object.freeze({ x: 0.6, z: 0.56, turn: 0 }),
+  bh: Object.freeze({ x: -0.45, z: 0.58, turn: -45 }),
+  vfh: Object.freeze({ x: 0.55, z: 0.68, turn: 0 }),
+  vbh: Object.freeze({ x: -0.42, z: 0.68, turn: -35 }),
+  oh: Object.freeze({ x: 0.3, z: 0.4, turn: 0 }),
+  sm: Object.freeze({ x: 0.24, z: 0.5, turn: 0 }),
+});
+
 /** Stroke family for a contact: 'fh'|'bh'|'vfh'|'vbh'|'oh'. */
 export function contactFamily(contact, kind, playerPos, handed = 'right', height = REF_HEIGHT) {
   const k = height / REF_HEIGHT;
@@ -54,9 +74,12 @@ export function contactFamily(contact, kind, playerPos, handed = 'right', height
   return db + 0.45 < df ? bh : fh;
 }
 
-/** Court position (feet) that puts `contact` at the ideal contact point of `family`. */
-export function idealStance(contact, family, handed = 'right', height = REF_HEIGHT) {
-  const off = CONTACT_OFFSETS[family] || CONTACT_OFFSETS.fh;
+/**
+ * Court position (feet) that puts `contact` at the ideal contact point of `family`
+ * (offsets: CONTACT_OFFSETS for physical hitting, TIMING_CONTACT_OFFSETS for timing hits).
+ */
+export function idealStance(contact, family, handed = 'right', height = REF_HEIGHT, offsets = CONTACT_OFFSETS) {
+  const off = offsets[family] || offsets.fh;
   const k = height / REF_HEIGHT;
   const dom = handed === 'left' ? -1 : 1;
   return { x: contact.x - dom * off.x * k, z: contact.z + off.z * k };
@@ -312,6 +335,7 @@ export function createHumanController({ settings = {} } = {}) {
     uToCourt(hf.grip, pp.x, pp.z, pose.grip);
     uDirToCourt(hf.axis, pose.axis);
     uDirToCourt(hf.normal, pose.normal);
+    pose.hidden = !!(sample.handOut && sample.handOut[sample.dominant]);
     racketTrack.push(simT, pose);
     view.onSample(sample, simT);
     if (timingConfig(world)) {
@@ -730,6 +754,8 @@ export function createHumanController({ settings = {} } = {}) {
     },
     /** The render-rate racket / arm view (swingView.js): stats, shown speed. */
     view,
+    /** The timing judge (swingAssist.js createTimingJudge): its swing watch, for tests and diagnostics. */
+    timingJudge: judge,
   };
 }
 
